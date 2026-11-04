@@ -4,6 +4,9 @@
 //!
 //! The result is JSON. Exit status is 0 if every solve converged, 1 if one didn't, 2 on bad input.
 
+// Grid loops index several arrays by the same cell number, which reads better than zipped iterators.
+#![allow(clippy::needless_range_loop)]
+
 mod model;
 mod solve;
 

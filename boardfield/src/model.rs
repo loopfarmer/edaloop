@@ -932,7 +932,7 @@ pub fn run(p: &Problem, backend: Backend, gpu: Option<&Gpu>) -> Result<Outcome, 
     let s = last_stencil.ok_or("nothing solved")?;
     let plane = s.nx * s.ny;
     let per = p.settings.sublayers + 1;
-    let copper_sheet = |c: usize| (c / plane) % per == 0;
+    let copper_sheet = |c: usize| (c / plane).is_multiple_of(per);
     let (mut hot, mut hot_c) = (f32::NEG_INFINITY, 0usize);
     for (c, v) in x_t.iter().enumerate() {
         if copper_sheet(c) && *v > hot {

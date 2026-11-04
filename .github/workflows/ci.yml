@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: edaloop (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest version pyproject.toml allows, and a current one.
+        python: ["3.11", "3.13"]
+    defaults:
+      run:
+        working-directory: edaloop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: edaloop/uv.lock
+      # The tests need no KiCad or solvers, and skip what they can't reach.
+      - run: uv sync --extra dev --locked --python ${{ matrix.python }}
+      - run: uv run pytest -ra
+
+  rust:
+    name: ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [boardhand, boardfield]
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      # boardfield's tests run its CPU backend, so they need no GPU.
+      - run: cargo test --locked
+      - run: cargo build --release --locked
