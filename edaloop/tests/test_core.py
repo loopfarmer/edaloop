@@ -1746,3 +1746,58 @@ def test_a_baseline_in_the_old_place_moves_without_counting_as_changed(tmp_path)
     ev = checks.run_check(p, "rf_preserved")
     assert ev.status == "pass", ev.findings
     assert (tmp_path / "rf_baseline.json").read_bytes() == old.read_bytes()
+
+
+# ---------------------------------------------------------------- exports
+
+def _export_eagle(monkeypatch):
+    """export_eagle runs under KiCad's Python. A stand-in pcbnew lets its pure parts be tested anywhere."""
+    import importlib.util
+    import sys
+    import types
+    class Pcbnew(types.ModuleType):
+        def __getattr__(self, name):           # layer ids and other constants: any distinct number will do
+            return hash(name) % 1000
+
+    fake = Pcbnew("pcbnew")
+    fake.ToMM = lambda v: v / 1e6
+    monkeypatch.setitem(sys.modules, "pcbnew", fake)
+    path = Path(checks.__file__).with_name("export_eagle.py")
+    spec = importlib.util.spec_from_file_location("export_eagle_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_eagle_export_reads_the_boards_clearance(monkeypatch):
+    ee = _export_eagle(monkeypatch)
+
+    class NetClass:
+        def GetClearance(self):
+            return 150_000                     # nm
+
+    class Settings:
+        class m_NetSettings:
+            @staticmethod
+            def GetDefaultNetclass():
+                return NetClass()
+
+    class Board:
+        def GetDesignSettings(self):
+            return Settings()
+
+    report = {}
+    assert ee.clearance_mm(Board(), report) == pytest.approx(0.15)
+    assert report == {}
+
+
+def test_eagle_export_marks_an_assumed_clearance(monkeypatch):
+    ee = _export_eagle(monkeypatch)
+
+    class Board:
+        def GetDesignSettings(self):
+            return object()                    # no route to a clearance
+
+    report = {}
+    assert ee.clearance_mm(Board(), report) == ee.ASSUMED_CLEARANCE_MM
+    assert any(k.startswith("ASSUMED") for k in report)

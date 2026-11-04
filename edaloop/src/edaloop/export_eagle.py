@@ -381,12 +381,26 @@ def write(root, path):
         fh.write("\n")
 
 
-def clearance_mm(board):
-    try:
-        return mm(board.GetDesignSettings().m_NetSettings
-                  .GetDefaultNetclass().GetClearance())
-    except Exception:                                   # noqa: BLE001
-        return 0.2
+ASSUMED_CLEARANCE_MM = 0.2
+
+
+def clearance_mm(board, report):
+    """The default net class's clearance, which the EAGLE design rules carry.
+
+    If no KiCad version's route to it works, 0.2 mm is written and the export
+    fails, so that an assumed rule never reaches a fabricator unmarked.
+    """
+    ds = board.GetDesignSettings()
+    routes = (lambda: ds.m_NetSettings.GetDefaultNetclass().GetClearance(),
+              lambda: ds.m_NetSettings.m_DefaultNetClass.GetClearance(),
+              lambda: ds.GetDefault().GetClearance())
+    for route in routes:
+        try:
+            return mm(route())
+        except Exception:                               # noqa: BLE001 - try the next KiCad version's API
+            continue
+    report["ASSUMED design-rule clearance mm (board's unreadable)"] = ASSUMED_CLEARANCE_MM
+    return ASSUMED_CLEARANCE_MM
 
 
 # ------------------------------------------------------------- board
@@ -547,7 +561,7 @@ def build(src, bd, report):
     ET.SubElement(board, "variantdefs")
     classes = ET.SubElement(board, "classes")
     ET.SubElement(classes, "class", number="0", name="default", width="0", drill="0")
-    clr = clearance_mm(b)
+    clr = clearance_mm(b, report)
     rules = ET.SubElement(board, "designrules", name=lib)
     for k, v in (("layerSetup", "(1+2*15+16)"),
                  ("mdWireWire", "%smm" % f(clr)), ("mdWirePad", "%smm" % f(clr)),
@@ -1065,6 +1079,8 @@ def export(src, bd, dst, schematic_path=None):
     fails = []
     if report["self-check worst pad error um"] > 1.0:
         fails.append("self-check")
+    if "ASSUMED design-rule clearance mm (board's unreadable)" in report:
+        fails.append("clearance")
     for path in (brd, sch):
         ok, errs = dtd_ok(path)
         print("   DTD %-44s %s" % (os.path.basename(path), "valid" if ok else "INVALID"))

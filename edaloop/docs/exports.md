@@ -25,5 +25,6 @@ It writes into an `export` folder in the project, one folder per format. The com
 - **EAGLE export handles four-layer boards only.** A board with another layer count is refused.
 - **EAGLE carries less than KiCad.** Pours are outlines that the importer refills. Courtyards aren't carried, and inner-layer keepouts become pour cutouts. A pad corner EAGLE can't express is listed in the report.
 - **`xmllint` is needed for the DTD check.** Without it, the EAGLE export reports a failure.
+- **EAGLE design rules take one clearance, the default net class's.** If the board's clearance can't be read, 0.2 mm is written, the report marks it as assumed, and the export fails.
 
 `data/eagle-7.7.0.dtd` is CadSoft's DTD, unmodified, under CC BY-ND 3.0. Everything else here is under this repository's licence.
