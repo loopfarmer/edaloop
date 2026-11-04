@@ -19,9 +19,10 @@ from edaloop import ground
 from edaloop.pcbfile import Board
 
 OUT = Path(__file__).parent
-INK, MUTED, LINE, PAPER, TINT = "#1f2933", "#5f6b7a", "#c5ccd6", "#ffffff", "#f3f5f8"
-RF, POWER, SIGNAL, GROUND, PART = "#c8324a", "#b7791f", "#1f6f8b", "#2f855a", "#8a94a3"
-GOOD, WARN, BAD = "#2f855a", "#b7791f", "#c8324a"
+INK, MUTED, LINE, PAPER, TINT = "#e6edf3", "#a3aeba", "#3d444d", "#0d1117", "#161b22"
+RF, POWER, SIGNAL, GROUND, PART = "#ff7b8e", "#e3b341", "#58a6ff", "#4cc76a", "#8b949e"
+GOOD, WARN, BAD = "#4cc76a", "#e3b341", "#ff7b8e"
+BLUE_BOX, GREEN_BOX, AMBER_BOX, RED_BOX = "#12263a", "#12261b", "#2b2110", "#2d1519"
 FONT = "font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif'"
 
 
@@ -59,15 +60,15 @@ def data_flow() -> str:
     b += box(30, 80, 180, 66, "Written description", ["parts, nets, RF path (YAML)"])
     b += box(30, 170, 180, 66, "Existing schematic", ["edaloop describe"])
     b += box(280, 125, 150, 66, "edaloop build", ["places and draws"])
-    b += box(500, 110, 170, 96, "KiCad project", ["board and schematic", "edaloop.yaml", "chain spec"], "#eaf2f8", SIGNAL)
+    b += box(500, 110, 170, 96, "KiCad project", ["board and schematic", "edaloop.yaml", "chain spec"], BLUE_BOX, SIGNAL)
     b += box(730, 110, 150, 96, "Routers", ["work on copies", "adopted only if RF", "copper holds"])
     b += box(500, 280, 170, 80, "Checks", ["one authority", "for each question"])
     b += box(730, 280, 150, 80, "Tools", ["KiCad, circuitRF,", "ngspice, EM solvers"])
-    b += box(280, 280, 150, 80, "Evidence ledger", ["result + input hashes"], "#eef7f1", GROUND)
+    b += box(280, 280, 150, 80, "Evidence ledger", ["result + input hashes"], GREEN_BOX, GROUND)
     b += box(280, 430, 150, 80, "Gate", ["still the same bytes?", "all checks hold?"])
     b += box(500, 430, 170, 80, "next_action", ["says what to fix or run", "agent or person acts"])
-    b += box(730, 430, 150, 80, "Release", ["fab files, only if", "the gate holds"], "#eef7f1", GROUND)
-    b += box(30, 430, 180, 80, "A person", ["owns requirements", "and named waivers"], "#fdf6e7", WARN)
+    b += box(730, 430, 150, 80, "Release", ["fab files, only if", "the gate holds"], GREEN_BOX, GROUND)
+    b += box(30, 430, 180, 80, "A person", ["owns requirements", "and named waivers"], AMBER_BOX, WARN)
     b += arrow([(210, 113), (250, 113), (250, 150), (278, 150)]) + arrow([(210, 203), (250, 203), (250, 166), (278, 166)])
     b += arrow([(430, 158), (498, 158)])
     b += arrow([(670, 142), (728, 142)], "copy", (699, 134))
@@ -106,7 +107,7 @@ def stage_sequence() -> str:
     b += text(30, 54, "Run edaloop stage NAME to check a stage before moving on. edaloop next names whatever needs doing.", 13, MUTED)
     for pos, head in zip(x, ("Stage", "Command", "Tool", "Writes", "Checked by")):
         b += text(pos, top - 10, head, 12, MUTED, "start", "600")
-    groups = {0: "#fdf6e7", 1: "#eaf2f8", 2: "#eaf2f8", 3: "#fbeff1", 4: "#fbeff1", 5: "#fbeff1", 6: "#eaf2f8", 7: "#eef7f1", 8: "#eef7f1", 9: "#eef7f1", 10: "#fdf6e7"}
+    groups = {0: AMBER_BOX, 1: BLUE_BOX, 2: BLUE_BOX, 3: RED_BOX, 4: RED_BOX, 5: RED_BOX, 6: BLUE_BOX, 7: GREEN_BOX, 8: GREEN_BOX, 9: GREEN_BOX, 10: AMBER_BOX}
     for i, (stage, command, tool, writes, sensors) in enumerate(STAGES):
         y = top + i * row
         b += f"<rect x='30' y='{y}' width='1040' height='{row - 4}' rx='5' fill='{groups[i]}'/>"
@@ -134,7 +135,7 @@ def board_figure(path: Path, title: str, note: str, chain_nets: set, rail_nets: 
     py = lambda v: oy + (v - y1) * scale
     width, height = (x2 - x1) * scale, (y2 - y1) * scale
     b = text(26, 30, title, 17, INK, "start", "600") + text(26, 52, note, 13, MUTED)
-    b += f"<rect x='{ox}' y='{oy}' width='{width:.1f}' height='{height:.1f}' fill='#f7f8fa' stroke='{INK}' stroke-width='1.2'/>"
+    b += f"<rect x='{ox}' y='{oy}' width='{width:.1f}' height='{height:.1f}' fill='{TINT}' stroke='{MUTED}' stroke-width='1.2'/>"
     for pad in facts["pads"]:
         colour = RF if pad["net"] in chain_nets else GROUND if pad["net"] == "GND" else PART
         w, h = pad["w"] * scale, pad["h"] * scale
@@ -173,7 +174,7 @@ def describe_figure(bench: dict) -> str:
     w, gap, x = 94, 22, 26
     for i, ref in enumerate(refs):
         value = str((parts.get(ref) or {}).get("value", ""))
-        b += box(x + i * (w + gap), 76, w, 62, ref, [value.split(" and")[0][:13]], "#fbeff1" if ref[0] in "JU" else TINT)
+        b += box(x + i * (w + gap), 76, w, 62, ref, [value.split(" and")[0][:13]], RED_BOX if ref[0] in "JU" else TINT)
         if i < len(refs) - 1:
             b += arrow([(x + i * (w + gap) + w, 107), (x + (i + 1) * (w + gap) - 2, 107)])
     b += text(26, 170, "From testbenches/gain_block_demo.yaml", 12, MUTED, "start", "600")
