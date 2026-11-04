@@ -1751,7 +1751,11 @@ def test_a_baseline_in_the_old_place_moves_without_counting_as_changed(tmp_path)
 # ---------------------------------------------------------------- exports
 
 def _export_eagle(monkeypatch):
-    """export_eagle runs under KiCad's Python. A stand-in pcbnew lets its pure parts be tested anywhere."""
+    return _under_kicad_python(monkeypatch, "export_eagle")
+
+
+def _under_kicad_python(monkeypatch, name):
+    """Scripts that run under KiCad's Python import pcbnew. A stand-in lets their pure parts be tested anywhere."""
     import importlib.util
     import sys
     import types
@@ -1762,8 +1766,9 @@ def _export_eagle(monkeypatch):
     fake = Pcbnew("pcbnew")
     fake.ToMM = lambda v: v / 1e6
     monkeypatch.setitem(sys.modules, "pcbnew", fake)
-    path = Path(checks.__file__).with_name("export_eagle.py")
-    spec = importlib.util.spec_from_file_location("export_eagle_under_test", path)
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
+    path = Path(checks.__file__).with_name(f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"{name}_under_test", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -1801,3 +1806,48 @@ def test_eagle_export_marks_an_assumed_clearance(monkeypatch):
     report = {}
     assert ee.clearance_mm(Board(), report) == ee.ASSUMED_CLEARANCE_MM
     assert any(k.startswith("ASSUMED") for k in report)
+
+
+SCH_V10 = """(kicad_sch (version 20260306) (generator "eeschema") (generator_version "10.0")
+ (uuid "aaaa-root") (paper "A4")
+ (lib_symbols)
+ (symbol (lib_id "Device:R") (at 10 10 0) (unit 1) (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)
+  (fields_autoplaced yes)
+  (uuid "bbbb-r1")
+  (property "Reference" "R1" (at 10 8 0) (effects (font (size 1.27 1.27))))
+  (property "Value" "49.9" (at 10 12 0) (effects (font (size 1.27 1.27))))
+  (property "Footprint" "R_0402" (at 10 12 0) (hide yes) (effects (font (size 1.27 1.27))))
+  (property "MPN" "RC0402" (at 10 12 0) (effects (font (size 1.27 1.27)) (hide yes)))
+  (instances (project "demo" (path "/aaaa-root" (reference "R1") (unit 1))))))
+"""
+
+
+def test_kicad6_schematic_moves_instances_and_speaks_only_6_0(tmp_path):
+    from edaloop import export_kicad6 as k6
+    src, out = tmp_path / "new.kicad_sch", tmp_path / "old.kicad_sch"
+    src.write_text(SCH_V10)
+    k6.convert_sch(str(src), str(out), k6.root_uuid_of(str(src)))
+    text = out.read_text()
+    assert k6.conformance(str(out)) == {}                         # no token 6.0 never had
+    assert "(version 20211123)" in text and "(uuid bbbb-r1)" in text and "(generator eeschema)" in text
+    node, _ = k6.read(text)
+    # The instance moves to the end, keyed by the SYMBOL's path, without the root sheet.
+    rows = k6.kids(k6.kid(node, "symbol_instances"), "path")
+    assert [str(r[1]) for r in rows] == ["/bbbb-r1"]
+    assert str(k6.kid(rows[0], "reference")[1]) == "R1" and str(k6.kid(rows[0], "footprint")[1]) == "R_0402"
+    sym = k6.kid(node, "symbol")
+    assert k6.kid(sym, "instances") is None
+    props = {str(p[1]): p for p in k6.kids(sym, "property")}
+    assert [str(k6.kid(props[n], "id")[1]) for n in ("Reference", "Value", "Footprint")] == ["0", "1", "2"]
+    # hide is a bare flag inside effects, wherever 10.0 put it.
+    for name in ("Footprint", "MPN"):
+        assert "hide" in [str(x) for x in k6.kid(props[name], "effects")]
+        assert k6.kid(props[name], "hide") is None
+    assert "(fields_autoplaced)" in text and "(fields_autoplaced yes)" not in text
+
+
+@pytest.mark.parametrize("value, farads", [("100n", 100e-9), ("100nF", 100e-9), ("100n 50V", 100e-9), ("4u7", 4.7e-6),
+                                           ("1\u00b5F", 1e-6), ("2.2uF", 2.2e-6), ("10p", 10e-12), ("DNP", 1e9)])
+def test_bypass_capacitor_values_are_read_as_written(monkeypatch, value, farads):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+    assert ops._farads(value) == pytest.approx(farads)
