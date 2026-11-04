@@ -6,8 +6,21 @@ use serde_json::Value;
 
 pub const SHA256_PATTERN: &str = "^[0-9a-f]{64}$";
 pub const KEYWORDS: &[&str] = &[
-    "type", "required", "properties", "additionalProperties", "items", "minimum", "maximum",
-    "minLength", "maxLength", "minItems", "maxItems", "enum", "anyOf", "pattern", "default",
+    "type",
+    "required",
+    "properties",
+    "additionalProperties",
+    "items",
+    "minimum",
+    "maximum",
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "enum",
+    "anyOf",
+    "pattern",
+    "default",
     "description",
 ];
 

@@ -44,7 +44,10 @@ fn die_midway(s: &Setup) -> String {
     let mut m = Mcp::start(&s.dir, &[("BOARDHAND_TEST_KILL_AFTER_FILES", "1")]);
     m.initialize();
     m.load(json!("board_edit"));
-    m.send_raw(&json!({"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": {"name": "transaction_apply", "arguments": args(s)}}).to_string());
+    m.send_raw(
+        &json!({"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": {"name": "transaction_apply", "arguments": args(s)}})
+            .to_string(),
+    );
     let status = m.child.wait().unwrap();
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(status.signal(), Some(libc_sigkill()), "the server should have been killed");

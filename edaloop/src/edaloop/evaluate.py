@@ -6,7 +6,6 @@ board or can't handle it) or `info` (a reading with nothing known to hold it aga
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import shutil
@@ -18,7 +17,8 @@ from pathlib import Path
 
 import yaml
 
-from . import boardgen, checks, describe as described, route_classes, toolchain
+from . import boardgen, checks, toolchain
+from . import describe as described
 from .pcbfile import Board, parse_sexpr
 
 CACHE = Path.home() / ".cache" / "edaloop" / "evaluation"
@@ -361,7 +361,7 @@ def regenerate(sample: dict, board: Path, d: dict | None, eagle: dict, out: Path
     new = out / "generated" / f"{name}.kicad_pcb"
     c = comparing.compare(new, board, [row[0] for row in d["chain"]])
     drc = made["steps"]["route"].get("final_drc") or {}
-    a, b, delta = c["first_board"], c["second_board"], c["difference"]
+    a, b = c["first_board"], c["second_board"]
     return [_row("regen.connects", drc.get("opens") == 0 and drc.get("errors") == 0 and c["same_connections"],
                  f"{drc.get('opens')} opens, {drc.get('errors')} errors, and {'the same' if c['same_connections'] else 'different'} connections as the released board"),
             _row("regen.size", None, f"{a['size_mm']} mm, released {b['size_mm']} mm"),
@@ -391,7 +391,7 @@ def evaluate_one(key: str, sample: dict, work: Path, level: str) -> dict:
             result["rows"] += checks_score(sample, out, chain)
         if level == "regenerate":
             result["rows"] += regenerate(sample, board, d, eagle, out, name)
-    except Exception as e:      # a sample that breaks edaloop is exactly what this is for, and mustn't stop the others
+    except Exception as e:  # noqa: BLE001 - a sample that breaks edaloop is exactly what this is for, and mustn't stop the others
         result["rows"].append(_row("crash", False, f"{type(e).__name__}: {e}"[:400]))
     return result
 

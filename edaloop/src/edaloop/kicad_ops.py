@@ -23,9 +23,8 @@ import math
 import os
 import sys
 
-import pcbnew
-
 import channel_groups
+import pcbnew
 
 
 def export_dsn(src, dst, dsn, keep_nets="GND", scope="unlocked"):
@@ -151,7 +150,12 @@ SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3}
 def _farads(value):
     """A capacitor's value for ordering, smallest first. Anything unreadable sorts last."""
     import re
-    m = re.match(r"\s*([\d.]+)\s*([pnum])?", str(value))
+    text = str(value).strip().replace("\u00b5", "u").replace("\u03bc", "u")
+    # 4u7 is 4.7 uF: the multiplier letter stands in for the decimal point.
+    m = re.match(r"(\d+)([pnum])(\d+)", text)
+    if m:
+        return float(m.group(1) + "." + m.group(3)) * SI[m.group(2)]
+    m = re.match(r"([\d.]+)\s*([pnum])?", text)
     return float(m.group(1)) * SI.get(m.group(2) or "", 1.0) if m else 1e9
 
 
@@ -206,7 +210,7 @@ def _derive_layout(fps, spec):
                 taps[ref] = (net, pin)
     # Rail pairs: which anchor pad carries which capacitors.
     anchors = {}                                        # rail net -> anchor pins, feed first
-    for net, entry, leave in reversed(chain):
+    for net, _entry, _leave in reversed(chain):
         for ref, (tap_net, pin) in taps.items():
             if tap_net == net:
                 far = next((p for p in pins[ref] if p != pin), None)

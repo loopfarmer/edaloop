@@ -170,7 +170,8 @@ pub fn read_board(args: &Value) -> Result<(String, Board, String), Reply> {
     }
     let bytes = fs::read(raw).map_err(|e| Reply::refused(Source::File, "file_not_found", format!("{raw}: {e}.")).target(raw))?;
     let rev = sha256_hex(&bytes);
-    let b = Board::parse(bytes).map_err(|e| Reply::refused(Source::File, "parse_error", format!("{raw}: {e}.")).target(raw).revs(Some(&rev), Some(&rev)))?;
+    let b = Board::parse(bytes)
+        .map_err(|e| Reply::refused(Source::File, "parse_error", format!("{raw}: {e}.")).target(raw).revs(Some(&rev), Some(&rev)))?;
     Ok((raw.to_string(), b, rev))
 }
 
@@ -201,14 +202,20 @@ pub fn board_read(tool: &str, args: &Value) -> Reply {
             let net = args.get("net").and_then(Value::as_str);
             if let Some(n) = net {
                 if !b.known_nets().contains(n) {
-                    return Reply::refused(src, "unknown_net", format!("The board has no net named '{n}'.")).target(&raw).revs(Some(&rev), Some(&rev));
+                    return Reply::refused(src, "unknown_net", format!("The board has no net named '{n}'."))
+                        .target(&raw)
+                        .revs(Some(&rev), Some(&rev));
                 }
             }
             let mut layer = None;
             if let Some(l) = args.get("layer").and_then(Value::as_str) {
                 match b.resolve_copper(l) {
                     Some(c) => layer = Some(c),
-                    None => return Reply::refused(src, "unknown_layer", format!("'{l}' isn't a copper layer of this board.")).target(&raw).revs(Some(&rev), Some(&rev)),
+                    None => {
+                        return Reply::refused(src, "unknown_layer", format!("'{l}' isn't a copper layer of this board."))
+                            .target(&raw)
+                            .revs(Some(&rev), Some(&rev))
+                    }
                 }
             }
             let matching: Vec<_> = b
@@ -223,9 +230,12 @@ pub fn board_read(tool: &str, args: &Value) -> Reply {
         }
         "board_footprints" => {
             let reference = args.get("reference").and_then(Value::as_str);
-            let matching: Vec<_> = b.footprints().into_iter().filter(|f| reference.is_none_or(|r| f.reference.as_deref() == Some(r))).collect();
+            let matching: Vec<_> =
+                b.footprints().into_iter().filter(|f| reference.is_none_or(|r| f.reference.as_deref() == Some(r))).collect();
             if let (Some(r), true) = (reference, matching.is_empty()) {
-                return Reply::refused(src, "not_found", format!("No footprint has reference '{r}'.")).target(&raw).revs(Some(&rev), Some(&rev));
+                return Reply::refused(src, "not_found", format!("No footprint has reference '{r}'."))
+                    .target(&raw)
+                    .revs(Some(&rev), Some(&rev));
             }
             let (limit, offset) = (usize_arg(args, "limit", 100), usize_arg(args, "offset", 0));
             let items: Vec<Value> = matching.iter().skip(offset).take(limit).map(footprint_json).collect();

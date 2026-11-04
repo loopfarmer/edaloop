@@ -130,7 +130,7 @@ class Catalogue:
         qty = int(params.get("qty") or 1)
         default_tol = DEFAULT_TOLERANCE_PCT[endpoint]
         # The tolerance band must fit inside the requested band, with room for float rounding.
-        sql = [f"SELECT c.* FROM components c JOIN subcategories s ON s.id = c.subcategory_id",
+        sql = ["SELECT c.* FROM components c JOIN subcategories s ON s.id = c.subcategory_id",
                f"WHERE s.category_name = ? AND c.{column} BETWEEN ? AND ? AND c.stock >= ?",
                f"AND c.{column} * (1 - COALESCE(c.tolerance_pct, ?) / 100.0) >= ? * 0.999999",
                f"AND c.{column} * (1 + COALESCE(c.tolerance_pct, ?) / 100.0) <= ? * 1.000001"]

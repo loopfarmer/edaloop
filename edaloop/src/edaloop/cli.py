@@ -108,6 +108,7 @@ def main(argv=None):
             return 0
         if args.cmd == "bench":
             import tempfile
+
             from . import testbench
             with tempfile.TemporaryDirectory() as tmp:
                 data = [testbench.run(f, Path(tmp)) for f in (args.files or testbench.available())]
@@ -128,6 +129,7 @@ def main(argv=None):
             return 0
         if args.cmd == "describe":
             import tempfile
+
             from . import describe as described
             with tempfile.TemporaryDirectory() as tmp:
                 try:

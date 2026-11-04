@@ -33,6 +33,7 @@ jobs:
           cache-dependency-glob: edaloop/uv.lock
       # The tests need no KiCad or solvers, and skip what they can't reach.
       - run: uv sync --extra dev --locked --python ${{ matrix.python }}
+      - run: uv run ruff check src tests
       - run: uv run pytest -ra
 
   rust:
@@ -53,11 +54,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.crate }}
+      - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       # boardfield's tests run its CPU backend, so they need no GPU.
       - run: cargo test --locked
       - run: cargo build --release --locked
+
+  msrv:
+    name: ${{ matrix.crate }} on Rust 1.91
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [boardhand, boardfield]
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v5
+      # The oldest Rust each Cargo.toml claims with rust-version. Raise both together.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+          key: msrv
+      - run: cargo check --locked --all-targets

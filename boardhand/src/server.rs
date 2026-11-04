@@ -29,7 +29,13 @@ impl State {
     fn new() -> State {
         let mut loaded = BTreeSet::new();
         loaded.insert("board_read".to_string());
-        State { loaded: Mutex::new(loaded), obs: Mutex::new(Observer::new()), folders: Mutex::new(BTreeSet::new()), tools: catalogue(), out: Mutex::new(io::stdout()) }
+        State {
+            loaded: Mutex::new(loaded),
+            obs: Mutex::new(Observer::new()),
+            folders: Mutex::new(BTreeSet::new()),
+            tools: catalogue(),
+            out: Mutex::new(io::stdout()),
+        }
     }
 
     fn send(&self, v: &Value) {
@@ -102,14 +108,17 @@ fn server_info(s: &State) -> Reply {
     };
     let folders: Vec<PathBuf> = lock(&s.folders).iter().cloned().collect();
     let pending: Vec<Value> = folders.iter().flat_map(|f| journal::list(f)).collect();
-    Reply::complete(Source::None, json!({
-        "name": env!("CARGO_PKG_NAME"),
-        "version": env!("CARGO_PKG_VERSION"),
-        "executable": exe,
-        "kicad_cli": kicad,
-        "pending_journals": pending,
-        "folders_scanned": folders,
-    }))
+    Reply::complete(
+        Source::None,
+        json!({
+            "name": env!("CARGO_PKG_NAME"),
+            "version": env!("CARGO_PKG_VERSION"),
+            "executable": exe,
+            "kicad_cli": kicad,
+            "pending_journals": pending,
+            "folders_scanned": folders,
+        }),
+    )
 }
 
 fn kicad_version(cli: &Path) -> Result<String, String> {
@@ -159,8 +168,12 @@ pub fn call_tool(s: &State, name: &str, args: &Value) -> Reply {
     };
     if let Some(g) = tool.group {
         if !lock(&s.loaded).contains(g) {
-            return Reply::refused(Source::None, "group_not_loaded", format!("Tool '{name}' is in group '{g}', which isn't loaded. Call groups_load with it first."))
-                .with(json!({"tool": name, "group": g}));
+            return Reply::refused(
+                Source::None,
+                "group_not_loaded",
+                format!("Tool '{name}' is in group '{g}', which isn't loaded. Call groups_load with it first."),
+            )
+            .with(json!({"tool": name, "group": g}));
         }
     }
     if let Err(e) = validate(&tool.schema, args, "") {
@@ -197,7 +210,11 @@ pub fn call_tool(s: &State, name: &str, args: &Value) -> Reply {
 fn run_call(s: &State, id: Value, name: String, args: Value) {
     let began = Instant::now();
     let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call_tool(s, &name, &args))).unwrap_or_else(|_| {
-        Reply::uncertain(Source::None, "internal_error", "The tool panicked. Any file it was working on is in an uncertain state, so read it again.")
+        Reply::uncertain(
+            Source::None,
+            "internal_error",
+            "The tool panicked. Any file it was working on is in an uncertain state, so read it again.",
+        )
     });
     let ms = began.elapsed().as_millis() as u64;
     // Bound what an unknown name can add to the statistics.

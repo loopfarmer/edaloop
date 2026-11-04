@@ -297,7 +297,7 @@ def split_polylines(node):
     each piece gets its own uuid because two objects cannot share one.
     """
     import uuid as _uuid
-    out, n = [], 0
+    out = []
 
     def walk(nd, inlib=False):
         res = []
@@ -363,7 +363,6 @@ def collect_instances(root, root_uuid):
                             sheet = sheet[len("/" + root_uuid):]
                         ref = kid(pth, "reference")
                         unit = kid(pth, "unit")
-                        val = kid(c, "property")
                         vals = {str(p[1]): str(p[2]) for p in kids(c, "property")
                                 if len(p) > 2}
                         rows.append([
@@ -782,7 +781,7 @@ def pcb_geometry(path):
     def num(x):
         try:
             return round(float(x), 4)
-        except Exception:
+        except (TypeError, ValueError):
             return str(x)
 
     def walk(nd):

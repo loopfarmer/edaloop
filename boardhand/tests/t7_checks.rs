@@ -50,7 +50,10 @@ fn t7_real_drc_on_small_copy() {
     m.load(json!("checks"));
     let rev = sha(&board);
     let (r, is_err) = m.call_full("drc_run", json!({"board": board}));
-    println!("t7 real: total={} types={} kicad={} ms={}", r["result"]["total"], r["result"]["counts_by_type"], r["result"]["kicad_version"], r["result"]["duration_ms"]);
+    println!(
+        "t7 real: total={} types={} kicad={} ms={}",
+        r["result"]["total"], r["result"]["counts_by_type"], r["result"]["kicad_version"], r["result"]["duration_ms"]
+    );
     assert_eq!(r["outcome"], "complete", "{r}");
     assert!(!is_err, "findings are not an error");
     assert_eq!(r["source"], "cli");
@@ -118,8 +121,13 @@ fn t7_items_are_limited_to_200_with_a_total() {
     fs::write(dir.join("mini.kicad_pro"), "{}").unwrap();
     let items: Vec<Value> = (0..250).map(|i| json!({"type": if i % 2 == 0 {"a"} else {"b"}, "severity": "error"})).collect();
     let report = dir.join("canned.json");
-    fs::write(&report, json!({"violations": items, "unconnected_items": [{"type": "u", "severity": "warning"}], "schematic_parity": []}).to_string()).unwrap();
-    let body = format!("for a in \"$@\"; do if [ \"$prev\" = \"--output\" ]; then cp \"{}\" \"$a\"; fi; prev=\"$a\"; done", report.display());
+    fs::write(
+        &report,
+        json!({"violations": items, "unconnected_items": [{"type": "u", "severity": "warning"}], "schematic_parity": []}).to_string(),
+    )
+    .unwrap();
+    let body =
+        format!("for a in \"$@\"; do if [ \"$prev\" = \"--output\" ]; then cp \"{}\" \"$a\"; fi; prev=\"$a\"; done", report.display());
     let cli = fake(&dir, &body);
     let mut m = Mcp::start(&dir, &[("BOARDHAND_KICAD_CLI", cli.to_str().unwrap())]);
     m.initialize();
@@ -183,12 +191,18 @@ fn t7_no_report() {
 
 #[test]
 fn t7_bad_reports_are_never_zero_findings() {
-    let write = |text: &str| format!("for a in \"$@\"; do if [ \"$prev\" = \"--output\" ]; then printf '%s' '{text}' > \"$a\"; fi; prev=\"$a\"; done");
+    let write = |text: &str| {
+        format!("for a in \"$@\"; do if [ \"$prev\" = \"--output\" ]; then printf '%s' '{text}' > \"$a\"; fi; prev=\"$a\"; done")
+    };
     let (r, _, _) = drc_with_fake("t7_bad1", &write("{not json"), json!({}));
     assert_eq!(r["reason"], "bad_report");
     let (r, _, _) = drc_with_fake("t7_bad2", &write("{\"other\":1}"), json!({}));
     assert_eq!(r["reason"], "bad_report");
-    let (r, _, _) = drc_with_fake("t7_bad3", &format!("{}\nexit 1", write("{\"violations\":[],\"unconnected_items\":[],\"schematic_parity\":[]}")), json!({}));
+    let (r, _, _) = drc_with_fake(
+        "t7_bad3",
+        &format!("{}\nexit 1", write("{\"violations\":[],\"unconnected_items\":[],\"schematic_parity\":[]}")),
+        json!({}),
+    );
     assert_eq!(r["reason"], "cli_failed");
     assert_eq!(r["result"]["exit_code"], 1);
 }
@@ -218,7 +232,10 @@ fn server_answers_ping_while_a_check_runs() {
     let mut m = Mcp::start(&dir, &[("BOARDHAND_KICAD_CLI", cli.to_str().unwrap())]);
     m.initialize();
     m.load(json!("checks"));
-    m.send_raw(&json!({"jsonrpc":"2.0","id":"drc","method":"tools/call","params":{"name":"drc_run","arguments":{"board":board,"timeout_s":3}}}).to_string());
+    m.send_raw(
+        &json!({"jsonrpc":"2.0","id":"drc","method":"tools/call","params":{"name":"drc_run","arguments":{"board":board,"timeout_s":3}}})
+            .to_string(),
+    );
     m.send_raw(r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#);
     let first = m.recv();
     assert_eq!(first["id"], "p", "{first}");

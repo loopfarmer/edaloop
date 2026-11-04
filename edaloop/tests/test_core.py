@@ -1,8 +1,8 @@
 """Tests for what the gate promises. No external EDA tool is needed."""
 import json
 import math
-import re
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -447,6 +447,7 @@ def test_failed_nets_reads_every_form_the_router_reports(tmp_path):
 
 def _bench(name):
     import yaml
+
     from edaloop import testbench
     return yaml.safe_load((testbench.BENCHES / f"{name}.yaml").read_text())
 
@@ -510,6 +511,7 @@ def test_bench_catches_a_wrong_bias_and_a_missing_model(tmp_path):
 
 def test_build_files_carry_the_description():
     import yaml
+
     from edaloop import boardgen, testbench
     bench = yaml.safe_load((testbench.BENCHES / "cband_element.yaml").read_text())
     from edaloop import schematic
@@ -524,6 +526,7 @@ def test_build_files_carry_the_description():
 
 def test_stackup_text_matches_the_description():
     import yaml
+
     from edaloop import boardgen, testbench
     bench = yaml.safe_load((testbench.BENCHES / "lband_element.yaml").read_text())
     text = boardgen.seed_board(bench)
@@ -561,6 +564,7 @@ def test_coupon_text_loses_parts_and_keeps_pours():
 
 def test_hop_ports_sit_at_a_rotated_lands_edge():
     from shapely.geometry import Point
+
     from edaloop import em_hops
     pad = {"x": 13.0, "y": 29.0, "w": 0.9, "h": 0.5, "rot": 128.2, "net": "RF"}
     at = em_hops.land_edge(pad, (0.0, -1.0))
@@ -580,6 +584,7 @@ def test_hop_port_direction_points_into_the_copper():
 
 def test_pour_holes_are_split_away():
     from shapely.geometry import Polygon, box
+
     from edaloop import em_hops
     ring = box(0, 0, 10, 10).difference(box(4, 4, 6, 6))
     pieces = em_hops._no_holes(ring)
@@ -612,6 +617,7 @@ def test_reference_grid_converges_on_the_board_line():
 @pytest.mark.parametrize("name", ["lband_element", "cband_element"])
 def test_drawn_schematic_keeps_the_described_netlist(name, tmp_path):
     import yaml
+
     from edaloop import schematic, testbench
     cli = toolchain.paths()["kicad_cli"]
     if not shutil.which(str(cli)):
@@ -656,7 +662,6 @@ def test_demo_board_builds_from_standard_footprints_with_rf_pads_on_the_line(tmp
 
 
 def test_placer_finds_the_diagonal_parts_angles(tmp_path):
-    from edaloop import boardgen, testbench
     # The custom land patterns aren't in the repo. Name the folder holding them to run this.
     pretty = Path(os.environ.get("EDALOOP_FOOTPRINTS", "/nonexistent"))
     if not (pretty / "RFLib_FP.pretty").is_dir():
@@ -723,6 +728,7 @@ def test_describe_refuses_a_board_with_one_connector(tmp_path):
 
 def test_a_build_refuses_an_unknown_current(tmp_path):
     import yaml
+
     from edaloop import boardgen, testbench
     bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
     bench["project"]["rails"][0]["loads"]["R1.1"] = "REQUIRED"
@@ -1204,8 +1210,9 @@ def test_still_air_depends_on_the_board():
 
 
 def test_a_port_follows_the_track_off_a_land():
-    from edaloop.em_hops import leaving_direction
     from types import SimpleNamespace as NS
+
+    from edaloop.em_hops import leaving_direction
 
     pad = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "rot": 0}
     chord = (0.7071, 0.7071)
@@ -1627,7 +1634,7 @@ def test_deleted_rf_baseline_is_not_quietly_re_recorded(tmp_path):
     assert "baseline recorded" in checks.run_check(p, "rf_preserved").summary
     # A router moves RF copper, and the baseline that would have caught it goes missing.
     (tmp_path / "b.kicad_pcb").write_text(PCB.replace("(end 10 5)", "(end 10 6)"))
-    (tmp_path / ".edaloop" / "rf_baseline.json").unlink()
+    (tmp_path / "rf_baseline.json").unlink()
     for _ in range(2):                          # running it again mustn't clear it either
         ev = checks.run_check(p, "rf_preserved")
         assert ev.status == "fail" and any(f["id"] == "rf_preserved:baseline_changed" for f in ev.findings)
@@ -1720,3 +1727,184 @@ def test_release_refused_if_the_board_changes_during_export(tmp_path, monkeypatc
     result = checks.release(p)
     assert not result["released"] and result["blockers"][0]["state"] == "stale"
     assert not (tmp_path / "release").exists() and not (tmp_path / "t_release.zip").exists()
+
+
+def test_rf_baseline_lives_beside_the_project_and_survives_a_lost_ledger(tmp_path):
+    (tmp_path / "c.py").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.py}\n")
+    checks.run_check(p, "rf_preserved")
+    assert (tmp_path / "rf_baseline.json").exists()
+    # A fresh clone has no .edaloop/, but the committed baseline still holds the copper.
+    shutil.rmtree(tmp_path / ".edaloop")
+    (tmp_path / "b.kicad_pcb").write_text(PCB.replace("(end 10 5)", "(end 10 6)"))
+    ev = checks.run_check(Project(tmp_path), "rf_preserved")
+    assert ev.status == "fail" and any(f["id"] == "rf_preserved:RF:lost" for f in ev.findings)
+
+
+def test_a_baseline_in_the_old_place_moves_without_counting_as_changed(tmp_path):
+    (tmp_path / "c.py").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.py}\n")
+    checks.run_check(p, "rf_preserved")
+    old = tmp_path / ".edaloop" / "rf_baseline.json"
+    (tmp_path / "rf_baseline.json").rename(old)
+    # Rewrite the earlier evidence as an older edaloop recorded it, under the old path.
+    ledger = p.ledger.path
+    ledger.write_text(ledger.read_text().replace('"rf_baseline.json"', '".edaloop/rf_baseline.json"'))
+    ev = checks.run_check(p, "rf_preserved")
+    assert ev.status == "pass", ev.findings
+    assert (tmp_path / "rf_baseline.json").read_bytes() == old.read_bytes()
+
+
+# ---------------------------------------------------------------- exports
+
+def _export_eagle(monkeypatch):
+    return _under_kicad_python(monkeypatch, "export_eagle")
+
+
+def _under_kicad_python(monkeypatch, name):
+    """Scripts that run under KiCad's Python import pcbnew. A stand-in lets their pure parts be tested anywhere."""
+    import importlib.util
+    import sys
+    import types
+    class Pcbnew(types.ModuleType):
+        def __getattr__(self, name):           # layer ids and other constants: any distinct number will do
+            return hash(name) % 1000
+
+    fake = Pcbnew("pcbnew")
+    fake.ToMM = lambda v: v / 1e6
+    monkeypatch.setitem(sys.modules, "pcbnew", fake)
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
+    path = Path(checks.__file__).with_name(f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"{name}_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_eagle_export_reads_the_boards_clearance(monkeypatch):
+    ee = _export_eagle(monkeypatch)
+
+    class NetClass:
+        def GetClearance(self):
+            return 150_000                     # nm
+
+    class Settings:
+        class m_NetSettings:
+            @staticmethod
+            def GetDefaultNetclass():
+                return NetClass()
+
+    class Board:
+        def GetDesignSettings(self):
+            return Settings()
+
+    report = {}
+    assert ee.clearance_mm(Board(), report) == pytest.approx(0.15)
+    assert report == {}
+
+
+def test_eagle_export_marks_an_assumed_clearance(monkeypatch):
+    ee = _export_eagle(monkeypatch)
+
+    class Board:
+        def GetDesignSettings(self):
+            return object()                    # no route to a clearance
+
+    report = {}
+    assert ee.clearance_mm(Board(), report) == ee.ASSUMED_CLEARANCE_MM
+    assert any(k.startswith("ASSUMED") for k in report)
+
+
+SCH_V10 = """(kicad_sch (version 20260306) (generator "eeschema") (generator_version "10.0")
+ (uuid "aaaa-root") (paper "A4")
+ (lib_symbols)
+ (symbol (lib_id "Device:R") (at 10 10 0) (unit 1) (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)
+  (fields_autoplaced yes)
+  (uuid "bbbb-r1")
+  (property "Reference" "R1" (at 10 8 0) (effects (font (size 1.27 1.27))))
+  (property "Value" "49.9" (at 10 12 0) (effects (font (size 1.27 1.27))))
+  (property "Footprint" "R_0402" (at 10 12 0) (hide yes) (effects (font (size 1.27 1.27))))
+  (property "MPN" "RC0402" (at 10 12 0) (effects (font (size 1.27 1.27)) (hide yes)))
+  (instances (project "demo" (path "/aaaa-root" (reference "R1") (unit 1))))))
+"""
+
+
+def test_kicad6_schematic_moves_instances_and_speaks_only_6_0(tmp_path):
+    from edaloop import export_kicad6 as k6
+    src, out = tmp_path / "new.kicad_sch", tmp_path / "old.kicad_sch"
+    src.write_text(SCH_V10)
+    k6.convert_sch(str(src), str(out), k6.root_uuid_of(str(src)))
+    text = out.read_text()
+    assert k6.conformance(str(out)) == {}                         # no token 6.0 never had
+    assert "(version 20211123)" in text and "(uuid bbbb-r1)" in text and "(generator eeschema)" in text
+    node, _ = k6.read(text)
+    # The instance moves to the end, keyed by the SYMBOL's path, without the root sheet.
+    rows = k6.kids(k6.kid(node, "symbol_instances"), "path")
+    assert [str(r[1]) for r in rows] == ["/bbbb-r1"]
+    assert str(k6.kid(rows[0], "reference")[1]) == "R1" and str(k6.kid(rows[0], "footprint")[1]) == "R_0402"
+    sym = k6.kid(node, "symbol")
+    assert k6.kid(sym, "instances") is None
+    props = {str(p[1]): p for p in k6.kids(sym, "property")}
+    assert [str(k6.kid(props[n], "id")[1]) for n in ("Reference", "Value", "Footprint")] == ["0", "1", "2"]
+    # hide is a bare flag inside effects, wherever 10.0 put it.
+    for name in ("Footprint", "MPN"):
+        assert "hide" in [str(x) for x in k6.kid(props[name], "effects")]
+        assert k6.kid(props[name], "hide") is None
+    assert "(fields_autoplaced)" in text and "(fields_autoplaced yes)" not in text
+
+
+@pytest.mark.parametrize("value, farads", [("100n", 100e-9), ("100nF", 100e-9), ("100n 50V", 100e-9), ("4u7", 4.7e-6),
+                                           ("1\u00b5F", 1e-6), ("2.2uF", 2.2e-6), ("10p", 10e-12), ("DNP", 1e9)])
+def test_bypass_capacitor_values_are_read_as_written(monkeypatch, value, farads):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+    assert ops._farads(value) == pytest.approx(farads)
+
+
+# ---------------------------------------------------------------- staleness, across every check that runs here
+
+OFFLINE = ["project_files", "rf_reference", "rf_path", "rf_preserved", "power", "thermal_field", "rules", "cascade", "requirements"]
+
+
+@pytest.fixture
+def offline_project(tmp_path):
+    p = _rules_project(tmp_path)
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    p.cfg["cascade"] = {"stages": [{"name": "amp", "gain_db": [[1, 20.0]], "nf_db": [[1, 1.0]]}], "freq_mhz": [1]}
+    p.cfg["requirements"] = [{"id": "R1", "metric": "rules.min_track_mm", "min": 0.1}]
+    for name in OFFLINE:
+        checks.run_check(p, name)
+    return p
+
+
+@pytest.mark.parametrize("name", OFFLINE)
+def test_each_check_goes_stale_when_any_file_it_recorded_changes(offline_project, name):
+    p = offline_project
+    ev = p.ledger.latest()[name]
+    assert ev.status != "error", ev.summary           # the list above must keep running without tools
+    # Recording and recomputing agree, so fresh evidence reads as current.
+    assert checks.current_inputs(p, ev)
+    files = [k for k in ev.inputs if k not in checks.CONFIG_DIGESTS]
+    # cascade with no line loss reads only its stage table, so it records no file.
+    assert files or name == "cascade", f"{name} recorded no files"
+    for key in files:
+        path = p.root / key
+        before = path.read_bytes() if path.exists() else None
+        if before is None:
+            path.write_text("")                         # an input that appears
+        else:
+            path.write_bytes(before + b"\n")            # an input that changes
+        try:
+            assert not checks.current_inputs(p, ev), f"{name} stayed current after {key} changed"
+        finally:
+            if before is None:
+                path.unlink()
+            else:
+                path.write_bytes(before)
+        assert checks.current_inputs(p, ev), f"restoring {key} didn't make {name} current again"
+
+
+@pytest.mark.parametrize("script", ["kicad_ops.py", "export_eagle.py", "channel_groups.py", "pcbfile.py"])
+def test_scripts_for_kicads_python_stay_python_3_9(script):
+    import ast
+    # KiCad ships its own Python 3.9, and these run under it. CI's Python is newer and would accept 3.10 syntax.
+    ast.parse(Path(checks.__file__).with_name(script).read_text(), feature_version=(3, 9))

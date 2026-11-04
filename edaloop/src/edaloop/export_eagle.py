@@ -381,12 +381,26 @@ def write(root, path):
         fh.write("\n")
 
 
-def clearance_mm(board):
-    try:
-        return mm(board.GetDesignSettings().m_NetSettings
-                  .GetDefaultNetclass().GetClearance())
-    except Exception:                                   # noqa: BLE001
-        return 0.2
+ASSUMED_CLEARANCE_MM = 0.2
+
+
+def clearance_mm(board, report):
+    """The default net class's clearance, which the EAGLE design rules carry.
+
+    If no KiCad version's route to it works, 0.2 mm is written and the export
+    fails, so that an assumed rule never reaches a fabricator unmarked.
+    """
+    ds = board.GetDesignSettings()
+    routes = (lambda: ds.m_NetSettings.GetDefaultNetclass().GetClearance(),
+              lambda: ds.m_NetSettings.m_DefaultNetClass.GetClearance(),
+              lambda: ds.GetDefault().GetClearance())
+    for route in routes:
+        try:
+            return mm(route())
+        except Exception:                               # noqa: BLE001 - try the next KiCad version's API
+            continue
+    report["ASSUMED design-rule clearance mm (board's unreadable)"] = ASSUMED_CLEARANCE_MM
+    return ASSUMED_CLEARANCE_MM
 
 
 # ------------------------------------------------------------- board
@@ -547,7 +561,7 @@ def build(src, bd, report):
     ET.SubElement(board, "variantdefs")
     classes = ET.SubElement(board, "classes")
     ET.SubElement(classes, "class", number="0", name="default", width="0", drill="0")
-    clr = clearance_mm(b)
+    clr = clearance_mm(b, report)
     rules = ET.SubElement(board, "designrules", name=lib)
     for k, v in (("layerSetup", "(1+2*15+16)"),
                  ("mdWireWire", "%smm" % f(clr)), ("mdWirePad", "%smm" % f(clr)),
@@ -585,7 +599,7 @@ def build(src, bd, report):
 
     # -- signals
     sig = defaultdict(lambda: {"c": [], "w": [], "v": [], "z": []})
-    for fp, pl, pk, names in placed:
+    for fp, _pl, _pk, names in placed:
         for p in fp.Pads():
             uid = p.m_Uuid.AsString()
             if uid in names and p.GetNetname():
@@ -718,7 +732,7 @@ def schematic(bd, packages, placed, sig):
     ET.SubElement(cl, "class", number="0", name="default", width="0", drill="0")
     parts = ET.SubElement(sch, "parts")
     order = sorted(placed, key=lambda t: natural(t[0].GetReference()))
-    for fp, pl, pk, _ in order:
+    for fp, _pl, pk, _ in order:
         ET.SubElement(parts, "part", name=fp.GetReference(), library=lib,
                       deviceset="D_" + pk, device="", value=fp.GetValue())
 
@@ -736,7 +750,7 @@ def schematic(bd, packages, placed, sig):
         sh = ET.SubElement(sheets_el, "sheet")
         ET.SubElement(sh, "plain")
         inst = ET.SubElement(sh, "instances")
-        for k, (fp, pl, pk, _) in enumerate(chunk):
+        for k, (fp, _pl, pk, _) in enumerate(chunk):
             x = (k % COLS) * colw
             y = -(k // COLS) * roww
             ET.SubElement(inst, "instance", part=fp.GetReference(), gate="G$1",
@@ -752,7 +766,7 @@ def schematic(bd, packages, placed, sig):
         for ref, pn in pins:
             s, x, y, side = pinpos[(ref, pn)]
             per_sheet[s][net].append((ref, pn, x, y, side))
-    for s, (sh, nets_el) in enumerate(sheet_nodes):
+    for s, (_sh, nets_el) in enumerate(sheet_nodes):
         for net in sorted(per_sheet[s]):
             ne = ET.SubElement(nets_el, "net", name=net)
             for ref, pn, x, y, side in per_sheet[s][net]:
@@ -1065,6 +1079,8 @@ def export(src, bd, dst, schematic_path=None):
     fails = []
     if report["self-check worst pad error um"] > 1.0:
         fails.append("self-check")
+    if "ASSUMED design-rule clearance mm (board's unreadable)" in report:
+        fails.append("clearance")
     for path in (brd, sch):
         ok, errs = dtd_ok(path)
         print("   DTD %-44s %s" % (os.path.basename(path), "valid" if ok else "INVALID"))

@@ -175,7 +175,11 @@ fn t8_plan_and_apply_refusals() {
     let out = r.dir.join("out.kicad_pcb");
     // Unknown net and layer are reported by the plan and refused by the apply.
     let bad = r.dir.join("bad.ses");
-    fs::write(&bad, format!("{SES_HEAD}(net GHOST (wire (path F.Cu 100 0 0 10 10)))\n(net SIG (wire (path Nope.Cu 100 0 0 10 10)))\n{SES_TAIL}")).unwrap();
+    fs::write(
+        &bad,
+        format!("{SES_HEAD}(net GHOST (wire (path F.Cu 100 0 0 10 10)))\n(net SIG (wire (path Nope.Cu 100 0 0 10 10)))\n{SES_TAIL}"),
+    )
+    .unwrap();
     let p = r.m.call("route_plan_import", json!({"manifest": r.manifest, "session": bad}));
     assert_eq!(p["outcome"], "complete");
     assert_eq!(p["result"]["unknown_nets"], json!(["GHOST"]));
@@ -191,7 +195,8 @@ fn t8_plan_and_apply_refusals() {
     fs::write(&garbage, "(session").unwrap();
     assert_eq!(r.m.call("route_plan_import", json!({"manifest": r.manifest, "session": garbage}))["reason"], "session_parse_error");
     let arc = r.dir.join("arc.ses");
-    fs::write(&arc, format!("{SES_HEAD}(net SIG {LOCKED_WIRE} (wire (qarc F.Cu 100 0 0 10 10 5 5))) (net GND {GND_VIA})\n{SES_TAIL}")).unwrap();
+    fs::write(&arc, format!("{SES_HEAD}(net SIG {LOCKED_WIRE} (wire (qarc F.Cu 100 0 0 10 10 5 5))) (net GND {GND_VIA})\n{SES_TAIL}"))
+        .unwrap();
     assert_eq!(r.m.call("route_apply", json!({"manifest": r.manifest, "session": arc, "output": out}))["reason"], "unsupported_wire_shape");
     let nopad = r.dir.join("nopad.ses");
     fs::write(&nopad, format!("{SES_HEAD}(net SIG {LOCKED_WIRE}) (net GND {GND_VIA} (via \"Mystery\" 1000 -1000))\n{SES_TAIL}")).unwrap();
@@ -325,7 +330,8 @@ fn route_run_with_a_fake_java() {
     assert_eq!(run("exit 1", json!({}))["reason"], "route_failed");
     assert_eq!(run("exit 0", json!({}))["reason"], "no_session");
     assert_eq!(run("kill -9 $$", json!({}))["reason"], "route_crashed");
-    let left: Vec<_> = fs::read_dir(&folder).unwrap().flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().ends_with(".ses")).collect();
+    let left: Vec<_> =
+        fs::read_dir(&folder).unwrap().flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().ends_with(".ses")).collect();
     assert!(left.is_empty(), "{left:?}");
     assert_eq!(run("exit 0", json!({"jar": dir.join("absent.jar")}))["reason"], "jar_not_found");
 }
@@ -355,11 +361,20 @@ fn real_round_trip_with_kicad_and_freerouting() {
     assert_eq!(p["outcome"], "complete", "{p}");
     let manifest = p["result"]["manifest"].as_str().unwrap().to_string();
     let r = m.call("route_run", json!({"folder": folder, "jar": jar, "max_passes": 2, "timeout_s": 300}));
-    println!("real run: outcome={} wires={} vias={} ms={}", r["outcome"], r["result"]["wires"], r["result"]["vias"], r["result"]["duration_ms"]);
+    println!(
+        "real run: outcome={} wires={} vias={} ms={}",
+        r["outcome"], r["result"]["wires"], r["result"]["vias"], r["result"]["duration_ms"]
+    );
     assert_eq!(r["outcome"], "complete", "{r}");
     let ses = r["result"]["session"].as_str().unwrap().to_string();
     let plan = m.call("route_plan_import", json!({"manifest": manifest, "session": ses}));
-    println!("real plan: per_net={} unknown_nets={} unknown_layers={} omitted={}", plan["result"]["per_net"], plan["result"]["unknown_nets"], plan["result"]["unknown_layers"], plan["result"]["protected_items_omitted_by_session"].as_array().map(Vec::len).unwrap_or(0));
+    println!(
+        "real plan: per_net={} unknown_nets={} unknown_layers={} omitted={}",
+        plan["result"]["per_net"],
+        plan["result"]["unknown_nets"],
+        plan["result"]["unknown_layers"],
+        plan["result"]["protected_items_omitted_by_session"].as_array().map(Vec::len).unwrap_or(0)
+    );
     assert_eq!(plan["outcome"], "complete");
     // Units and the Y flip are right only if real items line up with the board.
     assert!(plan["result"]["items_matching_board"].as_u64().unwrap() >= 40, "{}", plan["result"]["items_matching_board"]);
@@ -368,7 +383,12 @@ fn real_round_trip_with_kicad_and_freerouting() {
 
     let out = dir.join("routed.kicad_pcb");
     let (a, err) = m.call_full("route_apply", json!({"manifest": manifest, "session": ses, "output": out}));
-    println!("real apply: outcome={} reason={} lost={}", a["outcome"], a["reason"], a["result"]["lost"].as_array().map(Vec::len).unwrap_or(0));
+    println!(
+        "real apply: outcome={} reason={} lost={}",
+        a["outcome"],
+        a["reason"],
+        a["result"]["lost"].as_array().map(Vec::len).unwrap_or(0)
+    );
     if a["outcome"] == "refused" {
         // Freerouting drops copper that it was told is fixed. This is the case
         // the manifest exists for.
@@ -381,7 +401,11 @@ fn real_round_trip_with_kicad_and_freerouting() {
     }
     assert_eq!(sha(&board), rev);
     let report = kicad_loads(&out).expect("KiCad loads the routed board");
-    println!("real drc: violations={} unconnected={}", report["violations"].as_array().unwrap().len(), report["unconnected_items"].as_array().unwrap().len());
+    println!(
+        "real drc: violations={} unconnected={}",
+        report["violations"].as_array().unwrap().len(),
+        report["unconnected_items"].as_array().unwrap().len()
+    );
     let s = m.call("board_summary", json!({"board": out}));
     assert_eq!(s["outcome"], "complete");
     let vias = s["result"]["counts"]["vias"].as_u64().unwrap();

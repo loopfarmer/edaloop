@@ -23,9 +23,13 @@ pub fn lock_files(path: &Path) -> Vec<PathBuf> {
 pub fn check_lock(path: &Path) -> Result<(), Reply> {
     for l in lock_files(path) {
         if fs::symlink_metadata(&l).is_ok() {
-            return Err(Reply::refused(SRC, "editor_lock", format!("KiCad's lock file {} exists, so the board may be open in an editor.", l.display()))
-                .target(path)
-                .with(json!({"lock_file": l.to_string_lossy()})));
+            return Err(Reply::refused(
+                SRC,
+                "editor_lock",
+                format!("KiCad's lock file {} exists, so the board may be open in an editor.", l.display()),
+            )
+            .target(path)
+            .with(json!({"lock_file": l.to_string_lossy()})));
         }
     }
     Ok(())
@@ -69,11 +73,15 @@ pub fn commit(path: &Path, before: &Board, new_bytes: Vec<u8>, change: Change, v
     let digests = before.digests();
     // Check the result in memory first, so a faulty plan never reaches the disk.
     if let Err(e) = check(&digests, &new_bytes, change, verify) {
-        return Reply::refused(SRC, "edit_check_failed", format!("The planned edit failed its check before writing: {e}.")).target(path).revs(Some(&old_rev), None);
+        return Reply::refused(SRC, "edit_check_failed", format!("The planned edit failed its check before writing: {e}."))
+            .target(path)
+            .revs(Some(&old_rev), None);
     }
     let meta = match fs::metadata(path) {
         Ok(m) => m,
-        Err(e) => return Reply::refused(SRC, "write_failed", format!("Couldn't stat the board: {e}.")).target(path).revs(Some(&old_rev), None),
+        Err(e) => {
+            return Reply::refused(SRC, "write_failed", format!("Couldn't stat the board: {e}.")).target(path).revs(Some(&old_rev), None)
+        }
     };
     let tmp = util::temp_beside(path);
     let prepared = (|| {
@@ -82,7 +90,9 @@ pub fn commit(path: &Path, before: &Board, new_bytes: Vec<u8>, change: Change, v
     })();
     if let Err(e) = prepared {
         let _ = fs::remove_file(&tmp);
-        return Reply::refused(SRC, "write_failed", format!("Couldn't write a temporary file beside the board: {e}.")).target(path).revs(Some(&old_rev), None);
+        return Reply::refused(SRC, "write_failed", format!("Couldn't write a temporary file beside the board: {e}."))
+            .target(path)
+            .revs(Some(&old_rev), None);
     }
     // Narrow the race: look at the lock and the hash again just before the rename.
     if let Err(r) = check_lock(path) {
@@ -101,12 +111,16 @@ pub fn commit(path: &Path, before: &Board, new_bytes: Vec<u8>, change: Change, v
         }
         Err(e) => {
             let _ = fs::remove_file(&tmp);
-            return Reply::refused(SRC, "write_failed", format!("Couldn't re-read the board: {e}.")).target(path).revs(Some(&old_rev), None);
+            return Reply::refused(SRC, "write_failed", format!("Couldn't re-read the board: {e}."))
+                .target(path)
+                .revs(Some(&old_rev), None);
         }
     }
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
-        return Reply::refused(SRC, "write_failed", format!("Couldn't rename the temporary file over the board: {e}.")).target(path).revs(Some(&old_rev), None);
+        return Reply::refused(SRC, "write_failed", format!("Couldn't rename the temporary file over the board: {e}."))
+            .target(path)
+            .revs(Some(&old_rev), None);
     }
     let dir_sync = util::sync_dir(&util::parent_of(path));
     if let Some(h) = hook {
@@ -115,9 +129,13 @@ pub fn commit(path: &Path, before: &Board, new_bytes: Vec<u8>, change: Change, v
     let read_back = match fs::read(path) {
         Ok(b) => b,
         Err(e) => {
-            return Reply::uncertain(SRC, "readback_failed", format!("The rename happened, but the file couldn't be read back: {e}. Its state is uncertain."))
-                .target(path)
-                .revs(Some(&old_rev), None);
+            return Reply::uncertain(
+                SRC,
+                "readback_failed",
+                format!("The rename happened, but the file couldn't be read back: {e}. Its state is uncertain."),
+            )
+            .target(path)
+            .revs(Some(&old_rev), None);
         }
     };
     let after = sha256_hex(&read_back);
@@ -135,10 +153,14 @@ pub fn commit(path: &Path, before: &Board, new_bytes: Vec<u8>, change: Change, v
         }
     };
     if let Err(e) = dir_sync {
-        return Reply::uncertain(SRC, "folder_sync_failed", format!("The file reads back correctly, but syncing its folder failed, so the rename may not survive a power loss: {e}."))
-            .target(path)
-            .revs(Some(&old_rev), Some(&after))
-            .with(json!({"observed": observed}));
+        return Reply::uncertain(
+            SRC,
+            "folder_sync_failed",
+            format!("The file reads back correctly, but syncing its folder failed, so the rename may not survive a power loss: {e}."),
+        )
+        .target(path)
+        .revs(Some(&old_rev), Some(&after))
+        .with(json!({"observed": observed}));
     }
     Reply::complete(SRC, observed).target(path).revs(Some(&old_rev), Some(&after))
 }
@@ -167,7 +189,8 @@ pub fn open_for_edit(args: &Value) -> Result<(PathBuf, Board), Reply> {
             .revs(Some(&cur), None)
             .with(json!({"current_revision": cur})));
     }
-    let board = Board::parse(bytes).map_err(|e| Reply::refused(SRC, "parse_error", format!("{raw}: {e}.")).target(&real).revs(Some(&cur), None))?;
+    let board =
+        Board::parse(bytes).map_err(|e| Reply::refused(SRC, "parse_error", format!("{raw}: {e}.")).target(&real).revs(Some(&cur), None))?;
     Ok((real, board))
 }
 
@@ -207,7 +230,13 @@ impl Layout {
         // An inline track means an older, single-line layout. Other short nodes say nothing.
         let inline_sibling = matches!(t.head(sibling), "segment" | "arc" | "via") && !t.bytes(sibling).contains(&b'\n');
         let Some(pos) = text.rfind('\n') else {
-            return Layout { lead: if lead.is_empty() { b" ".to_vec() } else { lead }, inline: true, nl: String::new(), indent: String::new(), child: String::new() };
+            return Layout {
+                lead: if lead.is_empty() { b" ".to_vec() } else { lead },
+                inline: true,
+                nl: String::new(),
+                indent: String::new(),
+                child: String::new(),
+            };
         };
         let indent = text[pos + 1..].to_string();
         let nl = if text[..pos].ends_with('\r') { "\r\n" } else { "\n" }.to_string();
@@ -274,7 +303,15 @@ pub fn id_field(b: &Board, uuid: &str) -> String {
     }
 }
 
-pub fn segment_fields(b: &Board, start: (f64, f64), end: (f64, f64), width: f64, layer: &str, net: &str, uuid: &str) -> Option<Vec<String>> {
+pub fn segment_fields(
+    b: &Board,
+    start: (f64, f64),
+    end: (f64, f64),
+    width: f64,
+    layer: &str,
+    net: &str,
+    uuid: &str,
+) -> Option<Vec<String>> {
     Some(vec![
         format!("(start {} {})", fmt_mm(start.0), fmt_mm(start.1)),
         format!("(end {} {})", fmt_mm(end.0), fmt_mm(end.1)),
@@ -337,10 +374,14 @@ pub fn track_add(args: &Value, hook: Hook<'_>) -> Reply {
     let net = args["net"].as_str().unwrap_or("").to_string();
     let layer_in = args["layer"].as_str().unwrap_or("");
     if to_nm(start.0) == to_nm(end.0) && to_nm(start.1) == to_nm(end.1) {
-        return Reply::refused(SRC, "invalid_argument", "end: a track's end must differ from its start.").target(&path).with(json!({"field": "end"}));
+        return Reply::refused(SRC, "invalid_argument", "end: a track's end must differ from its start.")
+            .target(&path)
+            .with(json!({"field": "end"}));
     }
     let Some(layer) = b.resolve_copper(layer_in) else {
-        return Reply::refused(SRC, "unknown_layer", format!("'{layer_in}' isn't a copper layer of this board.")).target(&path).revs(Some(&b.revision()), None);
+        return Reply::refused(SRC, "unknown_layer", format!("'{layer_in}' isn't a copper layer of this board."))
+            .target(&path)
+            .revs(Some(&b.revision()), None);
     };
     if let Err(r) = resolve_net_or_refuse(&b, &path, &net) {
         return r;
@@ -356,10 +397,16 @@ pub fn track_add(args: &Value, hook: Hook<'_>) -> Reply {
         let good = tr.kind == TrackKind::Segment
             && tr.net.as_deref() == Some(&n2)
             && tr.layers == [l2.clone()]
-            && near(tr.start.0, start.0) && near(tr.start.1, start.1)
-            && near(tr.end.0, end.0) && near(tr.end.1, end.1)
+            && near(tr.start.0, start.0)
+            && near(tr.start.1, start.1)
+            && near(tr.end.0, end.0)
+            && near(tr.end.1, end.1)
             && near(tr.width, width);
-        if good { Ok(json!({"changed": true, "item": track_json(tr)})) } else { Err("the new track doesn't match the request".into()) }
+        if good {
+            Ok(json!({"changed": true, "item": track_json(tr)}))
+        } else {
+            Err("the new track doesn't match the request".into())
+        }
     };
     add_item(&path, &b, "segment", &fields, &uuid, &verify, hook)
 }
@@ -373,7 +420,9 @@ pub fn via_add(args: &Value, hook: Hook<'_>) -> Reply {
     let (size, drill) = (args["size"].as_f64().unwrap_or(0.0), args["drill"].as_f64().unwrap_or(0.0));
     let net = args["net"].as_str().unwrap_or("").to_string();
     if drill >= size {
-        return Reply::refused(SRC, "invalid_argument", format!("drill: the drill {drill} must be smaller than the size {size}.")).target(&path).with(json!({"field": "drill"}));
+        return Reply::refused(SRC, "invalid_argument", format!("drill: the drill {drill} must be smaller than the size {size}."))
+            .target(&path)
+            .with(json!({"field": "drill"}));
     }
     if let Err(r) = resolve_net_or_refuse(&b, &path, &net) {
         return r;
@@ -395,9 +444,15 @@ pub fn via_add(args: &Value, hook: Hook<'_>) -> Reply {
         let [tr] = found.as_slice() else { return Err(format!("{} items carry the new uuid", found.len())) };
         let good = tr.kind == TrackKind::Via
             && tr.net.as_deref() == Some(&n2)
-            && near(tr.start.0, at.0) && near(tr.start.1, at.1)
-            && near(tr.width, size) && near(tr.drill, drill);
-        if good { Ok(json!({"changed": true, "item": track_json(tr)})) } else { Err("the new via doesn't match the request".into()) }
+            && near(tr.start.0, at.0)
+            && near(tr.start.1, at.1)
+            && near(tr.width, size)
+            && near(tr.drill, drill);
+        if good {
+            Ok(json!({"changed": true, "item": track_json(tr)}))
+        } else {
+            Err("the new via doesn't match the request".into())
+        }
     };
     add_item(&path, &b, "via", &fields, &uuid, &verify, hook)
 }
@@ -414,13 +469,21 @@ pub fn item_delete(args: &Value, hook: Hook<'_>) -> Reply {
         [] => {
             let other = b.top.iter().any(|id| b.tree.kind(*id) == Kind::List && node_uuid(&b.tree, *id).as_deref() == Some(&uuid));
             let what = if other { "It belongs to an item that isn't a track or via." } else { "No item has it." };
-            return Reply::refused(SRC, "not_found", format!("No track or via has uuid {uuid}. {what}")).target(&path).revs(Some(&rev), None);
+            return Reply::refused(SRC, "not_found", format!("No track or via has uuid {uuid}. {what}"))
+                .target(&path)
+                .revs(Some(&rev), None);
         }
         [one] => one,
-        many => return Reply::refused(SRC, "ambiguous_uuid", format!("{} items share uuid {uuid}.", many.len())).target(&path).revs(Some(&rev), None),
+        many => {
+            return Reply::refused(SRC, "ambiguous_uuid", format!("{} items share uuid {uuid}.", many.len()))
+                .target(&path)
+                .revs(Some(&rev), None)
+        }
     };
     if tr.locked {
-        return Reply::refused(SRC, "item_locked", format!("The {} {uuid} is locked.", tr.kind.as_str())).target(&path).revs(Some(&rev), None);
+        return Reply::refused(SRC, "item_locked", format!("The {} {uuid} is locked.", tr.kind.as_str()))
+            .target(&path)
+            .revs(Some(&rev), None);
     }
     let (gap_start, _) = gap_before(&b.tree, tr.node);
     let (_, end) = b.tree.span(tr.node);
@@ -438,11 +501,14 @@ pub fn item_delete(args: &Value, hook: Hook<'_>) -> Reply {
     // removing it would edit a second node, so it's reported instead.
     let t = &b.tree;
     let mentioned = b.top.iter().any(|id| {
-        matches!(t.head(*id), "group" | "generated")
-            && t.find(*id, "members").is_some_and(|m| t.args(m).any(|a| t.text(a) == uuid))
+        matches!(t.head(*id), "group" | "generated") && t.find(*id, "members").is_some_and(|m| t.args(m).any(|a| t.text(a) == uuid))
     });
     let r = commit(&path, &b, new, Change::Delete(top_index(&b, tr.node)), &verify, hook).with(json!({"uuid": uuid}));
-    if mentioned { r.with(json!({"note": "a group still lists this uuid as a member"})) } else { r }
+    if mentioned {
+        r.with(json!({"note": "a group still lists this uuid as a member"}))
+    } else {
+        r
+    }
 }
 
 pub fn item_set_locked(args: &Value, hook: Hook<'_>) -> Reply {
@@ -454,11 +520,16 @@ pub fn item_set_locked(args: &Value, hook: Hook<'_>) -> Reply {
     let uuid = args["uuid"].as_str().unwrap_or("").to_string();
     let want = args["locked"].as_bool().unwrap_or(false);
     let t = &b.tree;
-    let matches: Vec<Id> = b.top.iter().copied().filter(|id| t.kind(*id) == Kind::List && node_uuid(t, *id).as_deref() == Some(&uuid)).collect();
+    let matches: Vec<Id> =
+        b.top.iter().copied().filter(|id| t.kind(*id) == Kind::List && node_uuid(t, *id).as_deref() == Some(&uuid)).collect();
     let node = match matches.as_slice() {
         [] => return Reply::refused(SRC, "not_found", format!("No item has uuid {uuid}.")).target(&path).revs(Some(&rev), None),
         [one] => *one,
-        many => return Reply::refused(SRC, "ambiguous_uuid", format!("{} items share uuid {uuid}.", many.len())).target(&path).revs(Some(&rev), None),
+        many => {
+            return Reply::refused(SRC, "ambiguous_uuid", format!("{} items share uuid {uuid}.", many.len()))
+                .target(&path)
+                .revs(Some(&rev), None)
+        }
     };
     if crate::board::node_locked(t, node) == want {
         return Reply::complete(SRC, json!({"changed": false, "uuid": uuid, "locked": want})).target(&path).revs(Some(&rev), Some(&rev));
@@ -481,9 +552,9 @@ pub fn item_set_locked(args: &Value, hook: Hook<'_>) -> Reply {
 /// Remove or add the marker so that lock then unlock restores the original bytes.
 fn lock_splices(t: &Tree, node: Id, want: bool) -> Vec<Splice> {
     let mut kids: Vec<Id> = t.children(node).collect();
-    let marker = kids.iter().position(|c| {
-        (t.kind(*c) == Kind::List && t.head(*c) == "locked") || (t.kind(*c) == Kind::Atom && t.bytes(*c) == b"locked")
-    });
+    let marker = kids
+        .iter()
+        .position(|c| (t.kind(*c) == Kind::List && t.head(*c) == "locked") || (t.kind(*c) == Kind::Atom && t.bytes(*c) == b"locked"));
     if let Some(i) = marker.filter(|i| *i > 0) {
         let c = kids[i];
         if want {
@@ -540,9 +611,17 @@ pub fn footprint_move(args: &Value, hook: Hook<'_>) -> Reply {
     let all = b.footprints();
     let found: Vec<_> = all.iter().filter(|f| f.reference.as_deref() == Some(&reference)).collect();
     let fp = match found.as_slice() {
-        [] => return Reply::refused(SRC, "not_found", format!("No footprint has reference '{reference}'.")).target(&path).revs(Some(&rev), None),
+        [] => {
+            return Reply::refused(SRC, "not_found", format!("No footprint has reference '{reference}'."))
+                .target(&path)
+                .revs(Some(&rev), None)
+        }
         [one] => *one,
-        many => return Reply::refused(SRC, "ambiguous_reference", format!("{} footprints share reference '{reference}'.", many.len())).target(&path).revs(Some(&rev), None),
+        many => {
+            return Reply::refused(SRC, "ambiguous_reference", format!("{} footprints share reference '{reference}'.", many.len()))
+                .target(&path)
+                .revs(Some(&rev), None)
+        }
     };
     if fp.locked {
         return Reply::refused(SRC, "item_locked", format!("Footprint {reference} is locked.")).target(&path).revs(Some(&rev), None);
@@ -554,7 +633,9 @@ pub fn footprint_move(args: &Value, hook: Hook<'_>) -> Reply {
     let moved = to_nm(to.0) != to_nm(fp.at.0) || to_nm(to.1) != to_nm(fp.at.1);
     let t = &b.tree;
     if !moved && delta.abs() < 1e-9 {
-        return Reply::complete(SRC, json!({"changed": false, "uuid": fp.uuid, "footprint": footprint_json(fp)})).target(&path).revs(Some(&rev), Some(&rev));
+        return Reply::complete(SRC, json!({"changed": false, "uuid": fp.uuid, "footprint": footprint_json(fp)}))
+            .target(&path)
+            .revs(Some(&rev), Some(&rev));
     }
     let Some(at_node) = t.find(fp.node, "at") else {
         return Reply::refused(SRC, "parse_error", format!("Footprint {reference} has no position.")).target(&path);
@@ -563,7 +644,11 @@ pub fn footprint_move(args: &Value, hook: Hook<'_>) -> Reply {
     let (s, e) = t.span(at_node);
     let rot_text = if rotation.is_some() {
         let r = norm_angle(new_rot);
-        if r == 0.0 { String::new() } else { format!(" {}", fmt_mm(r)) }
+        if r == 0.0 {
+            String::new()
+        } else {
+            format!(" {}", fmt_mm(r))
+        }
     } else {
         t.arg(at_node, 2).map(|a| format!(" {}", t.text(a))).unwrap_or_default()
     };
@@ -649,7 +734,8 @@ mod tests {
 
     #[test]
     fn inline_layout_matches_old_files() {
-        let b = Board::parse(br#"(kicad_pcb (segment (start 0 0) (end 1 1) (width 1) (layer "F.Cu") (net 1) (tstamp a)))"#.to_vec()).unwrap();
+        let b =
+            Board::parse(br#"(kicad_pcb (segment (start 0 0) (end 1 1) (width 1) (layer "F.Cu") (net 1) (tstamp a)))"#.to_vec()).unwrap();
         let l = Layout::from_sibling(&b.tree, b.top[0]);
         assert!(l.inline);
         assert_eq!(l.render("x", &["(a)".into()]), b" (x (a))");
