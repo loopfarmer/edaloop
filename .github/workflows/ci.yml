@@ -26,7 +26,7 @@ jobs:
       run:
         working-directory: edaloop
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -48,9 +48,11 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      # Pinned, so that a new release's clippy lints arrive as a deliberate bump, not a red build.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
