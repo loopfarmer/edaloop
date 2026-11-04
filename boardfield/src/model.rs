@@ -276,9 +276,9 @@ impl Mask {
                     }
                 }
                 xs.sort_by(|p, q| p.partial_cmp(q).unwrap());
-                for span in xs.chunks_exact(2) {
-                    let lo = (span[0] - self.x0) / self.dx * 4.0 - 0.5;
-                    let hi = (span[1] - self.x0) / self.dx * 4.0 - 0.5;
+                for &[x_in, x_out] in xs.as_chunks::<2>().0 {
+                    let lo = (x_in - self.x0) / self.dx * 4.0 - 0.5;
+                    let hi = (x_out - self.x0) / self.dx * 4.0 - 0.5;
                     let (s0, s1) = (lo.ceil().max(0.0) as usize, (hi.floor().max(-1.0) + 1.0) as usize);
                     for sx in s0..s1.min(self.nx * 4) {
                         let c = self.idx(sx / 4, j, k);
@@ -932,7 +932,7 @@ pub fn run(p: &Problem, backend: Backend, gpu: Option<&Gpu>) -> Result<Outcome, 
     let s = last_stencil.ok_or("nothing solved")?;
     let plane = s.nx * s.ny;
     let per = p.settings.sublayers + 1;
-    let copper_sheet = |c: usize| (c / plane) % per == 0;
+    let copper_sheet = |c: usize| (c / plane).is_multiple_of(per);
     let (mut hot, mut hot_c) = (f32::NEG_INFINITY, 0usize);
     for (c, v) in x_t.iter().enumerate() {
         if copper_sheet(c) && *v > hot {
