@@ -23,9 +23,8 @@ import math
 import os
 import sys
 
-import pcbnew
-
 import channel_groups
+import pcbnew
 
 
 def export_dsn(src, dst, dsn, keep_nets="GND", scope="unlocked"):
@@ -211,7 +210,7 @@ def _derive_layout(fps, spec):
                 taps[ref] = (net, pin)
     # Rail pairs: which anchor pad carries which capacitors.
     anchors = {}                                        # rail net -> anchor pins, feed first
-    for net, entry, leave in reversed(chain):
+    for net, _entry, _leave in reversed(chain):
         for ref, (tap_net, pin) in taps.items():
             if tap_net == net:
                 far = next((p for p in pins[ref] if p != pin), None)

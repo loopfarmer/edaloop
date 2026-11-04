@@ -72,7 +72,7 @@ def _krt_route(p: Project, stripped: Path, run_dir: Path, keep_nets: list[str]) 
 
 def tournament(p: Project, runs: int = 3, passes: int = 20, threads: int = 4) -> dict:
     """Route the unlocked nets with each router, in copies, since Freerouting differs run to run, and rank them."""
-    from .checks import _chain_nets, REGISTRY
+    from .checks import _chain_nets
     tp = toolchain.paths()
     root = p.root / ".edaloop" / "route" / time.strftime("%Y%m%d-%H%M%S")
     root.mkdir(parents=True)

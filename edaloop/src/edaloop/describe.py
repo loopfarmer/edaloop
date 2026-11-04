@@ -54,7 +54,7 @@ def read_board(path: Path) -> tuple[dict, dict]:
 
     A numbered pad on no net gets the name KiCad gives an unconnected pin, since on a board that's all an empty net can mean.
     """
-    from .pcbfile import Board, _child, _val
+    from .pcbfile import Board, _child
 
     tree = Board(path).tree
     numbered = {x[1]: x[2] for x in tree if isinstance(x, list) and x and x[0] == "net" and len(x) > 2}

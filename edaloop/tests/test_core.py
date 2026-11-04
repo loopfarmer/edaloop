@@ -1,8 +1,8 @@
 """Tests for what the gate promises. No external EDA tool is needed."""
 import json
 import math
-import re
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -447,6 +447,7 @@ def test_failed_nets_reads_every_form_the_router_reports(tmp_path):
 
 def _bench(name):
     import yaml
+
     from edaloop import testbench
     return yaml.safe_load((testbench.BENCHES / f"{name}.yaml").read_text())
 
@@ -510,6 +511,7 @@ def test_bench_catches_a_wrong_bias_and_a_missing_model(tmp_path):
 
 def test_build_files_carry_the_description():
     import yaml
+
     from edaloop import boardgen, testbench
     bench = yaml.safe_load((testbench.BENCHES / "cband_element.yaml").read_text())
     from edaloop import schematic
@@ -524,6 +526,7 @@ def test_build_files_carry_the_description():
 
 def test_stackup_text_matches_the_description():
     import yaml
+
     from edaloop import boardgen, testbench
     bench = yaml.safe_load((testbench.BENCHES / "lband_element.yaml").read_text())
     text = boardgen.seed_board(bench)
@@ -561,6 +564,7 @@ def test_coupon_text_loses_parts_and_keeps_pours():
 
 def test_hop_ports_sit_at_a_rotated_lands_edge():
     from shapely.geometry import Point
+
     from edaloop import em_hops
     pad = {"x": 13.0, "y": 29.0, "w": 0.9, "h": 0.5, "rot": 128.2, "net": "RF"}
     at = em_hops.land_edge(pad, (0.0, -1.0))
@@ -580,6 +584,7 @@ def test_hop_port_direction_points_into_the_copper():
 
 def test_pour_holes_are_split_away():
     from shapely.geometry import Polygon, box
+
     from edaloop import em_hops
     ring = box(0, 0, 10, 10).difference(box(4, 4, 6, 6))
     pieces = em_hops._no_holes(ring)
@@ -612,6 +617,7 @@ def test_reference_grid_converges_on_the_board_line():
 @pytest.mark.parametrize("name", ["lband_element", "cband_element"])
 def test_drawn_schematic_keeps_the_described_netlist(name, tmp_path):
     import yaml
+
     from edaloop import schematic, testbench
     cli = toolchain.paths()["kicad_cli"]
     if not shutil.which(str(cli)):
@@ -656,7 +662,6 @@ def test_demo_board_builds_from_standard_footprints_with_rf_pads_on_the_line(tmp
 
 
 def test_placer_finds_the_diagonal_parts_angles(tmp_path):
-    from edaloop import boardgen, testbench
     # The custom land patterns aren't in the repo. Name the folder holding them to run this.
     pretty = Path(os.environ.get("EDALOOP_FOOTPRINTS", "/nonexistent"))
     if not (pretty / "RFLib_FP.pretty").is_dir():
@@ -723,6 +728,7 @@ def test_describe_refuses_a_board_with_one_connector(tmp_path):
 
 def test_a_build_refuses_an_unknown_current(tmp_path):
     import yaml
+
     from edaloop import boardgen, testbench
     bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
     bench["project"]["rails"][0]["loads"]["R1.1"] = "REQUIRED"
@@ -1204,8 +1210,9 @@ def test_still_air_depends_on_the_board():
 
 
 def test_a_port_follows_the_track_off_a_land():
-    from edaloop.em_hops import leaving_direction
     from types import SimpleNamespace as NS
+
+    from edaloop.em_hops import leaving_direction
 
     pad = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "rot": 0}
     chord = (0.7071, 0.7071)
@@ -1894,3 +1901,10 @@ def test_each_check_goes_stale_when_any_file_it_recorded_changes(offline_project
             else:
                 path.write_bytes(before)
         assert checks.current_inputs(p, ev), f"restoring {key} didn't make {name} current again"
+
+
+@pytest.mark.parametrize("script", ["kicad_ops.py", "export_eagle.py", "channel_groups.py", "pcbfile.py"])
+def test_scripts_for_kicads_python_stay_python_3_9(script):
+    import ast
+    # KiCad ships its own Python 3.9, and these run under it. CI's Python is newer and would accept 3.10 syntax.
+    ast.parse(Path(checks.__file__).with_name(script).read_text(), feature_version=(3, 9))

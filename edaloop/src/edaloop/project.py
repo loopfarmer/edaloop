@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from .ledger import Ledger, Finding
+from .ledger import Finding, Ledger
 
 FILE = "edaloop.yaml"
 

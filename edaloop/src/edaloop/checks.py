@@ -75,7 +75,7 @@ def run_check(p: Project, name: str) -> Evidence:
     start = time.time()
     try:
         o = spec["fn"](p)
-    except Exception as e:                      # a tool crash is evidence too, never a pass
+    except Exception as e:  # noqa: BLE001 - a tool crash is evidence too, never a pass
         ev = Evidence(name, ERROR, f"{type(e).__name__}: {e}"[:400], {}, seconds=round(time.time() - start, 1))
         return p.ledger.append(ev)
     # Errors first, so that whoever reads the top of the list reads what's wrong rather than a note on the way to it.
@@ -644,7 +644,8 @@ def em_fast(p: Project) -> Outcome:
 @check("em_hops", "simulate", needs_board=True)
 def em_hops(p: Project) -> Outcome:
     """Each RF hop as routed, solved as a 2-port with its own pours and vias: what the copper adds, without the parts."""
-    from . import em_hops as hops, route_classes
+    from . import em_hops as hops
+    from . import route_classes
     cfg = p.section("em_hops")
     board = Board(p.board)
     rf_cfg = p.section("rf")
@@ -923,7 +924,7 @@ def em_crosscheck(p: Project) -> Outcome:
     if d["loss_note"]:
         findings.append(Finding("em_crosscheck:loss", d["loss_note"], "warning"))
     reference = _em_reference(board, cfg)
-    for label, row in results.items():
+    for row in results.values():
         row["vs_reference_pct"] = round(100 * (row["zc_ohm"] - reference["z0_ohm"]) / reference["z0_ohm"], 1)
     backed = [k for k in (d["agreeing"] or []) if abs(results[k]["vs_reference_pct"]) <= REFERENCE_AGREES_PCT]
     if d["agreeing"] and not backed:
@@ -1155,7 +1156,7 @@ def current_inputs(p: Project, ev: Evidence) -> bool:
             try:
                 if _config(p, key) != digest:
                     return False
-            except Exception:                   # an input that can't be read now can't vouch for the old result
+            except Exception:  # noqa: BLE001 - an input that can't be read now can't vouch for the old result
                 return False
             # A requirement's verdict is only as fresh as the evidence it was read from.
             if key == "requirements":

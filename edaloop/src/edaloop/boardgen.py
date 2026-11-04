@@ -14,7 +14,8 @@ from pathlib import Path
 
 import yaml
 
-from . import schematic as drawing, toolchain
+from . import schematic as drawing
+from . import toolchain
 from .project import ProjectError
 
 OPS = Path(__file__).with_name("kicad_ops.py")

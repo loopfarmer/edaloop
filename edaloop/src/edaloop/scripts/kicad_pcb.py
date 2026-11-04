@@ -174,7 +174,6 @@ class Board(object):
             at = kid(fp, "at")
             fx, fy = float(at[1]), float(at[2])
             frot = float(at[3]) if len(at) > 3 else 0.0
-            back = (kid(fp, "layer") or ["", "F.Cu"])[1].startswith("B.")
             ref = ""
             for pr in kids(fp, "property"):
                 if len(pr) > 2 and pr[1] == "Reference":
