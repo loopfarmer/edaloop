@@ -1851,3 +1851,46 @@ def test_kicad6_schematic_moves_instances_and_speaks_only_6_0(tmp_path):
 def test_bypass_capacitor_values_are_read_as_written(monkeypatch, value, farads):
     ops = _under_kicad_python(monkeypatch, "kicad_ops")
     assert ops._farads(value) == pytest.approx(farads)
+
+
+# ---------------------------------------------------------------- staleness, across every check that runs here
+
+OFFLINE = ["project_files", "rf_reference", "rf_path", "rf_preserved", "power", "thermal_field", "rules", "cascade", "requirements"]
+
+
+@pytest.fixture
+def offline_project(tmp_path):
+    p = _rules_project(tmp_path)
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    p.cfg["cascade"] = {"stages": [{"name": "amp", "gain_db": [[1, 20.0]], "nf_db": [[1, 1.0]]}], "freq_mhz": [1]}
+    p.cfg["requirements"] = [{"id": "R1", "metric": "rules.min_track_mm", "min": 0.1}]
+    for name in OFFLINE:
+        checks.run_check(p, name)
+    return p
+
+
+@pytest.mark.parametrize("name", OFFLINE)
+def test_each_check_goes_stale_when_any_file_it_recorded_changes(offline_project, name):
+    p = offline_project
+    ev = p.ledger.latest()[name]
+    assert ev.status != "error", ev.summary           # the list above must keep running without tools
+    # Recording and recomputing agree, so fresh evidence reads as current.
+    assert checks.current_inputs(p, ev)
+    files = [k for k in ev.inputs if k not in checks.CONFIG_DIGESTS]
+    # cascade with no line loss reads only its stage table, so it records no file.
+    assert files or name == "cascade", f"{name} recorded no files"
+    for key in files:
+        path = p.root / key
+        before = path.read_bytes() if path.exists() else None
+        if before is None:
+            path.write_text("")                         # an input that appears
+        else:
+            path.write_bytes(before + b"\n")            # an input that changes
+        try:
+            assert not checks.current_inputs(p, ev), f"{name} stayed current after {key} changed"
+        finally:
+            if before is None:
+                path.unlink()
+            else:
+                path.write_bytes(before)
+        assert checks.current_inputs(p, ev), f"restoring {key} didn't make {name} current again"
