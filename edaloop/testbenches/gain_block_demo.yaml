@@ -1,0 +1,126 @@
+# A demonstration, not a built or measured design. It uses only KiCad's standard footprints, so anyone can build it:
+#   edaloop build testbenches/gain_block_demo.yaml -o my_board
+name: gain_block_demo
+summary: >-
+  Two-stage 900 MHz to 1.5 GHz gain block, each stage biased through a choke on its output, with 5 V taken from the output
+  cable through a bias-T.
+band_mhz: [900, 1500]
+supply_v: 5.0
+outline_mm: [40, 20]
+stackup:
+  copper_um: [35, 15.2, 15.2, 35]
+  dielectric_mm: [0.2104, 1.065, 0.2104]
+  epsilon_r: 4.3
+  loss_tangent: 0.02
+rf_line_width_mm: 0.36
+
+parts:
+  J1: {value: U.FL input}
+  C1: {value: 100nF}
+  U1: {value: LNA, mpn: PSA4-5043+}
+  L1: {value: 100nH}
+  C2: {value: 100nF}
+  U2: {value: LNA, mpn: PSA4-5043+}
+  L2: {value: 100nH}
+  C3: {value: 100nF}
+  L3: {value: 100nH}
+  J2: {value: U.FL output and DC feed}
+  C4: {value: 1000pF}
+  C5: {value: 100nF}
+  R1: {value: 0R}
+  C6: {value: 1000pF}
+  C7: {value: 100nF}
+  R2: {value: 0R}
+  C8: {value: 1000pF}
+  C9: {value: 100nF}
+
+nets:
+  IN: [J1.1, C1.1]
+  LNA1IN: [C1.2, U1.3]
+  LNA1OUT: [U1.1, L1.1, C2.1]
+  LNA2IN: [C2.2, U2.3]
+  LNA2OUT: [U2.1, L2.1, C3.1]
+  COAX: [C3.2, L3.1, J2.1]
+  BIAS1: [L1.2, C4.1, C5.1, R1.2]
+  BIAS2: [L2.2, C6.1, C7.1, R2.2]
+  VDD: [L3.2, C8.1, C9.1, R1.1, R2.1]
+  GND: [J1.2, J2.2, U1.2, U1.4, U2.2, U2.4, C4.2, C5.2, C6.2, C7.2, C8.2, C9.2]
+
+chain:
+  - [IN, J1.1, C1.1]
+  - [LNA1IN, C1.2, U1.3]
+  - [LNA1OUT, U1.1, C2.1]
+  - [LNA2IN, C2.2, U2.3]
+  - [LNA2OUT, U2.1, C3.1]
+  - [COAX, C3.2, J2.1]
+
+# Datasheet-style typical values, to exercise the cascade. Nothing here has been measured.
+stages:
+  - name: U1
+    gain_db: [[500, 20.3], [900, 18.4], [1500, 16.4]]
+    nf_db: [[500, 0.7], [900, 0.8], [1500, 0.95]]
+    oip3_dbm: [[500, 38.5], [900, 38], [1500, 37]]
+  - name: U2
+    gain_db: [[500, 20.3], [900, 18.4], [1500, 16.4]]
+    nf_db: [[500, 0.7], [900, 0.8], [1500, 0.95]]
+    oip3_dbm: [[500, 38.5], [900, 38], [1500, 37]]
+# Worked by hand through Friis.
+band_expect:
+  900: {gain_db: 36.8, nf_db: 0.81, oip3_dbm: 37.94}
+  1500: {gain_db: 32.8, nf_db: 0.97, oip3_dbm: 36.9}
+
+spice:
+  models:
+    J1: {kind: open, reason: "input connector"}
+    J2: {kind: open, reason: "the bench drives the cable node directly"}
+  bench:
+    name: bias
+    stimulus:
+      - "Vcable COAX 0 DC 5"
+      - "Rleak1 IN 0 1G"
+    measure:
+      - ".control"
+      - "op"
+      - "let v_lna1 = v(lna1out)"
+      - "let v_lna2 = v(lna2out)"
+      - "let i_total_ma = -i(vcable)*1000"
+      - "print v_lna1 v_lna2 i_total_ma"
+      - "quit"
+      - ".endc"
+  # Worked by hand: two stages at 58 mA each.
+  expect:
+    v_lna1: {value: 5.0, tol: 0.01}
+    v_lna2: {value: 5.0, tol: 0.01}
+    i_total_ma: {value: 116.0, tol: 0.1}
+
+layout:
+  axis: x
+  line: 12.0
+  gap_mm: 0.5
+  pour_clearance_mm: 0.3
+  footprints:
+    J1: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J2: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    U1: Package_TO_SOT_SMD:SOT-343_SC-70-4
+    U2: Package_TO_SOT_SMD:SOT-343_SC-70-4
+    C1: Capacitor_SMD:C_0603_1608Metric
+    C2: Capacitor_SMD:C_0603_1608Metric
+    C3: Capacitor_SMD:C_0603_1608Metric
+    L1: Inductor_SMD:L_0603_1608Metric
+    L2: Inductor_SMD:L_0603_1608Metric
+    L3: Inductor_SMD:L_0603_1608Metric
+    C4: Capacitor_SMD:C_0402_1005Metric
+    C5: Capacitor_SMD:C_0402_1005Metric
+    C6: Capacitor_SMD:C_0402_1005Metric
+    C7: Capacitor_SMD:C_0402_1005Metric
+    C8: Capacitor_SMD:C_0402_1005Metric
+    C9: Capacitor_SMD:C_0402_1005Metric
+    R1: Resistor_SMD:R_0402_1005Metric
+    R2: Resistor_SMD:R_0402_1005Metric
+  ground:
+    stitch_pitch_mm: 4.0
+
+project:
+  eps_eff: 3.25
+  rails:
+    - {net: VDD, source: L3.2, loads: {R1.1: 0.058, R2.1: 0.058}, max_drop_mv: 50}

@@ -1,0 +1,170 @@
+# A demonstration, not a built or measured design. Four gain-block channels sharing one supply, on KiCad's standard footprints.
+name: four_channel_demo
+summary: >-
+  Four single-stage gain blocks in parallel, each with its own bias choke, sharing one 5 V supply from a header through a
+  regulator-free link.
+band_mhz: [900, 1500]
+supply_v: 5.0
+stackup:
+  copper_um: [35, 15.2, 15.2, 35]
+  dielectric_mm: [0.2104, 1.065, 0.2104]
+  epsilon_r: 4.3
+  loss_tangent: 0.02
+rf_line_width_mm: 0.36
+
+parts:
+  J1: {value: U.FL in 1}
+  C1: {value: 100nF}
+  U1: {value: LNA, mpn: PSA4-5043+}
+  L1: {value: 100nH}
+  C2: {value: 100nF}
+  J2: {value: U.FL out 1}
+  C3: {value: 1000pF}
+  C4: {value: 100nF}
+  J3: {value: U.FL in 2}
+  C5: {value: 100nF}
+  U2: {value: LNA, mpn: PSA4-5043+}
+  L2: {value: 100nH}
+  C6: {value: 100nF}
+  J4: {value: U.FL out 2}
+  C7: {value: 1000pF}
+  C8: {value: 100nF}
+  J5: {value: U.FL in 3}
+  C9: {value: 100nF}
+  U3: {value: LNA, mpn: PSA4-5043+}
+  L3: {value: 100nH}
+  C10: {value: 100nF}
+  J6: {value: U.FL out 3}
+  C11: {value: 1000pF}
+  C12: {value: 100nF}
+  J7: {value: U.FL in 4}
+  C13: {value: 100nF}
+  U4: {value: LNA, mpn: PSA4-5043+}
+  L4: {value: 100nH}
+  C14: {value: 100nF}
+  J8: {value: U.FL out 4}
+  C15: {value: 1000pF}
+  C16: {value: 100nF}
+  P1: {value: 5 V in}
+
+nets:
+  IN1: [J1.1, C1.1]
+  A1: [C1.2, U1.3]
+  OUT1: [U1.1, L1.1, C2.1]
+  O1: [C2.2, J2.1]
+  IN2: [J3.1, C5.1]
+  A2: [C5.2, U2.3]
+  OUT2: [U2.1, L2.1, C6.1]
+  O2: [C6.2, J4.1]
+  IN3: [J5.1, C9.1]
+  A3: [C9.2, U3.3]
+  OUT3: [U3.1, L3.1, C10.1]
+  O3: [C10.2, J6.1]
+  IN4: [J7.1, C13.1]
+  A4: [C13.2, U4.3]
+  OUT4: [U4.1, L4.1, C14.1]
+  O4: [C14.2, J8.1]
+  VDD: [P1.1, L1.2, L2.2, L3.2, L4.2, C3.1, C4.1, C7.1, C8.1, C11.1, C12.1, C15.1, C16.1]
+  GND: [P1.2, J1.2, J2.2, J3.2, J4.2, J5.2, J6.2, J7.2, J8.2, U1.2, U1.4, U2.2, U2.4, U3.2, U3.4, U4.2, U4.4,
+        C3.2, C4.2, C7.2, C8.2, C11.2, C12.2, C15.2, C16.2]
+
+chain:
+  - [IN1, J1.1, C1.1]
+  - [A1, C1.2, U1.3]
+  - [OUT1, U1.1, C2.1]
+  - [O1, C2.2, J2.1]
+  - [IN2, J3.1, C5.1]
+  - [A2, C5.2, U2.3]
+  - [OUT2, U2.1, C6.1]
+  - [O2, C6.2, J4.1]
+  - [IN3, J5.1, C9.1]
+  - [A3, C9.2, U3.3]
+  - [OUT3, U3.1, C10.1]
+  - [O3, C10.2, J6.1]
+  - [IN4, J7.1, C13.1]
+  - [A4, C13.2, U4.3]
+  - [OUT4, U4.1, C14.1]
+  - [O4, C14.2, J8.1]
+
+spice:
+  models:
+    J1: {kind: open, reason: "connector"}
+    J2: {kind: open, reason: "connector"}
+    J3: {kind: open, reason: "connector"}
+    J4: {kind: open, reason: "connector"}
+    J5: {kind: open, reason: "connector"}
+    J6: {kind: open, reason: "connector"}
+    J7: {kind: open, reason: "connector"}
+    J8: {kind: open, reason: "connector"}
+    P1: {kind: open, reason: "the bench drives VDD directly"}
+  bench:
+    name: bias
+    stimulus:
+      - "Vsupply VDD 0 DC 5"
+      - "Rleak1 IN1 0 1G"
+      - "Rleak2 IN2 0 1G"
+      - "Rleak3 IN3 0 1G"
+      - "Rleak4 IN4 0 1G"
+      - "Rleak5 O1 0 1G"
+      - "Rleak6 O2 0 1G"
+      - "Rleak7 O3 0 1G"
+      - "Rleak8 O4 0 1G"
+    measure:
+      - ".control"
+      - "op"
+      - "let v_lna1 = v(out1)"
+      - "let i_total_ma = -i(vsupply)*1000"
+      - "print v_lna1 i_total_ma"
+      - "quit"
+      - ".endc"
+  # Worked by hand: four stages at 58 mA each.
+  expect:
+    v_lna1: {value: 5.0, tol: 0.01}
+    i_total_ma: {value: 232.0, tol: 0.2}
+
+layout:
+  axis: x
+  line: 20.0
+  gap_mm: 0.5
+  pour_clearance_mm: 0.3
+  footprints:
+    J1: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J2: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J3: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J4: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J5: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J6: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J7: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J8: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    U1: Package_TO_SOT_SMD:SOT-343_SC-70-4
+    U2: Package_TO_SOT_SMD:SOT-343_SC-70-4
+    U3: Package_TO_SOT_SMD:SOT-343_SC-70-4
+    U4: Package_TO_SOT_SMD:SOT-343_SC-70-4
+    C1: Capacitor_SMD:C_0603_1608Metric
+    C2: Capacitor_SMD:C_0603_1608Metric
+    C5: Capacitor_SMD:C_0603_1608Metric
+    C6: Capacitor_SMD:C_0603_1608Metric
+    C9: Capacitor_SMD:C_0603_1608Metric
+    C10: Capacitor_SMD:C_0603_1608Metric
+    C13: Capacitor_SMD:C_0603_1608Metric
+    C14: Capacitor_SMD:C_0603_1608Metric
+    L1: Inductor_SMD:L_0603_1608Metric
+    L2: Inductor_SMD:L_0603_1608Metric
+    L3: Inductor_SMD:L_0603_1608Metric
+    L4: Inductor_SMD:L_0603_1608Metric
+    C3: Capacitor_SMD:C_0402_1005Metric
+    C4: Capacitor_SMD:C_0402_1005Metric
+    C7: Capacitor_SMD:C_0402_1005Metric
+    C8: Capacitor_SMD:C_0402_1005Metric
+    C11: Capacitor_SMD:C_0402_1005Metric
+    C12: Capacitor_SMD:C_0402_1005Metric
+    C15: Capacitor_SMD:C_0402_1005Metric
+    C16: Capacitor_SMD:C_0402_1005Metric
+    P1: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical
+  ground:
+    stitch_pitch_mm: 4.0
+
+project:
+  eps_eff: 3.25
+  rails:
+    - {net: VDD, source: P1.1, loads: {L1.2: 0.058, L2.2: 0.058, L3.2: 0.058, L4.2: 0.058}, max_drop_mv: 50}

@@ -1,0 +1,35 @@
+# Build output
+target/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# edaloop's evidence, solver runs and generated results
+.edaloop/
+release/
+scorecard.html
+*_release.zip
+
+# Board designs stay out of this public repository, whatever folder they land in
+*.kicad_pcb
+*.kicad_pcb.*
+*.kicad_sch
+*.kicad_pro
+*.kicad_prl
+*.kicad_dru
+*.brd
+*.sch
+export/
+fp-lib-table
+sym-lib-table
+*.gbr
+*.gbrjob
+*.drl
+*.net
+*.dsn
+*.ses
+
+# Local tool state
+.claude/
+.DS_Store

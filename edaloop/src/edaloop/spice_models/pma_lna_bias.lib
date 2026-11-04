@@ -1,0 +1,11 @@
+* PMA2-63LN+ and PMA3-83LN+ DC bias behaviour only. Each draws a typical current from its
+* output pin once biased, and has no RF model. Use the cascade check for RF.
+* Pins: RF out and supply, ground, RF in.
+.subckt PMA2_63LN_BIAS out g in
+Bid out g I = 0.044 * tanh(max(V(out,g),0) / 1.0)
+Rin in g 1G
+.ends
+.subckt PMA3_83LN_BIAS out g in
+Bid out g I = 0.060 * tanh(max(V(out,g),0) / 1.0)
+Rin in g 1G
+.ends

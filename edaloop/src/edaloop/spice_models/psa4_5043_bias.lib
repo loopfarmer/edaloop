@@ -1,0 +1,8 @@
+* PSA4-5043+ DC bias behaviour only. It draws its typical current from the output
+* pin once biased, and has no RF model. Use the cascade check for RF.
+* Pins: 1 RF out and supply, 2 ground, 3 RF in, 4 ground.
+.subckt PSA4_5043_BIAS out g1 in g2
+Bid out g1 I = 0.058 * tanh(max(V(out,g1),0) / 1.0)
+Rin in g1 1G
+Rg g2 g1 1m
+.ends

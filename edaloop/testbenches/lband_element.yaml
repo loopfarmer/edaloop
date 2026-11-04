@@ -1,0 +1,157 @@
+# A description of a real board, not its design files: no layout, so routing and EM can't run from it.
+name: lband_element
+summary: >-
+  One-channel L-band receive board: highpass, limiter, LNA, two lowpass filters, then a bias-T that
+  takes its 5 V from the output cable.
+band_mhz: [728, 1200]
+supply_v: 5.0
+outline_mm: [26, 66]
+stackup:
+  copper_um: [35, 15.2, 15.2, 35]
+  dielectric_mm: [0.2104, 1.065, 0.2104]
+  epsilon_r: 4.3
+  loss_tangent: 0.02
+rf_line_width_mm: 0.355   # solved to 50.2 ohm on a coupon with this stackup and a 0.3 mm pour gap
+
+parts:
+  J1: {value: U.FL input}
+  FL1: {value: highpass, mpn: HFCN-440+}
+  U1: {value: limiter, mpn: RLM-33-2W+}
+  U2: {value: LNA, mpn: PSA4-5043+}
+  C1: {value: 100nF}
+  FL2: {value: lowpass, mpn: LFCN-1200+}
+  FL3: {value: lowpass, mpn: LFCN-1200+}
+  C2: {value: 100nF}
+  L1: {value: LNA choke}
+  L2: {value: 100nH}
+  R1: {value: 0R}
+  RT1: {value: 2k2, note: NTC at 25 C, telemetry leg}
+  R2: {value: 1k0}
+  C3: {value: 1000pF}
+  C4: {value: 100nF}
+  C5: {value: 100nF}
+  C6: {value: 1000pF}
+  J2: {value: U.FL output and DC feed}
+
+nets:
+  ANT: [J1.1, FL1.1]
+  HPF2LIM: [FL1.3, U1.1]
+  LIM: [U1.4, U2.3]
+  LNAOUT: [U2.1, C1.1, L1.2]
+  LNA2LP: [C1.2, FL2.1]
+  LP1OUT: [FL2.3, FL3.1]
+  LP2OUT: [FL3.3, C2.1]
+  COAX: [C2.2, L2.1, J2.1]
+  BIAS: [R1.2, L1.1]
+  TSENSE: [RT1.2, R2.1]
+  VDD: [R1.1, L2.2, RT1.1, C3.1, C4.1, C5.1, C6.1]
+  GND: [J1.2, J2.2, R2.2, FL1.2, FL1.4, FL2.2, FL2.4, FL3.2, FL3.4, U1.2, U1.3, U1.5, U1.6, U2.2, U2.4,
+        C3.2, C4.2, C5.2, C6.2]
+
+# The RF path, input to output: net, entry pin, exit pin. Anything else on one of these nets is a tap.
+chain:
+  - [ANT, J1.1, FL1.1]
+  - [HPF2LIM, FL1.3, U1.1]
+  - [LIM, U1.4, U2.3]
+  - [LNAOUT, U2.1, C1.1]
+  - [LNA2LP, C1.2, FL2.1]
+  - [LP1OUT, FL2.3, FL3.1]
+  - [LP2OUT, FL3.3, C2.1]
+  - [COAX, C2.2, J2.1]
+
+# The design's own table at one frequency, including the cable ahead of the board. Each row's cumulative
+# figures must come back from Friis. Rounding in the source allows a small tolerance.
+design_table:
+  freq_mhz: 880
+  rows:
+    - {stage: input cable, gain_db: -0.64, nf_db: 0.64, cum_gain_db: -0.64, cum_nf_db: 0.64}
+    - {stage: FL1 and board input, gain_db: -0.90, nf_db: 0.90, cum_gain_db: -1.54, cum_nf_db: 1.54}
+    - {stage: U1, gain_db: -0.25, nf_db: 0.25, cum_gain_db: -1.79, cum_nf_db: 1.79}
+    - {stage: U2, gain_db: 18.40, nf_db: 0.80, cum_gain_db: 16.61, cum_nf_db: 2.59}
+    - {stage: FL2 and FL3, gain_db: -0.72, nf_db: 0.72, cum_gain_db: 15.88, cum_nf_db: 2.60}
+
+# Parts alone, with no copper loss, interpolated over the band.
+stages:
+  - {name: FL1, loss_db: [[440, 0.6], [600, 0.35], [1200, 0.45], [2500, 0.8]]}
+  - {name: U1, loss_db: [[500, 0.25], [1000, 0.3], [2000, 0.45]]}
+  - name: U2
+    gain_db: [[500, 20.3], [900, 18.4], [1500, 16.4]]
+    nf_db: [[500, 0.7], [900, 0.8], [1500, 0.95]]
+    oip3_dbm: [[500, 38.5], [900, 38], [1500, 37]]
+  - {name: FL2, loss_db: [[600, 0.25], [1000, 0.4], [1200, 1.0]]}
+  - {name: FL3, loss_db: [[600, 0.25], [1000, 0.4], [1200, 1.0]]}
+
+# A regression record from edaloop's own Friis, not an independent figure. Copper adds about 0.13 dB of loss.
+band_expect:
+  728: {gain_db: 17.82, nf_db: 1.43, oip3_dbm: 37.52}
+  1200: {gain_db: 14.48, nf_db: 1.71, oip3_dbm: 35.40}
+
+spice:
+  models:
+    L1: {kind: value, value: 100n, reason: "the source says only 'LNA choke'. DC results don't depend on its value"}
+    RT1: {kind: value, value: 2.2k, reason: "NTC at 25 C"}
+    FL1: {kind: open, reason: "RF filter; the RF path is the cascade's job"}
+    FL2: {kind: open, reason: "RF filter; the RF path is the cascade's job"}
+    FL3: {kind: open, reason: "RF filter; the RF path is the cascade's job"}
+    U1: {kind: open, reason: "limiter ahead of the LNA, carries no bias"}
+    J1: {kind: open, reason: "input connector"}
+    J2: {kind: open, reason: "the bench drives the cable node directly"}
+  bench:
+    name: bias
+    stimulus:
+      - "Vcable COAX 0 DC 5"
+      - "Rleak1 ANT 0 1G"
+      - "Rleak2 HPF2LIM 0 1G"
+      - "Rleak3 LNA2LP 0 1G"
+      - "Rleak4 LP1OUT 0 1G"
+      - "Rleak5 LP2OUT 0 1G"
+    measure:
+      - ".control"
+      - "op"
+      - "let v_lna = v(lnaout)"
+      - "let v_tsense = v(tsense)"
+      - "let i_total_ma = -i(vcable)*1000"
+      - "print v_lna v_tsense i_total_ma"
+      - "quit"
+      - ".endc"
+  # Worked by hand: 58 mA LNA, plus 5 V across 2.2k + 1k in the telemetry leg.
+  expect:
+    v_lna: {value: 5.0, tol: 0.01}
+    v_tsense: {value: 1.5625, tol: 0.001}
+    i_total_ma: {value: 59.56, tol: 0.05}
+
+# How the board is laid out. Rotations and positions are derived from the nets and the footprints' courtyards.
+layout:
+  axis: y
+  line: 13.0
+  gap_mm: 1.0
+  pour_clearance_mm: 0.3
+  footprints:
+    J1: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    J2: Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical
+    FL1: RFLib_FP:LFCN_FV1206
+    FL2: RFLib_FP:LFCN_FV1206
+    FL3: RFLib_FP:LFCN_FV1206
+    U1: RFLib_FP:RLM_TT1224
+    U2: Package_TO_SOT_SMD:SOT-343_SC-70-4
+    C1: Capacitor_SMD:C_0603_1608Metric
+    C2: Capacitor_SMD:C_0603_1608Metric
+    C3: Capacitor_SMD:C_0603_1608Metric
+    C4: Capacitor_SMD:C_0603_1608Metric
+    C5: Capacitor_SMD:C_0402_1005Metric
+    C6: Capacitor_SMD:C_0402_1005Metric
+    L1: Inductor_SMD:L_0603_1608Metric
+    L2: Inductor_SMD:L_0603_1608Metric
+    R1: Resistor_SMD:R_0603_1608Metric
+    R2: Resistor_SMD:R_0603_1608Metric
+    RT1: Resistor_SMD:R_0402_1005Metric
+  ground:
+    per_pad: {U1: 2}
+    stitch_pitch_mm: 5.0
+
+# What edaloop.yaml needs beyond the netlist.
+project:
+  eps_eff: 3.25
+  rails:
+    - {net: VDD, source: L2.2, loads: {R1.1: 0.058, RT1.1: 0.00156}, max_drop_mv: 50}
+    - {net: BIAS, source: R1.2, loads: {L1.1: 0.058}, max_drop_mv: 50}

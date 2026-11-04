@@ -1,0 +1,19 @@
+# Part number -> model. `provenance` is reported with every bench that uses it.
+# Vendor files aren't copied here, since vendors have their own terms. Point at yours from a project
+# registry (spice.registry in edaloop.yaml), with device, model and pins for a .model-only library.
+models:
+  PSA4-5043+:
+    file: psa4_5043_bias.lib
+    subckt: PSA4_5043_BIAS
+    pins: [1, 2, 3, 4]
+    provenance: "behavioural: DC bias only, 58 mA at +5.0 V typical, to be checked against the datasheet. Not valid at RF"
+  PMA2-63LN+:
+    file: pma_lna_bias.lib
+    subckt: PMA2_63LN_BIAS
+    pins: [6, 2, 3]
+    provenance: "behavioural: DC bias only, 44 mA at +5.0 V with the current pin open, to be checked against the datasheet. Not valid at RF"
+  PMA3-83LN+:
+    file: pma_lna_bias.lib
+    subckt: PMA3_83LN_BIAS
+    pins: [8, 1, 2]
+    provenance: "behavioural: DC bias only, 60 mA at +5.0 V, to be checked against the datasheet. Not valid at RF"

@@ -1,0 +1,32 @@
+[project]
+name = "edaloop"
+version = "0.1.0"
+description = "Evidence ledger and gate controller that joins atopile, KiCad, routers, SPICE and EM solvers into one design loop for agents"
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6",
+    "numpy>=2",
+    "scikit-rf>=1.5",
+    "mcp>=2.3",
+    "shapely>=2.2.0",
+]
+
+[project.scripts]
+edaloop = "edaloop.cli:main"
+edaloop-mcp = "edaloop.mcp_server:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edaloop"]
+artifacts = ["src/edaloop/agent/*", "src/edaloop/spice_models/*", "src/edaloop/data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

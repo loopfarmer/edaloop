@@ -1,0 +1,215 @@
+# Known-good production boards used to test edaloop. Adafruit designs its boards and ships them as products.
+# Their design files are CC BY-SA 3.0 and stay in Adafruit's repositories: `edaloop eval` fetches each at the pinned commit.
+# The RF boards at the end come from other projects, under the licence each entry names, and are fetched the same way. None is stored here.
+# `known` holds what each board's own files or README state. Anything else the evaluation assumes is under `assumed`.
+# Adafruit's Fritzing parts for these boards, used as a second opinion on pins and pad positions.
+fritzing_commit: c7bbe2d58a78ebc7b3499351c0f77356cd701c96
+samples:
+  lora:
+    fritzing: "parts/Adafruit RFM9x LoRa Radio.fzpz"
+    title: RFM LoRa Breakout
+    product: 3072
+    class: RF, module to connector
+    repo: Adafruit-RFM-LoRa-Radio-Breakout-PCB
+    commit: 3ad6bed6e1b407afa7119ae548b5c2f1b107c6b1
+    file: Adafruit RFM+LoRa Breakout.brd
+    known:
+      rf_path: [X1, U1]
+      band_mhz: [868, 915]
+    assumed: {copper_um: [35, 35], dielectric_mm: [1.5], epsilon_r: 4.5}
+  buck:
+    fritzing: "parts/TPS62827 Buck Converter.fzpz"
+    title: TPS62827 3.3V Buck
+    product: 4920
+    class: Switching power
+    repo: Adafruit-TPS62827-PCB
+    commit: 441e9beed498f62705ee2df458a903a010eae4a2
+    file: TPS62827 3.3V Buck Converter.brd
+    known:
+      rf_path: null
+      copper_um: [70, 70]           # README: 2 oz double layer
+      supply_v: 5.0
+      # README: 3.3 V at 2 A continuous, 90 to 95% efficient. 2 A at 92.5% from 5 V draws 1.43 A and loses about 0.54 W.
+      rails:
+        - {net: VIN, source: JP1.2, loads: {IC2.P$6: 1.43}}
+        - {net: 3.3V, source: L1.P$2, loads: {JP1.3: 2.0}}
+        - {net: N$1, source: IC2.P$5, loads: {L1.P$1: 2.0}}
+      part_watts: {IC2: 0.54}
+    assumed: {dielectric_mm: [1.5], epsilon_r: 4.5}
+  qtpy:
+    fritzing: "parts/Adafruit QT Py ESP32 Pico.fzpz"
+    title: QT Py ESP32 Pico
+    product: 5395
+    class: RF, chip antenna, 4-layer
+    repo: Adafruit-QT-Py-ESP32-Pico-PCB
+    commit: f45b12704ccbb7180d89db28e1af7bd861124133
+    file: Adafruit QT Py ESP32 Pico.brd
+    known:
+      rf_path: [X1, L2, X2]
+      band_mhz: [2400, 2500]
+    assumed: {copper_um: [35, 17.5, 17.5, 35], dielectric_mm: [0.2, 1.1, 0.2], epsilon_r: 4.5}
+  metro-p4:
+    fritzing: "parts/Adafruit Metro ESP32-P4 Hydra - with 16 MB PSRAM - v1 Chipset.fzpz"
+    title: Metro ESP32-P4 Hydra
+    product: 6536
+    class: High speed, dense, 4-layer
+    repo: Adafruit-Metro-ESP32-P4-Hydra-PCB
+    commit: 3c5562c252c3a305da0ac7bf753c536295643b14
+    file: Adafruit Metro ESP32-P4 Hydra rev A.brd
+    known: {rf_path: null}
+    assumed: {copper_um: [35, 17.5, 17.5, 35], dielectric_mm: [0.2, 1.1, 0.2], epsilon_r: 4.5}
+  feather-dvi:
+    fritzing: "parts/Adafruit Feather RP2040 DVI.fzpz"
+    title: Feather RP2040 DVI
+    product: 5710
+    class: HDMI/DVI
+    repo: Adafruit-Feather-RP2040-DVI-PCB
+    commit: 24f7c1cde8c7284bbd626f78e2b853be24d32ee6
+    file: Adafruit Feather RP2040 DVI.brd
+    known: {rf_path: null}
+  wiz5500:
+    fritzing: "parts/Adafruit Wiz5500 Ethernet Co-Processor Breakout Board.fzpz"
+    title: WIZ5500 Ethernet Breakout
+    product: 6348
+    class: Ethernet
+    repo: Adafruit-Wiz5500-Ethernet-Co-Processor-Breakout-Board-PCB
+    commit: f7faefb4fd304faa20f5977add138715da4b3f3c
+    file: Adafruit-Wiz5500-Ethernet-Co-Processor-Breakout-Board.brd
+    known: {rf_path: null}
+  bq25185:
+    fritzing: "parts/Adafruit bq25185 with 5V Boost Breakout.fzpz"
+    title: bq25185 with 5V Boost
+    product: 6106
+    class: LiPo charger, boost
+    repo: Adafruit-bq25185-with-5V-Boost-PCB
+    commit: 2ce979f3dec58aa42ab4ae3707f10a7df528ef12
+    file: Adafruit bq25185 with 5V Boost Breakout.brd
+    known: {rf_path: null}
+  usb-pd:
+    fritzing: "parts/Adafruit USB Type C Power Delivery Dummy - I2C or Switchable - HUSB238 - STEMMA QT.fzpz"
+    title: USB-C PD Switchable
+    product: 5991
+    class: USB-PD
+    repo: Adafruit-USB-Type-C-PD-Switchable-PCB
+    commit: d10701c22751842250420a06cf4d39d50d58c750
+    file: Adafruit USB Type C PD Switchable.brd
+    known: {rf_path: null}
+  motor-bonnet:
+    fritzing: "parts/Adafruit Motor Bonnet.fzpz"
+    title: DC+Stepper Motor Bonnet
+    product: 4280
+    class: Motor driver
+    repo: Adafruit-DC-Stepper-Motor-HAT-PCB
+    commit: 536d39c0d90da3ef5916985afb3ce4178c219206
+    file: Adafruit Motor Bonnet Rev B.brd
+    known: {rf_path: null}
+  solenoid:
+    fritzing: "parts/Adafruit I2C to 8 Channel Solenoid Driver.fzpz"
+    title: I2C 8-Channel Solenoid Driver
+    product: 6318
+    class: High current, repeated
+    repo: Adafruit-I2C-to-8-Channel-Solenoid-Driver-PCB
+    commit: 9266434c5517c4b418d8a69ba3281bf652bf98ff
+    file: Adafruit I2C to 8 Channel Solenoid Driver.brd
+    known: {rf_path: null}
+  pca9685:
+    fritzing: "parts/Adafruit PCA9685 PWM Servo Breakout.fzpz"
+    title: PCA9685 16-Channel PWM
+    product: 815
+    class: Repeated channels
+    repo: Adafruit-16-Channel-PWM-Servo-Driver-PCB
+    commit: 32578c83a5ba2946249b80b1aa1fb18ae4e61e7d
+    file: Adafruit PCA9685 rev C.brd
+    known: {rf_path: null}
+  ads122c04:
+    fritzing: "parts/Adafruit ADS122C04 24-Bit ADC.fzpz"
+    title: ADS122C04 24-bit ADC
+    product: 6432
+    class: Precision analog
+    repo: Adafruit-ADS122C04-24-Bit-ADC-PCB
+    commit: bb60e307305d48648d0d77d3edcdef25bee5c94a
+    file: Adafruit ADS122C04 24-Bit ADC.brd
+    known: {rf_path: null}
+  tlv320:
+    fritzing: "parts/Adafruit TLV320DAC3100 I2S DAC.fzpz"
+    title: TLV320DAC3100 audio DAC
+    product: 6309
+    class: Audio, mixed signal
+    repo: Adafruit-TLV320DAC3100-I2S-DAC-PCB
+    commit: 4456a62a418b1a25ce2500ce0335ab6fe1eceacf
+    file: Adafruit TLV320DAC3100 I2S DAC.brd
+    known: {rf_path: null}
+  grand-central:
+    fritzing: "parts/Adafruit Grand Central M4 Express.fzpz"
+    title: Grand Central M4
+    product: 4064
+    class: Dense MCU
+    repo: Adafruit-Grand-Central-PCB
+    commit: 9e59fe3cd1ea37aa6caaf5780fa80956e6ccd74b
+    file: Adafruit Grand Central M4 Express rev B.brd
+    known: {rf_path: null}
+  eyelights:
+    fritzing: "parts/Adafruit EyeLights LED Glasses Driver.fzpz"
+    title: EyeLights LED Glasses
+    product: 5210
+    class: Odd outline, LED matrix
+    repo: Adafruit-EyeLights-LED-Glasses-and-Driver-PCB
+    commit: 413ce0dd8db9915a982eab83b68ea9a01c70db77
+    file: Adafruit EyeLights LED Glasses Driver.brd
+    known: {rf_path: null}
+  # Open RF designs in native KiCad. No RF path is stated for these, since nobody has verified one here, so what edaloop finds is reported as info.
+  hackrf_one:
+    title: HackRF One
+    product: Great Scott Gadgets HackRF One
+    class: RF, software-defined radio, 1 MHz to 6 GHz
+    licence: CERN-OHL-P-2.0, per hardware/hackrf-one/LICENSE
+    owner: greatscottgadgets
+    repo: hackrf
+    commit: 468c5d93b66032c892c95bbf9ff15ff1b803e84f
+    file: hardware/hackrf-one/hackrf-one.kicad_pcb
+    project: hardware/hackrf-one/hackrf-one.kicad_pro
+    known: {band_mhz: [1, 6000]}
+  operacake:
+    title: Opera Cake antenna switch
+    product: Great Scott Gadgets Opera Cake
+    class: RF, switch matrix
+    licence: GPL-2.0, as GitHub reports for the repository. The board's folder has no licence file of its own
+    owner: greatscottgadgets
+    repo: hackrf
+    commit: 468c5d93b66032c892c95bbf9ff15ff1b803e84f
+    file: hardware/operacake/operacake.kicad_pcb
+    known: {band_mhz: [1, 6000], try_rf: true}
+    assumed: {copper_um: [35, 15.2, 15.2, 35], dielectric_mm: [0.2, 1.1, 0.2], epsilon_r: 4.5}
+  lna915:
+    title: LNA915 amplifier
+    product: Great Scott Gadgets LNA915
+    class: RF, low-noise amplifier
+    licence: GPL-2.0, as GitHub reports for the repository. The board's folder has no licence file of its own
+    owner: greatscottgadgets
+    repo: hackrf
+    commit: 468c5d93b66032c892c95bbf9ff15ff1b803e84f
+    file: hardware/LNA915/LNA915.kicad_pcb
+    known: {band_mhz: [902, 928], try_rf: true}
+    assumed: {copper_um: [35, 15.2, 15.2, 35], dielectric_mm: [0.2, 1.1, 0.2], epsilon_r: 4.5}
+  librevna:
+    title: LibreVNA
+    product: LibreVNA
+    class: RF, vector network analyser, 100 kHz to 6 GHz
+    licence: GPL-3.0, as GitHub reports for the repository
+    owner: jankae
+    repo: LibreVNA
+    commit: c47781910221ba2b02636229920a7c8d48aeb8f8
+    file: Hardware/Kicad/VNA.kicad_pcb
+    project: Hardware/Kicad/VNA.kicad_pro
+    known: {band_mhz: [0.1, 6000]}
+  limerfe:
+    title: LimeRFE 1v31
+    product: Lime Microsystems LimeRFE
+    class: RF, front end
+    licence: Solderpad Hardware License v2.1, per the repository README
+    owner: myriadrf
+    repo: LimeRFE
+    commit: 412e190d36fcab2f0a5b8902dd3e4330019df56a
+    file: hardware/1v31/KiCAD/Lime_RFE.kicad_pcb
+    known: {band_mhz: [1, 3800]}
+    assumed: {copper_um: [35, 15.2, 15.2, 15.2, 15.2, 35], dielectric_mm: [0.2, 0.3, 0.5, 0.3, 0.2], epsilon_r: 4.5}
