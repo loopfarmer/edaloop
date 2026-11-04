@@ -1567,3 +1567,156 @@ def test_eagle_exporter_ships_with_its_dtd():
     assert "CC BY-ND 3.0" in dtd.read_text()
     source = export.EAGLE.read_text()
     assert "/Users/" not in source and 'CLI = sys.argv[4]' in source
+
+
+# ---------------------------------------------------------------- evidence goes stale when anything it read changes
+
+CHAINS = 'CHAINS = [("RF", ("J1", "1"), ("J2", "1"))]\n'
+PROFILE = """manufacturer: {name: Test fab}
+published_capabilities:
+  mechanical_drill: {minimum_in: 0.008, preferred_design_mm: 0.3}
+  annular_ring: {class_2_min_in: 0.002}
+engineering_defaults: {min_trace_mm: 0.1}
+"""
+
+
+def _rules_project(tmp_path):
+    placed = PCB.replace('(footprint "x"', '(footprint "x" (at 0 0)').replace(
+        'smd rect (net', 'smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net')
+    (tmp_path / "pack").mkdir()
+    (tmp_path / "pack" / "fab.yaml").write_text(PROFILE)
+    (tmp_path / "c.py").write_text(CHAINS)
+    p = make(tmp_path, f"rf: {{chains: c.py}}\nrules: {{pack: {tmp_path / 'pack'}, profile: fab.yaml}}\n")
+    (tmp_path / "b.kicad_pcb").write_text(placed)
+    return p
+
+
+def test_changing_the_rule_profile_makes_rules_stale(tmp_path):
+    p = _rules_project(tmp_path)
+    ev = checks.run_check(p, "rules")
+    assert ev.status != "error" and checks.current_inputs(p, ev)
+    (tmp_path / "pack" / "fab.yaml").write_text(PROFILE.replace("min_trace_mm: 0.1", "min_trace_mm: 0.5"))
+    assert not checks.current_inputs(p, ev)
+
+
+def test_changing_rf_settings_or_chains_makes_rules_stale(tmp_path):
+    p = _rules_project(tmp_path)
+    ev = checks.run_check(p, "rules")
+    assert ev.status != "error"
+    p.cfg["rf"]["impedance"] = {"max_freq_ghz": 6}
+    assert not checks.current_inputs(p, ev)
+    p.cfg["rf"].pop("impedance")
+    assert checks.current_inputs(p, ev)
+    (tmp_path / "c.py").write_text(CHAINS + 'CHAINS.append(("RF2", ("J2", "1"), ("J3", "1")))\n')
+    assert not checks.current_inputs(p, ev)
+
+
+@pytest.mark.parametrize("name", ["rf_reference", "rf_preserved"])
+def test_changing_the_chain_list_makes_rf_checks_stale(tmp_path, name):
+    (tmp_path / "c.py").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.py}\n")
+    ev = checks.run_check(p, name)
+    assert ev.status == "pass" and checks.current_inputs(p, ev)
+    (tmp_path / "c.py").write_text(CHAINS + 'CHAINS.append(("GND", ("J2", "2"), ("J3", "2")))\n')
+    assert not checks.current_inputs(p, ev)
+
+
+def test_deleted_rf_baseline_is_not_quietly_re_recorded(tmp_path):
+    (tmp_path / "c.py").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.py}\n")
+    assert "baseline recorded" in checks.run_check(p, "rf_preserved").summary
+    # A router moves RF copper, and the baseline that would have caught it goes missing.
+    (tmp_path / "b.kicad_pcb").write_text(PCB.replace("(end 10 5)", "(end 10 6)"))
+    (tmp_path / ".edaloop" / "rf_baseline.json").unlink()
+    for _ in range(2):                          # running it again mustn't clear it either
+        ev = checks.run_check(p, "rf_preserved")
+        assert ev.status == "fail" and any(f["id"] == "rf_preserved:baseline_changed" for f in ev.findings)
+    # A person can accept the new baseline, on the record.
+    p.cfg["waivers"] = [{"match": "rf_preserved:baseline_changed", "by": "Pat", "reason": "re-laid the output match"}]
+    assert checks.run_check(p, "rf_preserved").status == "pass"
+
+
+def test_an_input_that_appears_later_makes_evidence_stale(tmp_path):
+    p = make(tmp_path)
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    ev = checks.run_check(p, "project_files")
+    assert ev.status == "warn" and ev.inputs["fp-lib-table"] == checks.ABSENT
+    assert checks.current_inputs(p, ev)
+    (tmp_path / "fp-lib-table").write_text("")
+    assert not checks.current_inputs(p, ev)
+
+
+def test_drc_settings_are_inputs(tmp_path):
+    p = make(tmp_path)
+    ev = Evidence("drc", "pass", "", {"drc_config": checks._config(p, "drc_config")})
+    assert checks.current_inputs(p, ev)
+    p.cfg["drc"] = {"refill_zones": False}
+    assert not checks.current_inputs(p, ev)
+
+
+def test_unknown_or_unreadable_inputs_are_stale(tmp_path):
+    p = make(tmp_path)
+    assert not checks.current_inputs(p, Evidence("x", "pass", "", {"no_such_key": "abc"}))
+    p.cfg["rules"] = {"pack": str(tmp_path / "gone"), "profile": "fab.yaml"}
+    assert not checks.current_inputs(p, Evidence("rules", "pass", "", {"rule_profile": "abc"}))
+
+
+def test_every_config_digest_can_be_worked_out(tmp_path):
+    p = make(tmp_path)
+    skip = {"rule_profile", "spice_config"}      # these need a rule pack and kicad-cli
+    for key in set(checks.CONFIG_DIGESTS) - skip:
+        checks._config(p, key)
+
+
+def test_requirement_goes_stale_when_its_evidence_does(tmp_path):
+    p = make(tmp_path, "requirements:\n  - {id: R1, metric: project_files.x, max: 1}\n")
+    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb")}, {"x": 0}))
+    ev = checks.run_check(p, "requirements")
+    assert ev.status == "pass" and checks.current_inputs(p, ev)
+    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb")}, {"x": 5}))
+    assert not checks.current_inputs(p, ev)     # newer evidence for the metric
+    ev = checks.run_check(p, "requirements")
+    assert ev.status == "fail"
+    with open(tmp_path / "b.kicad_pcb", "a") as f:
+        f.write("\n")
+    assert not checks.current_inputs(p, ev)     # the evidence it read went stale
+
+
+# ---------------------------------------------------------------- the gate
+
+def test_an_empty_gate_never_releases(tmp_path):
+    p = make(tmp_path)
+    p.cfg["gate"] = []
+    assert not controller.status(p)["ready_to_release"]
+    assert controller.next_action(p)["action"] == "ask_person"
+    assert controller.run_all(p) == []
+    assert not checks.release(p)["released"] and not (tmp_path / "release").exists()
+
+
+def test_a_gated_check_that_does_not_exist_blocks(tmp_path):
+    p = make(tmp_path)
+    p.cfg["gate"] = ["project_files", "no_such_check"]
+    rows = checks.gate_state(p)
+    assert rows[1]["state"] == "unknown"
+    assert not checks.release(p)["released"]
+
+
+def test_release_refused_if_the_board_changes_during_export(tmp_path, monkeypatch):
+    p = make(tmp_path)
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    (tmp_path / "fp-lib-table").write_text("")
+    assert checks.run_check(p, "project_files").status == "pass"
+
+    class Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def edit_while_exporting(cmd, **kw):
+        with open(tmp_path / "b.kicad_pcb", "a") as f:
+            f.write("\n")
+        return Done()
+
+    monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": "kicad-cli"})
+    monkeypatch.setattr(toolchain, "run", edit_while_exporting)
+    result = checks.release(p)
+    assert not result["released"] and result["blockers"][0]["state"] == "stale"
+    assert not (tmp_path / "release").exists() and not (tmp_path / "t_release.zip").exists()
