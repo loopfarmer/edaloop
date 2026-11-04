@@ -46,7 +46,7 @@ An existing design gets a description from `describe_design`. Check its RF path,
 2. Lay RF first, lock it, then route everything else. Ground vias go in after the route.
 3. Do not run a router on the project board. `route_board` works on copies, and `adopt_route` refuses anything that moved RF copper or lost ground vias.
 4. A clean DRC proves connectivity and clearance only. It says nothing about current, impedance or return paths.
-5. Do not edit `requirements` or `waivers` to clear a failure. Report the failure and let a person decide. The same goes for the `gate:` list and for `.edaloop/rf_baseline.json`: an empty gate never releases, and a replaced baseline fails `rf_preserved` until a person restores it or waives `rf_preserved:baseline_changed`.
+5. Do not edit `requirements` or `waivers` to clear a failure. Report the failure and let a person decide. The same goes for the `gate:` list and for `rf_baseline.json`: an empty gate never releases, and a replaced baseline fails `rf_preserved` until a person restores it or waives `rf_preserved:baseline_changed`.
 6. Route RF first, then power, then signal, and run that stage's sensors with `edaloop stage <name>` after each. Never let a router's width or clearance go below the board's rules, and never grade its output against a project file it wrote. `edaloop` pins and restores the rules. If you run a router by hand, do the same.
 7. Read `docs/rf-layout-rules.md` in the edaloop repository before answering a review or choosing DC blocks, bypass capacitors or via fences.
 

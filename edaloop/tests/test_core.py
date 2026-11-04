@@ -1627,7 +1627,7 @@ def test_deleted_rf_baseline_is_not_quietly_re_recorded(tmp_path):
     assert "baseline recorded" in checks.run_check(p, "rf_preserved").summary
     # A router moves RF copper, and the baseline that would have caught it goes missing.
     (tmp_path / "b.kicad_pcb").write_text(PCB.replace("(end 10 5)", "(end 10 6)"))
-    (tmp_path / ".edaloop" / "rf_baseline.json").unlink()
+    (tmp_path / "rf_baseline.json").unlink()
     for _ in range(2):                          # running it again mustn't clear it either
         ev = checks.run_check(p, "rf_preserved")
         assert ev.status == "fail" and any(f["id"] == "rf_preserved:baseline_changed" for f in ev.findings)
@@ -1720,3 +1720,29 @@ def test_release_refused_if_the_board_changes_during_export(tmp_path, monkeypatc
     result = checks.release(p)
     assert not result["released"] and result["blockers"][0]["state"] == "stale"
     assert not (tmp_path / "release").exists() and not (tmp_path / "t_release.zip").exists()
+
+
+def test_rf_baseline_lives_beside_the_project_and_survives_a_lost_ledger(tmp_path):
+    (tmp_path / "c.py").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.py}\n")
+    checks.run_check(p, "rf_preserved")
+    assert (tmp_path / "rf_baseline.json").exists()
+    # A fresh clone has no .edaloop/, but the committed baseline still holds the copper.
+    shutil.rmtree(tmp_path / ".edaloop")
+    (tmp_path / "b.kicad_pcb").write_text(PCB.replace("(end 10 5)", "(end 10 6)"))
+    ev = checks.run_check(Project(tmp_path), "rf_preserved")
+    assert ev.status == "fail" and any(f["id"] == "rf_preserved:RF:lost" for f in ev.findings)
+
+
+def test_a_baseline_in_the_old_place_moves_without_counting_as_changed(tmp_path):
+    (tmp_path / "c.py").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.py}\n")
+    checks.run_check(p, "rf_preserved")
+    old = tmp_path / ".edaloop" / "rf_baseline.json"
+    (tmp_path / "rf_baseline.json").rename(old)
+    # Rewrite the earlier evidence as an older edaloop recorded it, under the old path.
+    ledger = p.ledger.path
+    ledger.write_text(ledger.read_text().replace('"rf_baseline.json"', '".edaloop/rf_baseline.json"'))
+    ev = checks.run_check(p, "rf_preserved")
+    assert ev.status == "pass", ev.findings
+    assert (tmp_path / "rf_baseline.json").read_bytes() == old.read_bytes()

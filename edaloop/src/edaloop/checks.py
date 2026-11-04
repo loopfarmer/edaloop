@@ -334,11 +334,19 @@ def rf_path(p: Project) -> Outcome:
     return Outcome(_files(p, p.board, chains), metrics, findings, {"rf_path": "scripts/rf_path.py"})
 
 
+def rf_baseline_path(p: Project) -> Path:
+    """Where RF copper's baseline lives: beside edaloop.yaml, so that it is committed with the project.
+
+    It is not configurable. Pointing the check at a new file would be a way to start a new baseline unseen.
+    """
+    return p.root / "rf_baseline.json"
+
+
 @check("rf_preserved", "verify")
 def rf_preserved(p: Project) -> Outcome:
     """RF copper and ground vias are held to the baseline: a fixed wire is only a cost to Freerouting, not a wall."""
-    base = p.root / ".edaloop" / "rf_baseline.json"
-    key = str(base.relative_to(p.root))
+    base, legacy = rf_baseline_path(p), p.root / ".edaloop" / "rf_baseline.json"
+    key, legacy_key = str(base.relative_to(p.root)), str(legacy.relative_to(p.root))
     nets = _chain_nets(p)
     board = Board(p.board)
     now = board.copper_items(nets)
@@ -346,16 +354,19 @@ def rf_preserved(p: Project) -> Outcome:
     ground_nets = list(cfg.get("keep_nets") or ["GND"])
     inputs = lambda: {**_files(p, p.board, base), **_chain_files(p), "route_config": _config(p, "route_config")}
     # The first baseline this project recorded is the one copper is held to. Deleting or rewriting the file
-    # mustn't quietly move the reference to wherever a router left the copper.
-    first = next((ev for ev in p.ledger.all() if ev.check == "rf_preserved" and ev.inputs.get(key, ABSENT) != ABSENT), None)
+    # mustn't quietly move the reference to wherever a router left the copper. Older projects kept it in .edaloop/.
+    recorded = lambda ev: next((ev.inputs[k] for k in (key, legacy_key) if ev.inputs.get(k, ABSENT) != ABSENT), None)
+    first = next((ev for ev in p.ledger.all() if ev.check == "rf_preserved" and recorded(ev)), None)
     findings = []
+    if not base.exists() and legacy.exists():
+        # The baseline moves beside edaloop.yaml, where it is committed with the project and outlives .edaloop/.
+        base.write_bytes(legacy.read_bytes())
     if not base.exists():
-        base.parent.mkdir(parents=True, exist_ok=True)
         base.write_text(json.dumps({"rf": now, "ground_vias": board.ground_vias(ground_nets)}))
         if first is None:
             return Outcome(inputs(), {"nets": len(nets), "ground_vias": board.ground_vias(ground_nets)},
-                           summary=f"baseline recorded for {len(nets)} RF nets")
-    if first is not None and sha_file(base) != first.inputs[key]:
+                           summary=f"baseline recorded for {len(nets)} RF nets in {key}. Commit it with the project")
+    if first is not None and sha_file(base) != recorded(first):
         findings.append(Finding("rf_preserved:baseline_changed",
                                 f"{key} is not the baseline first recorded on {first.when}, so the copper is no longer held to it. "
                                 "Restore that file, or have a person waive rf_preserved:baseline_changed with a name and a reason"))
@@ -1308,7 +1319,9 @@ def release(p: Project) -> dict:
         return {"released": False, "blockers": [{"check": "export", "state": "stale",
                                                  "summary": "the board or the evidence changed while the files were exported, so they may not match. Run release again"}]}
     latest = p.ledger.latest()
+    baseline = rf_baseline_path(p)
     manifest = {"name": p.name, "board_sha256": board_sha,
+                "rf_baseline_sha256": sha_file(baseline) if baseline.exists() else None,
                 "evidence": {r["check"]: asdict(latest[r["check"]]) for r in rows},
                 "waivers": [w.__dict__ for w in p.waivers()]}
     (out / "MANIFEST.json").write_text(json.dumps(manifest, indent=1))
