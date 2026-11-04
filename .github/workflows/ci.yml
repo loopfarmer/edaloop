@@ -63,3 +63,25 @@ jobs:
       # boardfield's tests run its CPU backend, so they need no GPU.
       - run: cargo test --locked
       - run: cargo build --release --locked
+
+  msrv:
+    name: ${{ matrix.crate }} on Rust 1.91
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [boardhand, boardfield]
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v5
+      # The oldest Rust each Cargo.toml claims with rust-version. Raise both together.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+          key: msrv
+      - run: cargo check --locked --all-targets
