@@ -21,7 +21,19 @@ fn t3_end_to_end_session() {
 
     // Startup listing: the always-on tools plus board_read, nothing else.
     let names = m.tool_names();
-    for n in ["groups_list", "groups_load", "groups_unload", "recent_calls", "call_stats", "server_info", "board_summary", "board_nets", "board_tracks", "board_footprints", "board_stackup"] {
+    for n in [
+        "groups_list",
+        "groups_load",
+        "groups_unload",
+        "recent_calls",
+        "call_stats",
+        "server_info",
+        "board_summary",
+        "board_nets",
+        "board_tracks",
+        "board_footprints",
+        "board_stackup",
+    ] {
         assert!(names.contains(&n.to_string()), "{n}");
     }
     assert_eq!(names.len(), 11, "{names:?}");
@@ -82,13 +94,33 @@ fn t3_end_to_end_session() {
         ("board_tracks", json!({"board": b, "limit": 0}), "limit"),
         ("board_tracks", json!({"board": b, "offset": -1}), "offset"),
         ("board_summary", json!({"board": "relative/path.kicad_pcb"}), "board"),
-        ("track_add", json!({"board": b, "expected_revision": rev, "start": {"x": 1, "y": 2}, "end": {"x": 1}, "width": 1, "layer": "F.Cu", "net": "GND"}), "end.y"),
-        ("track_add", json!({"board": b, "expected_revision": rev, "start": {"x": 1, "y": 2, "z": 3}, "end": {"x": 1, "y": 1}, "width": 1, "layer": "F.Cu", "net": "GND"}), "start.z"),
-        ("track_add", json!({"board": b, "expected_revision": rev, "start": {"x": 1, "y": 2}, "end": {"x": 1, "y": 1}, "width": -1, "layer": "F.Cu", "net": "GND"}), "width"),
-        ("track_add", json!({"board": b, "expected_revision": "abc", "start": {"x": 1, "y": 2}, "end": {"x": 1, "y": 1}, "width": 1, "layer": "F.Cu", "net": "GND"}), "expected_revision"),
-        ("transaction_apply", json!({"folder": dir, "files": [
+        (
+            "track_add",
+            json!({"board": b, "expected_revision": rev, "start": {"x": 1, "y": 2}, "end": {"x": 1}, "width": 1, "layer": "F.Cu", "net": "GND"}),
+            "end.y",
+        ),
+        (
+            "track_add",
+            json!({"board": b, "expected_revision": rev, "start": {"x": 1, "y": 2, "z": 3}, "end": {"x": 1, "y": 1}, "width": 1, "layer": "F.Cu", "net": "GND"}),
+            "start.z",
+        ),
+        (
+            "track_add",
+            json!({"board": b, "expected_revision": rev, "start": {"x": 1, "y": 2}, "end": {"x": 1, "y": 1}, "width": -1, "layer": "F.Cu", "net": "GND"}),
+            "width",
+        ),
+        (
+            "track_add",
+            json!({"board": b, "expected_revision": "abc", "start": {"x": 1, "y": 2}, "end": {"x": 1, "y": 1}, "width": 1, "layer": "F.Cu", "net": "GND"}),
+            "expected_revision",
+        ),
+        (
+            "transaction_apply",
+            json!({"folder": dir, "files": [
             {"path": b, "expected_revision": rev, "content": "x"},
-            {"path": b, "expected_revision": rev, "content": 5}]}), "files[1].content"),
+            {"path": b, "expected_revision": rev, "content": 5}]}),
+            "files[1].content",
+        ),
         ("transaction_apply", json!({"folder": dir, "files": []}), "files"),
         ("groups_load", json!({"groups": ["a", 1]}), "groups[1]"),
         ("recent_calls", json!({"limit": 101}), "limit"),

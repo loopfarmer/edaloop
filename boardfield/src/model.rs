@@ -101,18 +101,40 @@ pub struct Settings {
 
 impl Settings {
     pub fn thermal_dx(&self) -> f64 {
-        if self.thermal_dx_mm > 0.0 { self.thermal_dx_mm } else { self.dx_mm * 2.0 }
+        if self.thermal_dx_mm > 0.0 {
+            self.thermal_dx_mm
+        } else {
+            self.dx_mm * 2.0
+        }
     }
 }
-fn d_h() -> f64 { 10.0 }
-fn d_kin() -> f64 { 0.8 }
-fn d_kz() -> f64 { 0.35 }
-fn d_amb() -> f64 { 25.0 }
-fn d_cpl() -> usize { 2 }
-fn d_tol() -> f64 { 1e-4 }
-fn d_lvl() -> usize { 6 }
-fn d_sub() -> usize { 3 }
-fn d_ttol() -> f64 { 1e-5 }
+fn d_h() -> f64 {
+    10.0
+}
+fn d_kin() -> f64 {
+    0.8
+}
+fn d_kz() -> f64 {
+    0.35
+}
+fn d_amb() -> f64 {
+    25.0
+}
+fn d_cpl() -> usize {
+    2
+}
+fn d_tol() -> f64 {
+    1e-4
+}
+fn d_lvl() -> usize {
+    6
+}
+fn d_sub() -> usize {
+    3
+}
+fn d_ttol() -> f64 {
+    1e-5
+}
 
 #[derive(Deserialize, Clone)]
 pub struct Problem {
@@ -555,12 +577,24 @@ fn rail_grid(p: &Problem, rail: &Rail, m: &Mask, temp: Option<&[f32]>) -> Result
                 q.push_back(n);
             }
         };
-        if i + 1 < nx && s.g_e[c] > 0.0 { visit(c + 1, &mut queue); }
-        if i > 0 && s.g_e[c - 1] > 0.0 { visit(c - 1, &mut queue); }
-        if j + 1 < ny && s.g_s[c] > 0.0 { visit(c + nx, &mut queue); }
-        if j > 0 && s.g_s[c - nx] > 0.0 { visit(c - nx, &mut queue); }
-        if k + 1 < nz && s.g_u[c] > 0.0 { visit(c + plane, &mut queue); }
-        if k > 0 && s.g_u[c - plane] > 0.0 { visit(c - plane, &mut queue); }
+        if i + 1 < nx && s.g_e[c] > 0.0 {
+            visit(c + 1, &mut queue);
+        }
+        if i > 0 && s.g_e[c - 1] > 0.0 {
+            visit(c - 1, &mut queue);
+        }
+        if j + 1 < ny && s.g_s[c] > 0.0 {
+            visit(c + nx, &mut queue);
+        }
+        if j > 0 && s.g_s[c - nx] > 0.0 {
+            visit(c - nx, &mut queue);
+        }
+        if k + 1 < nz && s.g_u[c] > 0.0 {
+            visit(c + plane, &mut queue);
+        }
+        if k > 0 && s.g_u[c - plane] > 0.0 {
+            visit(c - plane, &mut queue);
+        }
     }
     let is_fixed: std::collections::HashSet<usize> = src_cells.iter().copied().collect();
     let mut load_cells = BTreeMap::new();
@@ -587,19 +621,38 @@ fn rail_grid(p: &Problem, rail: &Rail, m: &Mask, temp: Option<&[f32]>) -> Result
         let j = (c / nx) % ny;
         let k = c / plane;
         let mut d = 0.0f64;
-        if i + 1 < nx { d += s.g_e[c] as f64; }
-        if i > 0 { d += s.g_e[c - 1] as f64; }
-        if j + 1 < ny { d += s.g_s[c] as f64; }
-        if j > 0 { d += s.g_s[c - nx] as f64; }
-        if k + 1 < nz { d += s.g_u[c] as f64; }
-        if k > 0 { d += s.g_u[c - plane] as f64; }
+        if i + 1 < nx {
+            d += s.g_e[c] as f64;
+        }
+        if i > 0 {
+            d += s.g_e[c - 1] as f64;
+        }
+        if j + 1 < ny {
+            d += s.g_s[c] as f64;
+        }
+        if j > 0 {
+            d += s.g_s[c - nx] as f64;
+        }
+        if k + 1 < nz {
+            d += s.g_u[c] as f64;
+        }
+        if k > 0 {
+            d += s.g_u[c - plane] as f64;
+        }
         s.diag[c] = d as f32;
     }
     Ok(RailGrid { stencil: s, fixed_source: !src_cells.is_empty(), depth: max_depth as usize, unreached, load_cells })
 }
 
-fn solve_rail(p: &Problem, rail: &Rail, dxs: &[f64], temp: Option<&[f32]>, r: &mut Runner, assemble_s: &mut f64, raster_s: &mut f64)
-    -> Result<(RailResult, Vec<f32>, Stencil, Mask), String> {
+fn solve_rail(
+    p: &Problem,
+    rail: &Rail,
+    dxs: &[f64],
+    temp: Option<&[f32]>,
+    r: &mut Runner,
+    assemble_s: &mut f64,
+    raster_s: &mut f64,
+) -> Result<(RailResult, Vec<f32>, Stencil, Mask), String> {
     let tol = p.settings.tol;
     let mut x: Vec<f32> = Vec::new();
     let mut last: Option<(usize, usize, usize)> = None;
@@ -660,13 +713,19 @@ fn solve_rail(p: &Problem, rail: &Rail, dxs: &[f64], temp: Option<&[f32]>, r: &m
             let dv = (x[c] - x[c + 1]) as f64;
             watts += s.g_e[c] as f64 * dv * dv;
             let a = (s.g_e[c] as f64 * dv).abs() / (dx_mm * m.face_e(c).max(1e-3));
-            if a > peak { peak = a; peak_c = c; }
+            if a > peak {
+                peak = a;
+                peak_c = c;
+            }
         }
         if j + 1 < s.ny && s.g_s[c] > 0.0 {
             let dv = (x[c] - x[c + nx]) as f64;
             watts += s.g_s[c] as f64 * dv * dv;
             let a = (s.g_s[c] as f64 * dv).abs() / (dx_mm * m.face_s(c).max(1e-3));
-            if a > peak { peak = a; peak_c = c; }
+            if a > peak {
+                peak = a;
+                peak_c = c;
+            }
         }
         if k + 1 < s.nz && s.g_u[c] > 0.0 {
             let dv = (x[c] - x[c + plane]) as f64;
@@ -733,7 +792,7 @@ fn thermal_stencil(p: &Problem, m: &Mask, q: &[f64]) -> Stencil {
     let mut s = Stencil::new(nx, ny, nz);
     let dx_m = m.dx * 1e-3;
     let area = dx_m * dx_m;
-    let step = |t: usize| -> f64 { gap_m(p, t / per) / per as f64 };   // thickness from sheet t to t + 1
+    let step = |t: usize| -> f64 { gap_m(p, t / per) / per as f64 }; // thickness from sheet t to t + 1
     let share = |t: usize| -> f64 {
         let below = if t + 1 < nz { step(t) / 2.0 } else { 0.0 };
         let above = if t > 0 { step(t - 1) / 2.0 } else { 0.0 };
@@ -791,15 +850,31 @@ fn thermal_stencil(p: &Problem, m: &Mask, q: &[f64]) -> Stencil {
         let j = (c / nx) % ny;
         let t = c / plane;
         let mut d = 0.0f64;
-        if i + 1 < nx { d += s.g_e[c] as f64; }
-        if i > 0 { d += s.g_e[c - 1] as f64; }
-        if j + 1 < ny { d += s.g_s[c] as f64; }
-        if j > 0 { d += s.g_s[c - nx] as f64; }
-        if t + 1 < nz { d += s.g_u[c] as f64; }
-        if t > 0 { d += s.g_u[c - plane] as f64; }
+        if i + 1 < nx {
+            d += s.g_e[c] as f64;
+        }
+        if i > 0 {
+            d += s.g_e[c - 1] as f64;
+        }
+        if j + 1 < ny {
+            d += s.g_s[c] as f64;
+        }
+        if j > 0 {
+            d += s.g_s[c - nx] as f64;
+        }
+        if t + 1 < nz {
+            d += s.g_u[c] as f64;
+        }
+        if t > 0 {
+            d += s.g_u[c - plane] as f64;
+        }
         let mut sink = 0.0f64;
-        if t == 0 { sink += h; }
-        if t + 1 == nz { sink += h; }
+        if t == 0 {
+            sink += h;
+        }
+        if t + 1 == nz {
+            sink += h;
+        }
         s.sink[c] = sink as f32;
         s.diag[c] = (d + sink) as f32;
     }
@@ -821,8 +896,14 @@ fn coarsen_heat(q: &[f64], fine: (usize, usize, usize), coarse: (usize, usize)) 
     out
 }
 
-fn solve_thermal(p: &Problem, dxs: &[f64], q_fine: &[f64], r: &mut Runner, assemble_s: &mut f64, raster_s: &mut f64)
-    -> Result<(Vec<f32>, Vec<LevelInfo>, Stencil, Mask), String> {
+fn solve_thermal(
+    p: &Problem,
+    dxs: &[f64],
+    q_fine: &[f64],
+    r: &mut Runner,
+    assemble_s: &mut f64,
+    raster_s: &mut f64,
+) -> Result<(Vec<f32>, Vec<LevelInfo>, Stencil, Mask), String> {
     // Heat restricted from the current grid, level by level, so that every level sees the same watts.
     let mut heats: Vec<Vec<f64>> = vec![q_fine.to_vec()];
     let e = Mask::new(p.bbox, p.layers.len(), p.settings.dx_mm);
@@ -915,9 +996,7 @@ pub fn run(p: &Problem, backend: Backend, gpu: Option<&Gpu>) -> Result<Outcome, 
         // Copper resistivity follows the temperature of the copper sheets, on the current grid.
         let per = p.settings.sublayers + 1;
         let tplane = t_mask.nx * t_mask.ny;
-        let on_copper: Vec<f32> = (0..p.layers.len())
-            .flat_map(|k| x[k * per * tplane..(k * per + 1) * tplane].iter().copied())
-            .collect();
+        let on_copper: Vec<f32> = (0..p.layers.len()).flat_map(|k| x[k * per * tplane..(k * per + 1) * tplane].iter().copied()).collect();
         let ratio = (p.settings.thermal_dx() / p.settings.dx_mm).round() as usize;
         let hottest = on_copper.iter().cloned().fold(0f32, f32::max) as f64;
         temp = Some(prolong(&on_copper, (t_mask.nx, t_mask.ny, t_mask.nz), (finest.nx, finest.ny, finest.nz), ratio.max(1)));
@@ -950,11 +1029,17 @@ pub fn run(p: &Problem, backend: Backend, gpu: Option<&Gpu>) -> Result<Outcome, 
         }
     }
     let total = t0.elapsed().as_secs_f64();
-    let converged = thermal_levels.last().is_some_and(|l| l.info.converged)
-        && rails.iter().all(|r| r.levels.last().is_some_and(|l| l.info.converged));
+    let converged =
+        thermal_levels.last().is_some_and(|l| l.info.converged) && rails.iter().all(|r| r.levels.last().is_some_and(|l| l.info.converged));
     Ok(Outcome {
-        backend: match backend { Backend::Cpu => "cpu".into(), Backend::Gpu => gpu.map_or("gpu".into(), |g| g.backend.clone()) },
-        device: match backend { Backend::Cpu => format!("{} threads", rayon::current_num_threads()), Backend::Gpu => gpu.map_or(String::new(), |g| g.name.clone()) },
+        backend: match backend {
+            Backend::Cpu => "cpu".into(),
+            Backend::Gpu => gpu.map_or("gpu".into(), |g| g.backend.clone()),
+        },
+        device: match backend {
+            Backend::Cpu => format!("{} threads", rayon::current_num_threads()),
+            Backend::Gpu => gpu.map_or(String::new(), |g| g.name.clone()),
+        },
         grid: [s.nx, s.ny, p.layers.len()],
         dx_mm: p.settings.dx_mm,
         rails,
@@ -981,8 +1066,6 @@ pub fn run(p: &Problem, backend: Backend, gpu: Option<&Gpu>) -> Result<Outcome, 
             mcells_per_s: runner.updates / runner.solve_s.max(1e-9) / 1e6,
             sweep_s: crate::solve::SWEEP_NANOS.load(std::sync::atomic::Ordering::Relaxed) as f64 * 1e-9,
         },
-        temperature: (0..p.layers.len())
-            .flat_map(|k| x_t[k * per * plane..(k * per + 1) * plane].iter().copied())
-            .collect(),
+        temperature: (0..p.layers.len()).flat_map(|k| x_t[k * per * plane..(k * per + 1) * plane].iter().copied()).collect(),
     })
 }

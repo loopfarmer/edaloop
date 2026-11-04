@@ -95,13 +95,19 @@ pub fn transaction_apply(args: &Value) -> Reply {
         }
         let real = match fs::canonicalize(p) {
             Ok(r) => r,
-            Err(e) => return Reply::refused(src, "file_not_found", format!("{field}: {p}: {e}.")).target(&folder).with(json!({"field": field})),
+            Err(e) => {
+                return Reply::refused(src, "file_not_found", format!("{field}: {p}: {e}.")).target(&folder).with(json!({"field": field}))
+            }
         };
         let Ok(rel) = real.strip_prefix(&folder).map(Path::to_path_buf) else {
-            return Reply::refused(src, "path_outside_folder", format!("{field}: {p} isn't inside {}.", folder.display())).target(&folder).with(json!({"field": field}));
+            return Reply::refused(src, "path_outside_folder", format!("{field}: {p} isn't inside {}.", folder.display()))
+                .target(&folder)
+                .with(json!({"field": field}));
         };
         if entries.iter().any(|e| e.real == real) {
-            return Reply::refused(src, "invalid_argument", format!("{field}: {p} appears twice.")).target(&folder).with(json!({"field": field}));
+            return Reply::refused(src, "invalid_argument", format!("{field}: {p} appears twice."))
+                .target(&folder)
+                .with(json!({"field": field}));
         }
         if let Err(r) = check_lock(&real) {
             return r.with(json!({"field": field}));
@@ -119,7 +125,9 @@ pub fn transaction_apply(args: &Value) -> Reply {
         let new = f["content"].as_str().unwrap_or("").as_bytes().to_vec();
         if real.extension().is_some_and(|x| x == "kicad_pcb") {
             if let Err(e) = crate::board::Board::parse(new.clone()) {
-                return Reply::refused(src, "parse_error", format!("files[{i}].content: the new board doesn't parse: {e}.")).target(&real).with(json!({"field": format!("files[{i}].content")}));
+                return Reply::refused(src, "parse_error", format!("files[{i}].content: the new board doesn't parse: {e}."))
+                    .target(&real)
+                    .with(json!({"field": format!("files[{i}].content")}));
             }
         }
         entries.push(Entry { rel, real, old, new });
@@ -145,13 +153,24 @@ pub fn transaction_apply(args: &Value) -> Reply {
     }
     if let Some(msg) = failure {
         // Undo what went through, so the unit stays whole.
-        let rolled_back = entries[..applied].iter().all(|e| util::atomic_replace(&e.real, &e.old).is_ok() && fs::read(&e.real).map(|b| b == e.old).unwrap_or(false));
+        let rolled_back = entries[..applied]
+            .iter()
+            .all(|e| util::atomic_replace(&e.real, &e.old).is_ok() && fs::read(&e.real).map(|b| b == e.old).unwrap_or(false));
         if rolled_back && delete_journal(&folder, &id).is_ok() {
-            return Reply::refused(src, "apply_failed", format!("Writing failed ({msg}), and every file was restored to its original bytes.")).target(&folder);
+            return Reply::refused(
+                src,
+                "apply_failed",
+                format!("Writing failed ({msg}), and every file was restored to its original bytes."),
+            )
+            .target(&folder);
         }
-        return Reply::uncertain(src, "apply_failed", format!("Writing failed ({msg}), and rollback didn't finish. Journal {id} is kept. Use `boardhand transaction recover`."))
-            .target(&folder)
-            .with(json!({"journal": id}));
+        return Reply::uncertain(
+            src,
+            "apply_failed",
+            format!("Writing failed ({msg}), and rollback didn't finish. Journal {id} is kept. Use `boardhand transaction recover`."),
+        )
+        .target(&folder)
+        .with(json!({"journal": id}));
     }
     let mut out = vec![];
     for e in &entries {
@@ -163,9 +182,13 @@ pub fn transaction_apply(args: &Value) -> Reply {
             })),
             other => {
                 let seen = other.ok().map(|b| sha256_hex(&b));
-                return Reply::uncertain(src, "readback_failed", format!("{} doesn't read back as written. Journal {id} is kept. The state is uncertain.", e.real.display()))
-                    .target(&e.real)
-                    .with(json!({"journal": id, "observed_hash": seen}));
+                return Reply::uncertain(
+                    src,
+                    "readback_failed",
+                    format!("{} doesn't read back as written. Journal {id} is kept. The state is uncertain.", e.real.display()),
+                )
+                .target(&e.real)
+                .with(json!({"journal": id, "observed_hash": seen}));
             }
         }
     }
@@ -204,7 +227,8 @@ pub fn list(folder: &Path) -> Vec<Value> {
         .into_iter()
         .map(|id| match read_index(folder, &id) {
             Some(ix) => {
-                let files: Vec<Value> = ix["files"].as_array().map(|a| a.iter().map(|f| file_state(folder, f)).collect()).unwrap_or_default();
+                let files: Vec<Value> =
+                    ix["files"].as_array().map(|a| a.iter().map(|f| file_state(folder, f)).collect()).unwrap_or_default();
                 json!({"id": id, "folder": folder.to_string_lossy(), "complete": true, "files": files})
             }
             // The process died while writing the journal: no target file was touched.
@@ -238,7 +262,10 @@ pub fn recover(id: &str, folder: &Path) -> CliResult {
     let states: Vec<Value> = files.iter().map(|f| file_state(folder, f)).collect();
     let divergent: Vec<&Value> = states.iter().filter(|s| s["state"] == "divergent").collect();
     if !divergent.is_empty() {
-        return CliResult { code: 1, report: json!({"status": "divergent", "changed": false, "divergent": divergent, "files": states, "detail": "a file matches neither hash; nothing was changed and the journal is kept"}) };
+        return CliResult {
+            code: 1,
+            report: json!({"status": "divergent", "changed": false, "divergent": divergent, "files": states, "detail": "a file matches neither hash; nothing was changed and the journal is kept"}),
+        };
     }
     // Check the journal's own bytes and every lock before changing anything.
     let mut work = vec![];
@@ -262,7 +289,10 @@ pub fn recover(id: &str, folder: &Path) -> CliResult {
     for (rel, target, orig) in &work {
         let good = util::atomic_replace(target, orig).is_ok() && fs::read(target).map(|b| b == *orig).unwrap_or(false);
         if !good {
-            return CliResult { code: 1, report: json!({"status": "uncertain", "changed": !restored.is_empty(), "restored": restored, "failed": rel, "detail": "restoring failed; the journal is kept"}) };
+            return CliResult {
+                code: 1,
+                report: json!({"status": "uncertain", "changed": !restored.is_empty(), "restored": restored, "failed": rel, "detail": "restoring failed; the journal is kept"}),
+            };
         }
         restored.push(rel.clone());
     }
@@ -281,7 +311,10 @@ pub fn abandon(id: &str, folder: &Path) -> CliResult {
         return cli_err("not_found", format!("no journal {id} in {}", folder.display()));
     }
     match delete_journal(folder, id) {
-        Ok(()) => CliResult { code: 0, report: json!({"status": "abandoned", "changed": false, "detail": "the journal was deleted and files were left as they are"}) },
+        Ok(()) => CliResult {
+            code: 0,
+            report: json!({"status": "abandoned", "changed": false, "detail": "the journal was deleted and files were left as they are"}),
+        },
         Err(e) => cli_err("delete_failed", e.to_string()),
     }
 }

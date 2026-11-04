@@ -155,12 +155,42 @@ fn t5_refusals_leave_the_file_unchanged() {
     let mut a = add_args(&board, &rev);
     a["layer"] = json!("F.SilkS");
     refuse(&mut m, "track_add", a, "unknown_layer");
-    refuse(&mut m, "via_add", json!({"board": board, "expected_revision": rev, "position": {"x": 1, "y": 1}, "size": 0.3, "drill": 0.3, "net": "GND"}), "invalid_argument");
-    refuse(&mut m, "via_add", json!({"board": board, "expected_revision": rev, "position": {"x": 1, "y": 1}, "size": 0.3, "drill": 0.4, "net": "GND"}), "invalid_argument");
-    refuse(&mut m, "via_add", json!({"board": board, "expected_revision": rev, "position": {"x": 1, "y": 1}, "size": 0.6, "drill": 0.3, "net": "NOPE"}), "unknown_net");
-    refuse(&mut m, "item_delete", json!({"board": board, "expected_revision": rev, "uuid": "00000000-0000-4000-8000-000000000000"}), "not_found");
-    refuse(&mut m, "item_set_locked", json!({"board": board, "expected_revision": rev, "uuid": "00000000-0000-4000-8000-000000000000", "locked": true}), "not_found");
-    refuse(&mut m, "footprint_move", json!({"board": board, "expected_revision": rev, "reference": "NOPE", "position": {"x": 1, "y": 1}}), "not_found");
+    refuse(
+        &mut m,
+        "via_add",
+        json!({"board": board, "expected_revision": rev, "position": {"x": 1, "y": 1}, "size": 0.3, "drill": 0.3, "net": "GND"}),
+        "invalid_argument",
+    );
+    refuse(
+        &mut m,
+        "via_add",
+        json!({"board": board, "expected_revision": rev, "position": {"x": 1, "y": 1}, "size": 0.3, "drill": 0.4, "net": "GND"}),
+        "invalid_argument",
+    );
+    refuse(
+        &mut m,
+        "via_add",
+        json!({"board": board, "expected_revision": rev, "position": {"x": 1, "y": 1}, "size": 0.6, "drill": 0.3, "net": "NOPE"}),
+        "unknown_net",
+    );
+    refuse(
+        &mut m,
+        "item_delete",
+        json!({"board": board, "expected_revision": rev, "uuid": "00000000-0000-4000-8000-000000000000"}),
+        "not_found",
+    );
+    refuse(
+        &mut m,
+        "item_set_locked",
+        json!({"board": board, "expected_revision": rev, "uuid": "00000000-0000-4000-8000-000000000000", "locked": true}),
+        "not_found",
+    );
+    refuse(
+        &mut m,
+        "footprint_move",
+        json!({"board": board, "expected_revision": rev, "reference": "NOPE", "position": {"x": 1, "y": 1}}),
+        "not_found",
+    );
     same("the named refusals");
     assert!(m.call("board_summary", json!({"board": dir.join("absent.kicad_pcb")}))["reason"] == "file_not_found");
 }
@@ -183,7 +213,10 @@ fn lock_then_unlock_is_byte_identical_and_locked_footprints_refuse_to_move() {
         assert_eq!(r["result"]["locked"], true);
         assert_eq!(r["revision_after"], sha(&board));
         if uuid == fp_uuid {
-            let (r, _) = m.call_full("footprint_move", json!({"board": board, "expected_revision": sha(&board), "reference": "R1", "position": {"x": 1, "y": 1}}));
+            let (r, _) = m.call_full(
+                "footprint_move",
+                json!({"board": board, "expected_revision": sha(&board), "reference": "R1", "position": {"x": 1, "y": 1}}),
+            );
             assert_eq!(r["reason"], "item_locked");
             assert!(kicad_loads(&board).is_some() || !Path::new(KICAD_CLI).exists());
         }
@@ -235,7 +268,13 @@ fn old_format_numbered_nets_and_inline_locked_markers() {
     assert!(now.contains(&format!("(net 2) (tstamp {uuid}))")), "the file's own form: {now}");
     assert!(now.contains("# a comment that must survive") && now.contains("(end 1.50 0) (width 0.200)"));
     assert_eq!(m.call("item_delete", json!({"board": board, "expected_revision": sha(&board), "uuid": "bbbb"}))["reason"], "item_locked");
-    assert_eq!(m.call("footprint_move", json!({"board": board, "expected_revision": sha(&board), "reference": "R1", "position": {"x": 1, "y": 1}}))["reason"], "item_locked");
+    assert_eq!(
+        m.call(
+            "footprint_move",
+            json!({"board": board, "expected_revision": sha(&board), "reference": "R1", "position": {"x": 1, "y": 1}})
+        )["reason"],
+        "item_locked"
+    );
     let r = m.call("item_delete", json!({"board": board, "expected_revision": sha(&board), "uuid": uuid}));
     assert_eq!(r["outcome"], "complete");
     assert_eq!(fs::read_to_string(&board).unwrap(), text);
@@ -262,7 +301,10 @@ fn footprint_move_agrees_with_kicad() {
     let mut m = Mcp::start(&dir, &[]);
     m.initialize();
     m.load(json!("board_edit"));
-    let r = m.call("footprint_move", json!({"board": board, "expected_revision": sha(&board), "reference": "J1", "position": {"x": 20, "y": 30}, "rotation": 45}));
+    let r = m.call(
+        "footprint_move",
+        json!({"board": board, "expected_revision": sha(&board), "reference": "J1", "position": {"x": 20, "y": 30}, "rotation": 45}),
+    );
     assert_eq!(r["outcome"], "complete", "{r}");
     assert_eq!(r["result"]["footprint"]["rotation"].as_f64(), Some(45.0));
     assert_eq!(r["result"]["footprint"]["position"]["y"].as_f64(), Some(30.0));
@@ -303,7 +345,10 @@ fn footprint_zone_moves_with_its_footprint() {
     m.initialize();
     m.load(json!("board_edit"));
     let (tx, ty) = (fx as f64 / 1e6 + 1.0, fy as f64 / 1e6 + 2.0);
-    let r = m.call("footprint_move", json!({"board": board, "expected_revision": sha(&board), "reference": refdes, "position": {"x": tx, "y": ty}}));
+    let r = m.call(
+        "footprint_move",
+        json!({"board": board, "expected_revision": sha(&board), "reference": refdes, "position": {"x": tx, "y": ty}}),
+    );
     assert_eq!(r["outcome"], "complete", "{r}");
     let after = pcbnew(py, &[&board]).unwrap();
     let line = after.lines().rfind(|l| !l.is_empty()).unwrap_or("");
@@ -372,11 +417,15 @@ fn adding_to_a_board_with_no_tracks_uses_its_layout_and_net_form() {
         text.replace_range(a..b, "");
     }
     fs::write(&modern, &text).unwrap();
-    let v = json!({"board": modern, "expected_revision": sha(&modern), "position": {"x": 1, "y": 1}, "size": 0.6, "drill": 0.3, "net": "GND"});
+    let v =
+        json!({"board": modern, "expected_revision": sha(&modern), "position": {"x": 1, "y": 1}, "size": 0.6, "drill": 0.3, "net": "GND"});
     let r = m.call("via_add", v);
     assert_eq!(r["outcome"], "complete", "{r}");
     let now = fs::read_to_string(&modern).unwrap();
-    assert!(now.contains("\n\t(via\n\t\t(at 1 1)\n\t\t(size 0.6)\n\t\t(drill 0.3)\n\t\t(layers \"F.Cu\" \"B.Cu\")\n\t\t(net \"GND\")"), "{now}");
+    assert!(
+        now.contains("\n\t(via\n\t\t(at 1 1)\n\t\t(size 0.6)\n\t\t(drill 0.3)\n\t\t(layers \"F.Cu\" \"B.Cu\")\n\t\t(net \"GND\")"),
+        "{now}"
+    );
     assert!(now.find("(via").unwrap() < now.find("(embedded_fonts").unwrap());
     // A numbered table with no tracks and nothing after them: added at the end.
     let old = dir.join("old.kicad_pcb");

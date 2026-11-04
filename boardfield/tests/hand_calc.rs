@@ -49,8 +49,10 @@ fn strip_drop_matches_rho_l_over_wt() {
     // Copper heats and its resistance rises, so the drop sits between cold and the hottest point's value.
     let rise = o["hotspot"]["rise_c"].as_f64().unwrap();
     let hot_mv = cold_mv * (1.0 + ALPHA * rise);
-    assert!(drop_mv > cold_mv * 0.97 && drop_mv < hot_mv * 1.03,
-            "drop {drop_mv:.3} mV, hand calculation {cold_mv:.3} mV cold to {hot_mv:.3} mV at the hotspot");
+    assert!(
+        drop_mv > cold_mv * 0.97 && drop_mv < hot_mv * 1.03,
+        "drop {drop_mv:.3} mV, hand calculation {cold_mv:.3} mV cold to {hot_mv:.3} mV at the hotspot"
+    );
 }
 
 #[test]

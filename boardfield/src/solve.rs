@@ -24,7 +24,17 @@ pub struct Stencil {
 impl Stencil {
     pub fn new(nx: usize, ny: usize, nz: usize) -> Self {
         let n = nx * ny * nz;
-        Stencil { nx, ny, nz, g_e: vec![0.0; n], g_s: vec![0.0; n], g_u: vec![0.0; n], diag: vec![0.0; n], sink: vec![0.0; n], rhs: vec![0.0; n] }
+        Stencil {
+            nx,
+            ny,
+            nz,
+            g_e: vec![0.0; n],
+            g_s: vec![0.0; n],
+            g_u: vec![0.0; n],
+            diag: vec![0.0; n],
+            sink: vec![0.0; n],
+            rhs: vec![0.0; n],
+        }
     }
 
     pub fn cells(&self) -> usize {
@@ -175,7 +185,11 @@ pub fn sparse_lists(s: &Stencil) -> Option<(Vec<u32>, Vec<u32>)> {
     for c in 0..s.cells() {
         if s.diag[c] > 0.0 {
             let colour = (c % nx + (c / nx) % s.ny + c / plane) & 1;
-            if colour == 0 { a.push(c as u32) } else { b.push(c as u32) }
+            if colour == 0 {
+                a.push(c as u32)
+            } else {
+                b.push(c as u32)
+            }
         }
     }
     Some((a, b))
@@ -192,12 +206,24 @@ fn sparse_sweep(s: &Stencil, rhs: &[f32], x: &mut [f32], list: &[u32], omega: f3
         // Safety: as in half_sweep, one colour only reads the other.
         unsafe {
             let mut sum = rhs[c];
-            if i + 1 < nx { sum += s.g_e[c] * *p.add(c + 1); }
-            if i > 0 { sum += s.g_e[c - 1] * *p.add(c - 1); }
-            if j + 1 < ny { sum += s.g_s[c] * *p.add(c + nx); }
-            if j > 0 { sum += s.g_s[c - nx] * *p.add(c - nx); }
-            if k + 1 < nz { sum += s.g_u[c] * *p.add(c + plane); }
-            if k > 0 { sum += s.g_u[c - plane] * *p.add(c - plane); }
+            if i + 1 < nx {
+                sum += s.g_e[c] * *p.add(c + 1);
+            }
+            if i > 0 {
+                sum += s.g_e[c - 1] * *p.add(c - 1);
+            }
+            if j + 1 < ny {
+                sum += s.g_s[c] * *p.add(c + nx);
+            }
+            if j > 0 {
+                sum += s.g_s[c - nx] * *p.add(c - nx);
+            }
+            if k + 1 < nz {
+                sum += s.g_u[c] * *p.add(c + plane);
+            }
+            if k > 0 {
+                sum += s.g_u[c - plane] * *p.add(c - plane);
+            }
             *p.add(c) = (1.0 - omega) * *p.add(c) + omega * (sum / s.diag[c]);
         }
     });
@@ -335,10 +361,8 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| format!("no GPU device: {e}"))?;
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("sor"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
+        let module = device
+            .create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sor"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("sor"),
             layout: None,
@@ -369,11 +393,7 @@ impl Gpu {
         } else {
             wgpu::BufferUsages::STORAGE
         };
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(data),
-            usage,
-        })
+        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(data), usage })
     }
 
     pub fn solve(&self, s: &Stencil, x: &mut [f32], omega: f64, tol: f64, max_sweeps: u32) -> Result<SolveInfo, String> {
@@ -465,9 +485,7 @@ impl Gpu {
             slice.map_async(wgpu::MapMode::Read, move |r| {
                 let _ = tx.send(r);
             });
-            self.device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .map_err(|e| format!("GPU poll failed: {e}"))?;
+            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("GPU poll failed: {e}"))?;
             rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("GPU read failed: {e}"))?;
             SWEEP_NANOS.fetch_add(tick.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             {

@@ -43,16 +43,7 @@ pub struct Reply {
 
 impl Reply {
     fn base(outcome: Outcome, source: Source, result: Value) -> Reply {
-        Reply {
-            outcome,
-            source,
-            target: None,
-            revision_before: None,
-            revision_after: None,
-            result,
-            reason: None,
-            detail: None,
-        }
+        Reply { outcome, source, target: None, revision_before: None, revision_after: None, result, reason: None, detail: None }
     }
 
     pub fn complete(source: Source, result: Value) -> Reply {

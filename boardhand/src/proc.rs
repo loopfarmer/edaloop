@@ -80,11 +80,7 @@ pub fn run(spec: Spec<'_>) -> io::Result<Finished> {
     let out_path = spec.capture_dir.join("stdout.txt");
     let err_path = spec.capture_dir.join("stderr.txt");
     let mut cmd = Command::new(spec.program);
-    cmd.args(&spec.args)
-        .stdin(Stdio::null())
-        .stdout(fs::File::create(&out_path)?)
-        .stderr(fs::File::create(&err_path)?)
-        .process_group(0);
+    cmd.args(&spec.args).stdin(Stdio::null()).stdout(fs::File::create(&out_path)?).stderr(fs::File::create(&err_path)?).process_group(0);
     if let Some(d) = spec.cwd {
         cmd.current_dir(d);
     }

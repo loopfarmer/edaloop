@@ -127,7 +127,10 @@ impl Mcp {
     }
 
     pub fn initialize(&mut self) -> Value {
-        let r = self.request("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}));
+        let r = self.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+        );
         self.send_raw(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
         r
     }
@@ -195,7 +198,12 @@ pub fn kicad_loads(board: &Path) -> Option<Value> {
         return None;
     }
     let report = board.with_extension("drc.json");
-    let out = Command::new(KICAD_CLI).args(["pcb", "drc", "--format", "json", "--severity-all", "--output"]).arg(&report).arg(board).output().unwrap();
+    let out = Command::new(KICAD_CLI)
+        .args(["pcb", "drc", "--format", "json", "--severity-all", "--output"])
+        .arg(&report)
+        .arg(board)
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     Some(serde_json::from_slice(&fs::read(&report).expect("KiCad wrote no report")).unwrap())
 }

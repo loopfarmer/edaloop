@@ -1,6 +1,6 @@
 //! Autorouter round trip: manifest, export, Freerouting, session plan and apply.
 use crate::board::{geometry_digest, Board, BoardError, Track, TrackKind};
-use crate::edit::{check_lock, not_absolute, segment_fields, via_fields, insertion_point, Layout};
+use crate::edit::{check_lock, insertion_point, not_absolute, segment_fields, via_fields, Layout};
 use crate::proc::{self, Ended, Spec};
 use crate::reply::{Reply, Source};
 use crate::sexpr::{apply_splices, Kind, Splice};
@@ -28,7 +28,9 @@ fn abs(args: &Value, field: &str) -> Result<PathBuf, Reply> {
 fn load_board(path: &Path) -> Result<Board, Reply> {
     let bytes = fs::read(path).map_err(|e| Reply::refused(SRC, "file_not_found", format!("{}: {e}.", path.display())).target(path))?;
     let rev = sha256_hex(&bytes);
-    Board::parse(bytes).map_err(|e: BoardError| Reply::refused(SRC, "parse_error", format!("{}: {e}.", path.display())).target(path).revs(Some(&rev), None))
+    Board::parse(bytes).map_err(|e: BoardError| {
+        Reply::refused(SRC, "parse_error", format!("{}: {e}.", path.display())).target(path).revs(Some(&rev), None)
+    })
 }
 
 fn manifest_item(t: &Track, locked: bool, on_protected: bool) -> Value {
@@ -55,7 +57,12 @@ pub fn route_prepare(args: &Value) -> Reply {
         Err(r) => return r,
     };
     let Some(exporter) = std::env::var_os("BOARDHAND_DSN_EXPORTER").filter(|v| !v.is_empty()) else {
-        return Reply::unavailable(SRC, "no_exporter", "BOARDHAND_DSN_EXPORTER isn't set, so no DSN can be written. No files were written.").target(&board_path);
+        return Reply::unavailable(
+            SRC,
+            "no_exporter",
+            "BOARDHAND_DSN_EXPORTER isn't set, so no DSN can be written. No files were written.",
+        )
+        .target(&board_path);
     };
     let b = match load_board(&board_path) {
         Ok(b) => b,
@@ -70,7 +77,9 @@ pub fn route_prepare(args: &Value) -> Reply {
     };
     if explicit.is_some() {
         if let Some(bad) = nets.iter().find(|n| !known.contains(*n)) {
-            return Reply::refused(SRC, "unknown_net", format!("protected_nets names '{bad}', which this board doesn't have.")).target(&board_path).revs(Some(&rev), None);
+            return Reply::refused(SRC, "unknown_net", format!("protected_nets names '{bad}', which this board doesn't have."))
+                .target(&board_path)
+                .revs(Some(&rev), None);
         }
     }
     let absent: Vec<&String> = nets.iter().filter(|n| !known.contains(*n)).collect();
@@ -126,13 +135,22 @@ pub fn route_prepare(args: &Value) -> Reply {
         )
     };
     let tmpdir = scratch.0.to_string_lossy().to_string();
-    let finished = match proc::run(Spec { program: &program, args: cmd_args, cwd: None, env: vec![("TMPDIR", &tmpdir)], timeout: Duration::from_secs(timeout), capture_dir: &scratch.0 }) {
+    let finished = match proc::run(Spec {
+        program: &program,
+        args: cmd_args,
+        cwd: None,
+        env: vec![("TMPDIR", &tmpdir)],
+        timeout: Duration::from_secs(timeout),
+        capture_dir: &scratch.0,
+    }) {
         Ok(f) => f,
         Err(e) => return cleanup("exporter_failed", format!("The exporter couldn't be started: {e}."), json!({})),
     };
     let diag = json!({"stderr_tail": finished.stderr_tail, "stdout_tail": finished.stdout_tail});
     match finished.ended {
-        Ended::TimedOut => return cleanup("exporter_timeout", format!("The exporter was still running after {timeout} s and was killed."), diag),
+        Ended::TimedOut => {
+            return cleanup("exporter_timeout", format!("The exporter was still running after {timeout} s and was killed."), diag)
+        }
         Ended::Signaled(s) => return cleanup("exporter_crashed", format!("The exporter was killed by signal {s}."), diag),
         Ended::Exited(0) => {}
         Ended::Exited(c) => return cleanup("exporter_failed", format!("The exporter exited with code {c}."), diag),
@@ -148,13 +166,16 @@ pub fn route_prepare(args: &Value) -> Reply {
         return cleanup("write_failed", format!("Couldn't move the DSN into place: {e}."), json!({}));
     }
     let _ = util::sync_dir(&folder);
-    Reply::complete(SRC, json!({
-        "manifest": manifest_path.to_string_lossy(),
-        "dsn": dsn_path.to_string_lossy(),
-        "protected_items": doc["items"].as_array().map(Vec::len),
-        "protected_nets": doc["protected_nets"],
-        "protected_nets_absent_from_board": absent,
-    }))
+    Reply::complete(
+        SRC,
+        json!({
+            "manifest": manifest_path.to_string_lossy(),
+            "dsn": dsn_path.to_string_lossy(),
+            "protected_items": doc["items"].as_array().map(Vec::len),
+            "protected_nets": doc["protected_nets"],
+            "protected_nets_absent_from_board": absent,
+        }),
+    )
     .target(&board_path)
     .revs(Some(&rev), Some(&rev))
 }
@@ -183,12 +204,23 @@ pub fn route_run(args: &Value) -> Reply {
         }
         None => {
             let found: Vec<PathBuf> = fs::read_dir(&folder)
-                .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "dsn") && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))).collect())
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.extension().is_some_and(|x| x == "dsn")
+                                && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             match found.as_slice() {
                 [one] => one.clone(),
                 [] => return Reply::refused(SRC, "file_not_found", "The folder holds no .dsn file.").target(&folder),
-                many => return Reply::refused(SRC, "ambiguous_dsn", format!("The folder holds {} .dsn files. Name one with dsn.", many.len())).target(&folder),
+                many => {
+                    return Reply::refused(SRC, "ambiguous_dsn", format!("The folder holds {} .dsn files. Name one with dsn.", many.len()))
+                        .target(&folder)
+                }
             }
         }
     };
@@ -205,8 +237,13 @@ pub fn route_run(args: &Value) -> Reply {
     let session_path = dsn.with_extension("ses");
     let tmp_ses = folder.join(format!(".boardhand-{}.ses", uuid::Uuid::new_v4()));
     let mut cmd: Vec<OsString> = vec![
-        "-Djava.awt.headless=true".into(), "-jar".into(), jar.clone().into_os_string(),
-        "-de".into(), dsn.clone().into_os_string(), "-do".into(), tmp_ses.clone().into_os_string(),
+        "-Djava.awt.headless=true".into(),
+        "-jar".into(),
+        jar.clone().into_os_string(),
+        "-de".into(),
+        dsn.clone().into_os_string(),
+        "-do".into(),
+        tmp_ses.clone().into_os_string(),
         "--gui.enabled=false".into(),
     ];
     if let Some(p) = args.get("max_passes").and_then(Value::as_f64) {
@@ -253,12 +290,15 @@ pub fn route_run(args: &Value) -> Reply {
         return fail("write_failed", format!("Couldn't move the session into place: {e}."));
     }
     let _ = util::sync_dir(&folder);
-    Reply::complete(SRC, json!({
-        "session": session_path.to_string_lossy(),
-        "session_sha256": sha256_hex(&bytes),
-        "wires": parsed.wires.len(),
-        "vias": parsed.vias.len(),
-    }))
+    Reply::complete(
+        SRC,
+        json!({
+            "session": session_path.to_string_lossy(),
+            "session_sha256": sha256_hex(&bytes),
+            "wires": parsed.wires.len(),
+            "vias": parsed.vias.len(),
+        }),
+    )
     .target(&folder)
     .with(diag)
 }
@@ -274,9 +314,12 @@ struct Inputs {
 fn load_inputs(args: &Value) -> Result<Inputs, Reply> {
     let manifest_path = abs(args, "manifest")?;
     let session_path = abs(args, "session")?;
-    let bytes = fs::read(&manifest_path).map_err(|e| Reply::refused(SRC, "file_not_found", format!("{}: {e}.", manifest_path.display())).target(&manifest_path))?;
-    let manifest: Value = serde_json::from_slice(&bytes).map_err(|e| Reply::refused(SRC, "invalid_manifest", format!("The manifest isn't JSON: {e}.")).target(&manifest_path))?;
-    let good = manifest["format"] == FORMAT && manifest["revision"].is_string() && manifest["items"].is_array() && manifest["board"].is_string();
+    let bytes = fs::read(&manifest_path)
+        .map_err(|e| Reply::refused(SRC, "file_not_found", format!("{}: {e}.", manifest_path.display())).target(&manifest_path))?;
+    let manifest: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| Reply::refused(SRC, "invalid_manifest", format!("The manifest isn't JSON: {e}.")).target(&manifest_path))?;
+    let good =
+        manifest["format"] == FORMAT && manifest["revision"].is_string() && manifest["items"].is_array() && manifest["board"].is_string();
     if !good {
         return Err(Reply::refused(SRC, "invalid_manifest", "The file isn't a boardhand route manifest.").target(&manifest_path));
     }
@@ -288,13 +331,20 @@ fn load_inputs(args: &Value) -> Result<Inputs, Reply> {
     let rev = board.revision();
     let want = manifest["revision"].as_str().unwrap_or("");
     if rev != want {
-        return Err(Reply::refused(SRC, "revision_conflict", format!("The board's hash is {rev}, but the manifest was prepared for {want}."))
-            .target(&board_path)
-            .revs(Some(&rev), None)
-            .with(json!({"current_revision": rev, "manifest_revision": want})));
+        return Err(Reply::refused(
+            SRC,
+            "revision_conflict",
+            format!("The board's hash is {rev}, but the manifest was prepared for {want}."),
+        )
+        .target(&board_path)
+        .revs(Some(&rev), None)
+        .with(json!({"current_revision": rev, "manifest_revision": want})));
     }
-    let ses = fs::read(&session_path).map_err(|e| Reply::refused(SRC, "file_not_found", format!("{}: {e}.", session_path.display())).target(&board_path))?;
-    let session = specctra::parse(&ses).map_err(|e| Reply::refused(SRC, "session_parse_error", format!("{}: {e}.", session_path.display())).target(&board_path).revs(Some(&rev), None))?;
+    let ses = fs::read(&session_path)
+        .map_err(|e| Reply::refused(SRC, "file_not_found", format!("{}: {e}.", session_path.display())).target(&board_path))?;
+    let session = specctra::parse(&ses).map_err(|e| {
+        Reply::refused(SRC, "session_parse_error", format!("{}: {e}.", session_path.display())).target(&board_path).revs(Some(&rev), None)
+    })?;
     Ok(Inputs { board_path, board, manifest, session, session_path })
 }
 
@@ -474,30 +524,41 @@ pub fn route_plan_import(args: &Value) -> Reply {
     let per_net: BTreeMap<&String, Value> = r.per_net.iter().map(|(k, v)| (k, json!({"wires": v.0, "vias": v.1}))).collect();
     // What the session would leave protected, had it been applied alone.
     let kept: HashSet<String> = tracks.iter().filter(|t| m.retained.contains(&t.node)).map(geometry_digest).collect();
-    let would_lose: Vec<&Value> = i.manifest["items"].as_array().into_iter().flatten().filter(|it| !kept.contains(it["digest"].as_str().unwrap_or(""))).collect();
-    let unknown_padstacks: BTreeSet<&String> = i.session.vias.iter().filter(|v| {
-        let d = via_dims(&i.board, &i.session, &v.padstack);
-        m.new_vias.iter().any(|k| i.session.vias[*k].padstack == v.padstack) && (d.size_nm.is_none() || d.drill_nm.is_none() || d.layers.is_none())
-    }).map(|v| &v.padstack).collect();
+    let would_lose: Vec<&Value> =
+        i.manifest["items"].as_array().into_iter().flatten().filter(|it| !kept.contains(it["digest"].as_str().unwrap_or(""))).collect();
+    let unknown_padstacks: BTreeSet<&String> = i
+        .session
+        .vias
+        .iter()
+        .filter(|v| {
+            let d = via_dims(&i.board, &i.session, &v.padstack);
+            m.new_vias.iter().any(|k| i.session.vias[*k].padstack == v.padstack)
+                && (d.size_nm.is_none() || d.drill_nm.is_none() || d.layers.is_none())
+        })
+        .map(|v| &v.padstack)
+        .collect();
     let rev = i.board.revision();
-    Reply::complete(SRC, json!({
-        "session": i.session_path.to_string_lossy(),
-        "resolution": {"unit": i.session.resolution_unit, "value": i.session.resolution_value},
-        "per_net": per_net,
-        "total_wires": i.session.wires.len(),
-        "total_vias": i.session.vias.len(),
-        "unknown_nets": r.unknown_nets,
-        "unknown_layers": r.unknown_layers,
-        "unknown_padstacks": unknown_padstacks,
-        "unsupported_wires": i.session.unsupported_wires.iter().map(|w| json!({"net": w.0, "shape": w.1})).collect::<Vec<_>>(),
-        "placements_ignored": i.session.placements,
-        "items_matching_board": m.retained.len(),
-        "new_segments": m.new_segments.len(),
-        "new_vias": m.new_vias.len(),
-        "existing_tracks_not_in_session": tracks.len() - m.retained.len(),
-        "protected_items_omitted_by_session": would_lose,
-        "changed": false,
-    }))
+    Reply::complete(
+        SRC,
+        json!({
+            "session": i.session_path.to_string_lossy(),
+            "resolution": {"unit": i.session.resolution_unit, "value": i.session.resolution_value},
+            "per_net": per_net,
+            "total_wires": i.session.wires.len(),
+            "total_vias": i.session.vias.len(),
+            "unknown_nets": r.unknown_nets,
+            "unknown_layers": r.unknown_layers,
+            "unknown_padstacks": unknown_padstacks,
+            "unsupported_wires": i.session.unsupported_wires.iter().map(|w| json!({"net": w.0, "shape": w.1})).collect::<Vec<_>>(),
+            "placements_ignored": i.session.placements,
+            "items_matching_board": m.retained.len(),
+            "new_segments": m.new_segments.len(),
+            "new_vias": m.new_vias.len(),
+            "existing_tracks_not_in_session": tracks.len() - m.retained.len(),
+            "protected_items_omitted_by_session": would_lose,
+            "changed": false,
+        }),
+    )
     .target(&i.board_path)
     .revs(Some(&rev), Some(&rev))
 }
@@ -540,13 +601,26 @@ pub fn route_apply(args: &Value) -> Reply {
     }
     let r = resolve(b, s);
     if let Some(bad) = r.unknown_nets.iter().next() {
-        return refuse("unknown_net", format!("The session names net '{bad}', which this board doesn't have ({} unknown in all).", r.unknown_nets.len())).with(json!({"unknown_nets": r.unknown_nets}));
+        return refuse(
+            "unknown_net",
+            format!("The session names net '{bad}', which this board doesn't have ({} unknown in all).", r.unknown_nets.len()),
+        )
+        .with(json!({"unknown_nets": r.unknown_nets}));
     }
     if let Some(bad) = r.unknown_layers.iter().next() {
-        return refuse("unknown_layer", format!("The session names layer '{bad}', which isn't a copper layer of this board.")).with(json!({"unknown_layers": r.unknown_layers}));
+        return refuse("unknown_layer", format!("The session names layer '{bad}', which isn't a copper layer of this board."))
+            .with(json!({"unknown_layers": r.unknown_layers}));
     }
     if !s.unsupported_wires.is_empty() {
-        return refuse("unsupported_wire_shape", format!("The session has {} wires in shapes this reader can't convert, starting with '{}' on net '{}'.", s.unsupported_wires.len(), s.unsupported_wires[0].1, s.unsupported_wires[0].0));
+        return refuse(
+            "unsupported_wire_shape",
+            format!(
+                "The session has {} wires in shapes this reader can't convert, starting with '{}' on net '{}'.",
+                s.unsupported_wires.len(),
+                s.unsupported_wires[0].1,
+                s.unsupported_wires[0].0
+            ),
+        );
     }
     let tracks = b.tracks();
     let mut m = match_session(b, s, &tracks);
@@ -588,13 +662,17 @@ pub fn route_apply(args: &Value) -> Reply {
         let v = &s.vias[*k];
         let d = via_dims(b, s, &v.padstack);
         let (Some(size), Some(drill), Some(layers)) = (d.size_nm, d.drill_nm, d.layers) else {
-            return refuse("unknown_via_padstack", format!("Via padstack '{}' doesn't state a size, drill and layers this reader can determine.", v.padstack));
+            return refuse(
+                "unknown_via_padstack",
+                format!("Via padstack '{}' doesn't state a size, drill and layers this reader can determine.", v.padstack),
+            );
         };
         if drill >= size {
             return refuse("unknown_via_padstack", format!("Via padstack '{}' has a drill no smaller than its size.", v.padstack));
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let Some(f) = via_fields(b, (nm_mm(v.at_nm.0), nm_mm(v.at_nm.1)), nm_mm(size), nm_mm(drill), (&layers.0, &layers.1), &v.net, &id) else {
+        let Some(f) = via_fields(b, (nm_mm(v.at_nm.0), nm_mm(v.at_nm.1)), nm_mm(size), nm_mm(drill), (&layers.0, &layers.1), &v.net, &id)
+        else {
             return refuse("unknown_net", format!("Net '{}' has no number in this board's table.", v.net));
         };
         new_text.extend(layout.render("via", &f));
@@ -621,13 +699,20 @@ pub fn route_apply(args: &Value) -> Reply {
         let _ = fs::remove_file(&tmp);
         let exists = fs::symlink_metadata(&real_output).is_ok();
         if exists {
-            return Reply::uncertain(SRC, "write_failed", format!("Writing {} failed: {e}. A file exists there, and its state is uncertain.", real_output.display())).target(&real_output).revs(Some(&rev), None);
+            return Reply::uncertain(
+                SRC,
+                "write_failed",
+                format!("Writing {} failed: {e}. A file exists there, and its state is uncertain.", real_output.display()),
+            )
+            .target(&real_output)
+            .revs(Some(&rev), None);
         }
         return refuse("write_failed", format!("Couldn't write {}: {e}.", real_output.display()));
     }
 
     // Everything from here on looks at the written file, not the plan.
-    let uncertain = |d: String, after: Option<&str>| Reply::uncertain(SRC, "readback_failed", d).target(&real_output).revs(Some(&rev), after);
+    let uncertain =
+        |d: String, after: Option<&str>| Reply::uncertain(SRC, "readback_failed", d).target(&real_output).revs(Some(&rev), after);
     let back = match fs::read(&real_output) {
         Ok(v) => v,
         Err(e) => return uncertain(format!("The output couldn't be read back: {e}. Its state is uncertain."), None),
@@ -641,16 +726,31 @@ pub fn route_apply(args: &Value) -> Reply {
     if !lost.is_empty() {
         let del = fs::remove_file(&real_output).and_then(|()| util::sync_dir(&real_parent));
         if let Err(e) = del {
-            return Reply::uncertain(SRC, "output_delete_failed", format!("Protected items were lost ({} in all), and the output couldn't be deleted: {e}.", lost.len())).target(&real_output).revs(Some(&rev), Some(&after)).with(json!({"lost": lost}));
+            return Reply::uncertain(
+                SRC,
+                "output_delete_failed",
+                format!("Protected items were lost ({} in all), and the output couldn't be deleted: {e}.", lost.len()),
+            )
+            .target(&real_output)
+            .revs(Some(&rev), Some(&after))
+            .with(json!({"lost": lost}));
         }
         let gone = fs::symlink_metadata(&real_output).is_err();
-        return Reply::refused(SRC, "protected_copper_lost", format!("Protected items would have been lost ({} in all), so the output was deleted.", lost.len()))
-            .target(&i.board_path)
-            .revs(Some(&rev), None)
-            .with(json!({"lost": lost, "output_deleted": gone}));
+        return Reply::refused(
+            SRC,
+            "protected_copper_lost",
+            format!("Protected items would have been lost ({} in all), so the output was deleted.", lost.len()),
+        )
+        .target(&i.board_path)
+        .revs(Some(&rev), None)
+        .with(json!({"lost": lost, "output_deleted": gone}));
     }
     let non_track = |bd: &Board| -> Vec<[u8; 32]> {
-        bd.top.iter().filter(|id| !(bd.tree.kind(**id) == Kind::List && matches!(bd.tree.head(**id), "segment" | "arc" | "via"))).map(|id| util::sha256_raw(bd.tree.bytes(*id))).collect()
+        bd.top
+            .iter()
+            .filter(|id| !(bd.tree.kind(**id) == Kind::List && matches!(bd.tree.head(**id), "segment" | "arc" | "via")))
+            .map(|id| util::sha256_raw(bd.tree.bytes(*id)))
+            .collect()
     };
     if non_track(b) != non_track(&nb) {
         return uncertain("A top-level node other than a track differs in the output. Its state is uncertain.".to_string(), Some(&after));
@@ -658,23 +758,29 @@ pub fn route_apply(args: &Value) -> Reply {
     let count = nb.tracks().len();
     let expected = m.retained.len() + m.new_segments.len() + m.new_vias.len();
     if count != expected {
-        return uncertain(format!("The output holds {count} tracks and vias, but {expected} were expected. Its state is uncertain."), Some(&after));
+        return uncertain(
+            format!("The output holds {count} tracks and vias, but {expected} were expected. Its state is uncertain."),
+            Some(&after),
+        );
     }
     let per_net: BTreeMap<&String, Value> = r.per_net.iter().map(|(k, v)| (k, json!({"wires": v.0, "vias": v.1}))).collect();
-    Reply::complete(SRC, json!({
-        "output": real_output.to_string_lossy(),
-        "input_unchanged": fs::read(&i.board_path).map(|b| sha256_hex(&b) == rev).unwrap_or(false),
-        "items_in_output": count,
-        "retained_existing": m.retained.len(),
-        "reinstated_protected": reinstated,
-        "added_segments": m.new_segments.len(),
-        "added_vias": m.new_vias.len(),
-        "removed_existing": removed,
-        "protected_items_checked": i.manifest["items"].as_array().map(Vec::len),
-        "per_net": per_net,
-        "placements_ignored": s.placements,
-        "changed": true,
-    }))
+    Reply::complete(
+        SRC,
+        json!({
+            "output": real_output.to_string_lossy(),
+            "input_unchanged": fs::read(&i.board_path).map(|b| sha256_hex(&b) == rev).unwrap_or(false),
+            "items_in_output": count,
+            "retained_existing": m.retained.len(),
+            "reinstated_protected": reinstated,
+            "added_segments": m.new_segments.len(),
+            "added_vias": m.new_vias.len(),
+            "removed_existing": removed,
+            "protected_items_checked": i.manifest["items"].as_array().map(Vec::len),
+            "per_net": per_net,
+            "placements_ignored": s.placements,
+            "changed": true,
+        }),
+    )
     .target(&real_output)
     .revs(Some(&rev), Some(&after))
 }

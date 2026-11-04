@@ -121,10 +121,7 @@ pub fn node_locked(t: &Tree, id: Id) -> bool {
 
 /// The `uuid` of a node, or `tstamp` in older files.
 pub fn node_uuid(t: &Tree, id: Id) -> Option<String> {
-    t.find(id, "uuid")
-        .or_else(|| t.find(id, "tstamp"))
-        .and_then(|u| t.arg_text(u, 0))
-        .map(|s| s.to_string())
+    t.find(id, "uuid").or_else(|| t.find(id, "tstamp")).and_then(|u| t.arg_text(u, 0)).map(|s| s.to_string())
 }
 
 fn xy(t: &Tree, id: Id, head: &str) -> Option<(f64, f64)> {
@@ -189,11 +186,8 @@ impl Board {
 
     /// Canonical copper layer name for a canonical name or a user alias.
     pub fn resolve_copper(&self, name: &str) -> Option<String> {
-        let found = self
-            .layers
-            .iter()
-            .find(|l| l.name == name)
-            .or_else(|| self.layers.iter().find(|l| l.user_name.as_deref() == Some(name)))?;
+        let found =
+            self.layers.iter().find(|l| l.name == name).or_else(|| self.layers.iter().find(|l| l.user_name.as_deref() == Some(name)))?;
         found.is_copper().then(|| found.name.clone())
     }
 
@@ -209,11 +203,7 @@ impl Board {
         let text = t.text(a);
         match text.parse::<i64>() {
             Ok(num) => {
-                let name = t
-                    .arg_text(n, 1)
-                    .map(|s| s.to_string())
-                    .or_else(|| self.net_table.get(&num).cloned())
-                    .filter(|s| !s.is_empty());
+                let name = t.arg_text(n, 1).map(|s| s.to_string()).or_else(|| self.net_table.get(&num).cloned()).filter(|s| !s.is_empty());
                 (name, Some(num))
             }
             Err(_) => (Some(text.to_string()), None),
@@ -263,10 +253,7 @@ impl Board {
             end = at;
             width = t.find(id, "size").and_then(|n| t.arg_num(n, 0)).unwrap_or(0.0);
             drill = t.find(id, "drill").and_then(|n| t.arg_num(n, 0)).unwrap_or(0.0);
-            layers = t
-                .find(id, "layers")
-                .map(|l| t.args(l).map(|a| t.text(a).to_string()).collect())
-                .unwrap_or_default();
+            layers = t.find(id, "layers").map(|l| t.args(l).map(|a| t.text(a).to_string()).collect()).unwrap_or_default();
             let mut vt = "through".to_string();
             for a in t.args(id) {
                 if t.kind(a) == Kind::Atom && matches!(t.bytes(a), b"blind" | b"micro" | b"buried") {
@@ -283,11 +270,7 @@ impl Board {
             end = xy(t, id, "end").unwrap_or((0.0, 0.0));
             width = t.find(id, "width").and_then(|n| t.arg_num(n, 0)).unwrap_or(0.0);
             drill = 0.0;
-            layers = t
-                .find(id, "layer")
-                .and_then(|n| t.arg_text(n, 0))
-                .map(|s| vec![s.to_string()])
-                .unwrap_or_default();
+            layers = t.find(id, "layer").and_then(|n| t.arg_text(n, 0)).map(|s| vec![s.to_string()]).unwrap_or_default();
             via_type = String::new();
         }
         Some(Track {
@@ -318,11 +301,8 @@ impl Board {
         }
         let order: Vec<&str> = self.copper_layers().iter().map(|l| l.name.as_str()).collect();
         let pos = |n: &str| order.iter().position(|o| *o == n);
-        let (Some(a), Some(b), Some(x)) = (
-            tr.layers.first().and_then(|n| pos(n)),
-            tr.layers.get(1).and_then(|n| pos(n)),
-            pos(layer),
-        ) else {
+        let (Some(a), Some(b), Some(x)) = (tr.layers.first().and_then(|n| pos(n)), tr.layers.get(1).and_then(|n| pos(n)), pos(layer))
+        else {
             return tr.layers.iter().any(|l| l == layer);
         };
         a.min(b) <= x && x <= a.max(b)
@@ -351,10 +331,7 @@ impl Board {
             let at_node = t.find(id, "at");
             let pads = t
                 .find_all(id, "pad")
-                .map(|p| Pad {
-                    number: t.arg_text(p, 0).map(|s| s.to_string()).unwrap_or_default(),
-                    net: self.node_net(p).0,
-                })
+                .map(|p| Pad { number: t.arg_text(p, 0).map(|s| s.to_string()).unwrap_or_default(), net: self.node_net(p).0 })
                 .collect();
             out.push(Footprint {
                 node: id,
@@ -363,11 +340,7 @@ impl Board {
                 reference,
                 at: xy(t, id, "at").unwrap_or((0.0, 0.0)),
                 rotation: at_node.and_then(|a| t.arg_num(a, 2)).unwrap_or(0.0),
-                layer: t
-                    .find(id, "layer")
-                    .and_then(|n| t.arg_text(n, 0))
-                    .map(|s| s.to_string())
-                    .unwrap_or_default(),
+                layer: t.find(id, "layer").and_then(|n| t.arg_text(n, 0)).map(|s| s.to_string()).unwrap_or_default(),
                 locked: node_locked(t, id),
                 pads,
             });
@@ -615,9 +588,8 @@ pub fn summary_json(b: &Board) -> Value {
         }
     }
     let nets = b.nets();
-    let bbox = b.outline_bbox().map(|o| {
-        json!({"min_x": o.0, "min_y": o.1, "max_x": o.2, "max_y": o.3, "width": o.2 - o.0, "height": o.3 - o.1})
-    });
+    let bbox =
+        b.outline_bbox().map(|o| json!({"min_x": o.0, "min_y": o.1, "max_x": o.2, "max_y": o.3, "width": o.2 - o.0, "height": o.3 - o.1}));
     json!({
         "revision": b.revision(),
         "layers": b.layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),

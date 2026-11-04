@@ -71,7 +71,8 @@ fn parse_tokens(src: &[u8]) -> Result<Tok, String> {
             i += 1;
         } else {
             // `(string_quote ")` carries a lone quote character as its argument.
-            if stack.last().and_then(|l| l.first()) == Some(&Tok::Atom("string_quote".into())) && stack.last().is_some_and(|l| l.len() == 1) {
+            if stack.last().and_then(|l| l.first()) == Some(&Tok::Atom("string_quote".into())) && stack.last().is_some_and(|l| l.len() == 1)
+            {
                 quote = c;
                 stack.last_mut().ok_or("no list")?.push(Tok::Atom((c as char).to_string()));
                 i += 1;
@@ -167,7 +168,11 @@ fn read_resolution(list: &Tok) -> Result<Option<(String, f64)>, String> {
 fn num(t: Option<&Tok>, what: &str) -> Result<f64, String> {
     let a = t.and_then(Tok::atom).ok_or_else(|| format!("{what}: number is missing"))?;
     let v: f64 = a.parse().map_err(|_| format!("{what}: '{a}' isn't a number"))?;
-    if v.is_finite() { Ok(v) } else { Err(format!("{what}: '{a}' isn't finite")) }
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!("{what}: '{a}' isn't finite"))
+    }
 }
 
 pub fn parse(src: &[u8]) -> Result<Session, String> {
@@ -191,7 +196,13 @@ pub fn parse(src: &[u8]) -> Result<Session, String> {
     let scale = |v: f64| (v * nm_per_unit).round() as i64;
     let mut s = Session { resolution_unit: res.0.clone(), resolution_value: res.1, nm_per_unit, ..Session::default() };
     s.placements = placement
-        .map(|p| p.items().iter().filter(|c| c.head() == Some("component")).map(|c| c.items().iter().filter(|x| x.head() == Some("place")).count()).sum())
+        .map(|p| {
+            p.items()
+                .iter()
+                .filter(|c| c.head() == Some("component"))
+                .map(|c| c.items().iter().filter(|x| x.head() == Some("place")).count())
+                .sum()
+        })
         .unwrap_or(0);
 
     if let Some(lib) = routes.find("library_out") {
@@ -312,12 +323,15 @@ mod tests {
     #[test]
     fn rejects_bad_files() {
         for bad in [
-            "(pcb)", "(session a)", "(session a (routes (network_out)))",
+            "(pcb)",
+            "(session a)",
+            "(session a (routes (network_out)))",
             "(session a (routes (resolution parsec 1) (network_out)))",
             "(session a (routes (resolution um 0) (network_out)))",
             "(session a (routes (resolution um 1) (network_out (net N (wire (path F.Cu 1 0 0 1))))))",
             "(session a (routes (resolution um 1) (network_out (net N (via v x 0)))))",
-            "(session", "",
+            "(session",
+            "",
         ] {
             assert!(parse(bad.as_bytes()).is_err(), "{bad}");
         }

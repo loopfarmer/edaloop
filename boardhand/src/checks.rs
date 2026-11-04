@@ -75,7 +75,13 @@ pub fn run(check: Check, args: &Value) -> Reply {
     };
     let scratch = match ScratchDir::new() {
         Ok(s) => s,
-        Err(e) => return base(Reply::unavailable(SRC, "scratch_failed", format!("Couldn't create a temporary folder: {e}. The check didn't run."))),
+        Err(e) => {
+            return base(Reply::unavailable(
+                SRC,
+                "scratch_failed",
+                format!("Couldn't create a temporary folder: {e}. The check didn't run."),
+            ))
+        }
     };
     let report_path = scratch.0.join("report.json");
     let (group, sub) = match check {
@@ -83,15 +89,35 @@ pub fn run(check: Check, args: &Value) -> Reply {
         Check::Erc => ("sch", "erc"),
     };
     let cmd_args: Vec<OsString> = vec![
-        group.into(), sub.into(), "--format".into(), "json".into(), "--severity-all".into(),
-        "--output".into(), report_path.clone().into_os_string(), path.as_os_str().to_os_string(),
+        group.into(),
+        sub.into(),
+        "--format".into(),
+        "json".into(),
+        "--severity-all".into(),
+        "--output".into(),
+        report_path.clone().into_os_string(),
+        path.as_os_str().to_os_string(),
     ];
     let timeout = args["timeout_s"].as_f64().unwrap_or(900.0) as u64;
     // kicad-cli's own temporary files go in the scratch folder too, and leave with it.
     let tmpdir = scratch.0.to_string_lossy().to_string();
-    let finished = match proc::run(Spec { program: &cli, args: cmd_args, cwd: None, env: vec![("TMPDIR", &tmpdir)], timeout: Duration::from_secs(timeout), capture_dir: &scratch.0 }) {
+    let finished = match proc::run(Spec {
+        program: &cli,
+        args: cmd_args,
+        cwd: None,
+        env: vec![("TMPDIR", &tmpdir)],
+        timeout: Duration::from_secs(timeout),
+        capture_dir: &scratch.0,
+    }) {
         Ok(f) => f,
-        Err(e) => return base(Reply::unavailable(SRC, "cli_missing", format!("{} couldn't be started: {e}. The check didn't run.", cli.display()))).with(json!({"cli": cli.to_string_lossy()})),
+        Err(e) => {
+            return base(Reply::unavailable(
+                SRC,
+                "cli_missing",
+                format!("{} couldn't be started: {e}. The check didn't run.", cli.display()),
+            ))
+            .with(json!({"cli": cli.to_string_lossy()}))
+        }
     };
     let (exit_code, signal) = match finished.ended {
         Ended::Exited(c) => (Some(c), None),
@@ -106,7 +132,8 @@ pub fn run(check: Check, args: &Value) -> Reply {
         "stdout_tail": finished.stdout_tail,
         "duration_ms": finished.elapsed.as_millis() as u64,
     });
-    let fail = |reason: &str, detail: String| base(Reply::unavailable(SRC, reason, format!("{detail} No findings are known."))).with(diag.clone());
+    let fail =
+        |reason: &str, detail: String| base(Reply::unavailable(SRC, reason, format!("{detail} No findings are known."))).with(diag.clone());
     match finished.ended {
         Ended::TimedOut => return fail("cli_timeout", format!("kicad-cli was still running after {timeout} s and was killed.")),
         Ended::Signaled(s) => return fail("cli_crashed", format!("kicad-cli was killed by signal {s}.")),
@@ -145,9 +172,14 @@ pub fn run(check: Check, args: &Value) -> Reply {
         "duration_ms": finished.elapsed.as_millis() as u64,
     });
     if rev_after.as_deref() != Some(rev_before.as_str()) {
-        return Reply::partial(SRC, "file_changed_during_check", "The file changed while the check ran, so these findings may describe the older version.", result)
-            .target(path)
-            .revs(Some(&rev_before), rev_after.as_deref());
+        return Reply::partial(
+            SRC,
+            "file_changed_during_check",
+            "The file changed while the check ran, so these findings may describe the older version.",
+            result,
+        )
+        .target(path)
+        .revs(Some(&rev_before), rev_after.as_deref());
     }
     Reply::complete(SRC, result).target(path).revs(Some(&rev_before), rev_after.as_deref())
 }
