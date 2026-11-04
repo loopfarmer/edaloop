@@ -32,6 +32,9 @@ def next_action(p: Project) -> dict:
     latest = p.ledger.latest()
     for row in gate_state(p):
         name, state = row["check"], row["state"]
+        if state in ("empty", "unknown"):
+            return {"action": "ask_person", "check": name, "question": row["summary"],
+                    "do_not": "An agent mustn't choose what the gate holds."}
         if state in ("missing", "stale"):
             return {"action": "run_check", "check": name, "reason": f"{name} evidence is {state}",
                     "command": f"edaloop run {name}"}
@@ -76,7 +79,7 @@ def run_all(p: Project, stop_on_failure: bool = False, skip: tuple = ()) -> list
     from .checks import run_check
     done = []
     for row in gate_state(p):
-        if row["state"] in ("pass", "warn") or row["check"] in skip:
+        if row["state"] in ("pass", "warn") or row["check"] in skip or row["check"] not in REGISTRY:
             continue
         ev = run_check(p, row["check"])
         done.append({"check": ev.check, "status": ev.status, "summary": ev.summary, "seconds": ev.seconds})

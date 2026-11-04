@@ -44,15 +44,25 @@ class Outcome:
         self.artifacts, self.summary = artifacts or [], summary
 
 
+# Recorded for an input that wasn't there when the check ran, so that creating it later makes the evidence stale.
+ABSENT = "absent"
+
+
 def _files(p: Project, *paths) -> dict[str, str]:
     out = {}
     for path in paths:
-        if path and Path(path).exists():
-            out[str(Path(path).relative_to(p.root))] = sha_file(path)
-            # A change on a channel's page is a change to the schematic, though the root's bytes stay the same.
-            if str(path).endswith(".kicad_sch"):
-                for child in re.findall(r'\(property "Sheetfile" "([^"]+)"', Path(path).read_text(errors="replace")):
-                    out.update(_files(p, Path(path).parent / child))
+        if not path:
+            continue
+        path = Path(path)
+        key = str(path.relative_to(p.root))
+        if not path.exists():
+            out[key] = ABSENT
+            continue
+        out[key] = sha_file(path)
+        # A change on a channel's page is a change to the schematic, though the root's bytes stay the same.
+        if str(path).endswith(".kicad_sch"):
+            for child in re.findall(r'\(property "Sheetfile" "([^"]+)"', path.read_text(errors="replace")):
+                out.update(_files(p, path.parent / child))
     return out
 
 
@@ -166,7 +176,7 @@ def drc(p: Project) -> Outcome:
     counts = collections.Counter(v["type"] for v in d["violations"])
     metrics = {"runs": counts_seen, "violations": len(d["violations"]), "unconnected": len(d["unconnected_items"]),
                "parity": len(d["schematic_parity"]), "by_type": dict(counts), "open_nets": dict(open_nets.most_common())}
-    return Outcome(_files(p, p.board, p.project_file, p.schematic), metrics, findings,
+    return Outcome({**_files(p, p.board, p.project_file, p.schematic), "drc_config": _config(p, "drc_config")}, metrics, findings,
                    {"kicad-cli": d.get("kicad_version", "")}, [str(out.relative_to(p.root))])
 
 
@@ -189,7 +199,7 @@ def rf_reference(p: Project) -> Outcome:
                                         f"{t.net} on {t.layer} runs under {line.net}, near ({t.start[0]:.2f}, {t.start[1]:.2f})"))
                 break
     other = sum(math.dist(t.start, t.end) for t in intruders)
-    return Outcome({**_files(p, p.board), "route_config": _digest(cfg)},
+    return Outcome({**_files(p, p.board), **_chain_files(p), "route_config": _config(p, "route_config")},
                    {"crossings": len(findings), "non_ground_on_reference_mm": round(other, 2)}, findings)
 
 
@@ -200,9 +210,7 @@ def rf_layout(p: Project) -> Outcome:
     cfg = {**p.section("rf_layout")}
     cfg.setdefault("eps_eff", (p.section("rf").get("impedance") or {}).get("eps_eff", 3.25))
     src = p.root / p.section("rf")["chains"]
-    ns: dict = {}
-    exec(compile(src.read_text(), str(src), "exec"), ns)      # the chain spec is the project's own Python
-    chains = ns["CHAINS"]
+    chains = _chains(p)
     reference = (p.section("route").get("reference_layers") or ["In1.Cu"])[0]
     board = Board(p.board)
     filled = p.work / "rf_layout_filled.kicad_pcb"
@@ -221,7 +229,10 @@ def rf_layout(p: Project) -> Outcome:
     band = tuple(hops) if hops else (float((p.section("rf").get("impedance") or {}).get("max_freq_ghz", 3.0)),) * 2
     metrics, found = rf_rules.audit(board.tracks, facts, chains, p.section("power").get("rails") or [], parts, band, reference,
                                     json.loads(covered.read_text()), len(board.copper_thickness_um()) or 2, cfg)
-    return Outcome({**_files(p, p.board), **_files(p, src), "rf_layout_config": _digest(p.section("rf_layout"))}, metrics, [Finding(*f) for f in found])
+    return Outcome({**_files(p, p.board, src, described), "rf_layout_config": _config(p, "rf_layout_config"),
+                    "rf_config": _config(p, "rf_config"), "power_config": _config(p, "power_config"),
+                    "em_hops_config": _config(p, "em_hops_config"), "route_config": _config(p, "route_config")},
+                   metrics, [Finding(*f) for f in found])
 
 
 @check("erc", "verify")
@@ -269,11 +280,21 @@ def _segments_within(a, b, limit: float) -> bool:
     return False
 
 
-def _chain_nets(p: Project) -> list[str]:
+def _chains(p: Project) -> list:
     src = p.root / p.section("rf")["chains"]
     ns: dict = {}
     exec(compile(src.read_text(), str(src), "exec"), ns)      # the chain spec is the project's own Python
-    return [c[0] for c in ns["CHAINS"]]
+    return ns["CHAINS"]
+
+
+def _chain_nets(p: Project) -> list[str]:
+    return [c[0] for c in _chains(p)]
+
+
+def _chain_files(p: Project) -> dict[str, str]:
+    """The chain spec as an input. A check that reads the RF net list must go stale when the list changes."""
+    chains = p.section("rf").get("chains")
+    return _files(p, p.root / chains) if chains else {}
 
 
 @check("rf_path", "verify")
@@ -317,19 +338,31 @@ def rf_path(p: Project) -> Outcome:
 def rf_preserved(p: Project) -> Outcome:
     """RF copper and ground vias are held to the baseline: a fixed wire is only a cost to Freerouting, not a wall."""
     base = p.root / ".edaloop" / "rf_baseline.json"
+    key = str(base.relative_to(p.root))
     nets = _chain_nets(p)
     board = Board(p.board)
     now = board.copper_items(nets)
     cfg = p.section("route")
     ground_nets = list(cfg.get("keep_nets") or ["GND"])
+    inputs = lambda: {**_files(p, p.board, base), **_chain_files(p), "route_config": _config(p, "route_config")}
+    # The first baseline this project recorded is the one copper is held to. Deleting or rewriting the file
+    # mustn't quietly move the reference to wherever a router left the copper.
+    first = next((ev for ev in p.ledger.all() if ev.check == "rf_preserved" and ev.inputs.get(key, ABSENT) != ABSENT), None)
+    findings = []
     if not base.exists():
+        base.parent.mkdir(parents=True, exist_ok=True)
         base.write_text(json.dumps({"rf": now, "ground_vias": board.ground_vias(ground_nets)}))
-        return Outcome(_files(p, p.board), {"nets": len(nets), "ground_vias": board.ground_vias(ground_nets)},
-                       summary=f"baseline recorded for {len(nets)} RF nets")
+        if first is None:
+            return Outcome(inputs(), {"nets": len(nets), "ground_vias": board.ground_vias(ground_nets)},
+                           summary=f"baseline recorded for {len(nets)} RF nets")
+    if first is not None and sha_file(base) != first.inputs[key]:
+        findings.append(Finding("rf_preserved:baseline_changed",
+                                f"{key} is not the baseline first recorded on {first.when}, so the copper is no longer held to it. "
+                                "Restore that file, or have a person waive rf_preserved:baseline_changed with a name and a reason"))
     old = json.loads(base.read_text())
     delta = compare_copper(old["rf"], now)
     max_added = float(cfg.get("max_rf_added_mm", 0.01))
-    findings = [Finding(f"rf_preserved:{n}:lost", f"{n}: {c} baseline RF item(s) gone or moved") for n, c in delta["lost"].items()]
+    findings += [Finding(f"rf_preserved:{n}:lost", f"{n}: {c} baseline RF item(s) gone or moved") for n, c in delta["lost"].items()]
     if delta["added_mm"] > max_added:
         findings.append(Finding("rf_preserved:added", f"{delta['added_mm']} mm of new copper on RF nets (limit {max_added})"))
     if delta["new_vias"]:
@@ -338,7 +371,7 @@ def rf_preserved(p: Project) -> Outcome:
     if vias < old["ground_vias"]:
         findings.append(Finding("rf_preserved:ground_vias",
                                 f"ground vias fell from {old['ground_vias']} to {vias}. DRC does not flag this"))
-    return Outcome(_files(p, p.board, base), {"nets": len(nets), "lost": len(delta["lost"]),
+    return Outcome(inputs(), {"nets": len(nets), "lost": len(delta["lost"]),
                                               "added_mm": delta["added_mm"], "ground_vias": vias}, findings)
 
 
@@ -504,7 +537,7 @@ def power_rails(p: Project) -> Outcome:
     worst = max(rows.values(), key=lambda x: x["worst_rise_c"], default=None)
     metrics = {"rails": rows, "worst_rise_c": worst["worst_rise_c"] if worst else None,
                "worst_drop_mv": max((x["worst_drop_mv"] for x in rows.values()), default=None), "method": "resistor network, IPC-2221"}
-    return Outcome({**_files(p, p.board), "power_config": _digest(cfg)}, metrics, findings)
+    return Outcome({**_files(p, p.board), "power_config": _config(p, "power_config")}, metrics, findings)
 
 
 @check("thermal_field", "verify")
@@ -514,7 +547,7 @@ def thermal_field(p: Project) -> Outcome:
     rails = [{"net": r["net"], "source": r["source"], "loads": {k: float(v) for k, v in r["loads"].items()}}
              for r in p.section("power").get("rails", [])]
     if not rails:
-        return Outcome({**_files(p, p.board), "power_config": _digest(p.section("power"))}, {"rails": []},
+        return Outcome({**_files(p, p.board), "power_config": _config(p, "power_config")}, {"rails": []},
                        [Finding("thermal_field:no_rails", "no rails are described, so there's no current to solve. Add them under power.rails")])
     filled = thermal.fill_copy(p.board, p.work / "thermal_filled.kicad_pcb")
     settings = {k: cfg[k] for k in ("dx_mm", "thermal_dx_mm", "sublayers", "h_w_m2k", "k_in_plane", "k_through", "ambient_c", "coupled") if k in cfg}
@@ -571,7 +604,7 @@ def thermal_field(p: Project) -> Outcome:
                 findings.append(Finding("thermal_field:part_rise", f"{where}. No limit is set, so nothing is judging this. Set thermal.max_part_rise_c from your parts' ratings and enclosure", "warning"))
             elif top["rise_c"] > float(part_limit):
                 findings.append(Finding("thermal_field:part_rise", f"{where}, limit {part_limit} C"))
-    inputs = {**_files(p, p.board, p.project_file), "thermal_config": _digest([cfg, p.section("power")])}
+    inputs = {**_files(p, p.board, p.project_file), "thermal_config": _config(p, "thermal_config")}
     return Outcome(inputs, metrics, findings, {"boardfield": o["device"]}, [str(png.relative_to(p.root))])
 
 
@@ -584,7 +617,7 @@ def em_fast(p: Project) -> Outcome:
     cfg = p.section("em")
     fast = cfg.get("fast") or {"solver": "emerge", "quality": "Draft", "adaptive_mesh": 4}
     board = Board(p.board)
-    inputs = {"em_fast_config": _digest([{k: cfg.get(k) for k in _GEOMETRY_KEYS}, fast]), "stackup": board.stackup_digest()}
+    inputs = {"em_fast_config": _config(p, "em_fast_config"), "stackup": board.stackup_digest()}
     ws = _em_workspace(p, cfg, board)
     label = "fast_" + _solver_label(fast)
     layout = "cells/COUPON/layout/COUPON.clay"
@@ -637,15 +670,19 @@ def em_hops(p: Project) -> Outcome:
     channels = [g for g in ([n for n in group if n in results] for group in series_groups(every)) if g]
     metrics = {"hops": results, "channels": channels, "unsolved": sorted(unsolved), "unsolved_why": unsolved, "worst_rl_db": min(rls),
                "total_il_max_db": round(max(sum(results[n]["il_max_db"] for n in g) for g in channels), 3)}
-    return Outcome({**_files(p, p.board), "em_hops_config": _digest([cfg, solver])}, metrics, findings, {"solver": solver["solver"]})
+    return Outcome({**_files(p, p.board), **_chain_files(p), "em_hops_config": _config(p, "em_hops_config"), "rf_config": _config(p, "rf_config")}, metrics, findings, {"solver": solver["solver"]})
+
+
+def _rule_profile(p: Project) -> tuple[Path, dict]:
+    cfg = p.section("rules")
+    pack = Path(cfg.get("pack") or toolchain.paths()["rule_pack"]).expanduser()
+    return pack, yaml.safe_load((pack / cfg.get("profile", "manufacture/summit_standard.yaml")).read_text())
 
 
 @check("rules", "verify")
 def rules(p: Project) -> Outcome:
     """Fabricator limits and RF routing rules from the rule pack, applied to the actual copper."""
-    cfg = p.section("rules")
-    pack = Path(cfg.get("pack") or toolchain.paths()["rule_pack"]).expanduser()
-    std = yaml.safe_load((pack / cfg.get("profile", "manufacture/summit_standard.yaml")).read_text())
+    pack, std = _rule_profile(p)
     cap, eng = std["published_capabilities"], std["engineering_defaults"]
     board = Board(p.board)
     segs = [t for t in board.tracks if t.kind != "via"]
@@ -673,9 +710,10 @@ def rules(p: Project) -> Outcome:
     if p.section("rf").get("chains"):
         # A bend only matters when the track is wide against a wavelength. Known-good boards bend wide lines at low frequency and work.
         f_ghz = float((p.section("rf").get("impedance") or {}).get("max_freq_ghz", 0) or 0)
-        widest = max((t.width for t in segs if t.net in set(_chain_nets(p))), default=0.0)
+        rf_nets = _chain_nets(p)
+        widest = max((t.width for t in segs if t.net in set(rf_nets)), default=0.0)
         small = f_ghz > 0 and widest < 299.8 / (f_ghz * 4.5 ** 0.5) / 20
-        for where in board.right_angles(_chain_nets(p)):
+        for where in board.right_angles(rf_nets):
             findings.append(Finding("rules:rf_right_angle", f"90 degree or sharper bend on RF: {where}" + (f". The {widest} mm track is under a twentieth of a wavelength at {f_ghz:g} GHz, so this is minor" if small else ""),
                                     "warning" if small else "error"))
     floating = sorted(x["name"] for x in board.all_pads() if not x["net"] and not x["name"].endswith("."))
@@ -685,7 +723,7 @@ def rules(p: Project) -> Outcome:
                                 f"Check them against the datasheet: {', '.join(floating[:12])}{' and more' if len(floating) > 12 else ''}", "warning"))
     metrics = {"pads_on_no_net": floating, "min_track_mm": min_width, "min_drill_mm": min(drills) if drills else None,
                "min_annular_mm": round(ring, 4) if ring is not None else None, "profile": std["manufacturer"]["name"]}
-    return Outcome({**_files(p, p.board), "rule_profile": _digest(std)}, metrics, findings, {"rule pack": str(pack.name)})
+    return Outcome({**_files(p, p.board), **_chain_files(p), "rule_profile": _config(p, "rule_profile"), "rf_config": _config(p, "rf_config")}, metrics, findings, {"rule pack": str(pack.name)})
 
 
 # ---------------------------------------------------------------- simulate
@@ -843,7 +881,7 @@ def em_crosscheck(p: Project) -> Outcome:
     if widths and not any(abs(x - w_mm) < 1e-6 for x in widths):
         findings.append(Finding("em_crosscheck:coupon_width",
                                 f"coupon is {w_mm} mm but the RF nets are {widths} mm wide"))
-    inputs = {"em_config": _digest(cfg), "stackup": board.stackup_digest()}
+    inputs = {"em_config": _config(p, "em_config"), "stackup": board.stackup_digest(), **_chain_files(p)}
     ws = _em_workspace(p, cfg, board)
     layout = "cells/COUPON/layout/COUPON.clay"
     length_mm = float(cfg["length_um"]) / 1000
@@ -978,7 +1016,7 @@ def cascade(p: Project) -> Outcome:
     rf = p.ledger.latest().get("rf_path")
     routed = None
     db_per_mm = cfg.get("line_loss_db_per_mm")
-    inputs = {"stages": _digest(cfg)}
+    inputs = {"stages": _config(p, "stages")}
     hop_ev = p.ledger.latest().get("em_hops")
     measured = None
     if db_per_mm and hop_ev and hop_ev.status in ("pass", "warn") and current_inputs(p, hop_ev):
@@ -986,7 +1024,7 @@ def cascade(p: Project) -> Outcome:
         table = _hop_loss_table(hop_ev)
         stages.insert(0, {"name": "RF copper, solved", "loss_db": table})
         measured = table
-        inputs["em_hops_table"] = _digest(table)
+        inputs["em_hops_table"] = _config(p, "em_hops_table")
     elif db_per_mm and rf and rf.metrics.get("routed_mm"):
         routed = rf.metrics["routed_mm"]
         stages.insert(0, {"name": "RF copper", "loss_db": [[1, routed * float(db_per_mm)]]})
@@ -1027,8 +1065,8 @@ def spice_benches(p: Project) -> Outcome:
             for measure in run["failed"]:
                 findings.append(Finding(f"spice:{name}:{measure}:failed", f"{name}: the measurement {measure} did not resolve"))
     files = [*p.schematic.parent.glob("*.kicad_sch")]
-    model_files = sorted({m["file"] for m in models.values() if m.get("file")})
-    return Outcome({**_files(p, *files), "spice_config": _digest([cfg, [sha_file(Path(f)) for f in model_files]])},
+    # Worked out from the models already resolved, so the netlist isn't exported twice. _spice_digest repeats it.
+    return Outcome({**_files(p, *files), "spice_config": _spice_models_digest(cfg, models.values())},
                    metrics, findings, {"ngspice": "47"}, artifacts)
 
 
@@ -1043,61 +1081,82 @@ def _lookup(metrics: dict, dotted: str):
     return v
 
 
+def _spice_digest(p: Project) -> str:
+    cfg = p.section("spice")
+    extra = p.root / cfg["registry"] if cfg.get("registry") else None
+    parts = spice.read_netlist(p.schematic, p.work / "spice_netlist.xml")
+    reg = spice.load_registry(extra)
+    return _spice_models_digest(cfg, [spice.resolve(x, cfg.get("models") or {}, reg) for x in parts])
+
+
+def _spice_models_digest(cfg: dict, models) -> str:
+    files = sorted({m["file"] for m in models if m.get("file")})
+    return _digest([cfg, [sha_file(Path(f)) for f in files]])
+
+
+def _hop_table_digest(p: Project) -> str | None:
+    hop = p.ledger.latest().get("em_hops")
+    return _digest(_hop_loss_table(hop)) if hop else None
+
+
+def _requirement_checks(p: Project) -> set[str]:
+    return {req["metric"].split(".", 1)[0] for req in p.cfg.get("requirements") or []} - {"requirements"}
+
+
+def _requirements_digest(p: Project) -> str:
+    latest = p.ledger.latest()
+    # The evidence's own content, not only its time: two runs can land in the same second.
+    read = {name: [latest[name].when, latest[name].status, latest[name].metrics] for name in _requirement_checks(p) if name in latest}
+    return _digest([p.cfg.get("requirements"), read])
+
+
+# Every input that isn't a file, and how to work out its digest again now. A check records a key through
+# _config, and current_inputs recomputes it from here, so the two can't drift apart. A key missing from
+# this table makes evidence stale, and a key that can no longer be worked out does too.
+CONFIG_DIGESTS = {
+    "drc_config": lambda p: _digest(p.section("drc")),
+    "rf_config": lambda p: _digest(p.section("rf")),
+    "route_config": lambda p: _digest(p.section("route")),
+    "rf_layout_config": lambda p: _digest(p.section("rf_layout")),
+    "power_config": lambda p: _digest(p.section("power")),
+    "thermal_config": lambda p: _digest([p.section("thermal"), p.section("power")]),
+    "em_config": lambda p: _digest(p.section("em")),
+    "em_fast_config": lambda p: _digest([{k: p.section("em").get(k) for k in _GEOMETRY_KEYS},
+                                         p.section("em").get("fast") or {"solver": "emerge", "quality": "Draft", "adaptive_mesh": 4}]),
+    "em_hops_config": lambda p: _digest([p.section("em_hops"), p.section("em_hops").get("solver") or {"solver": "emerge", "quality": "Accurate"}]),
+    "em_hops_table": _hop_table_digest,
+    "stackup": lambda p: Board(p.board).stackup_digest(),
+    "stages": lambda p: _digest(p.section("cascade")),
+    "rule_profile": lambda p: _digest(_rule_profile(p)[1]),
+    "spice_config": _spice_digest,
+    "requirements": _requirements_digest,
+}
+
+
+def _config(p: Project, key: str) -> str:
+    return CONFIG_DIGESTS[key](p)
+
+
 def current_inputs(p: Project, ev: Evidence) -> bool:
     """True while every input the evidence read still has the same content."""
     for key, digest in ev.inputs.items():
+        if key in CONFIG_DIGESTS:
+            try:
+                if _config(p, key) != digest:
+                    return False
+            except Exception:                   # an input that can't be read now can't vouch for the old result
+                return False
+            # A requirement's verdict is only as fresh as the evidence it was read from.
+            if key == "requirements":
+                latest = p.ledger.latest()
+                if any(name in latest and not current_inputs(p, latest[name]) for name in _requirement_checks(p)):
+                    return False
+            continue
         path = p.root / key
         if path.exists():
             if sha_file(path) != digest:
                 return False
-        elif key == "em_config":
-            if _digest(p.section("em")) != digest:
-                return False
-        elif key == "stackup":
-            if Board(p.board).stackup_digest() != digest:
-                return False
-        elif key == "stages":
-            if _digest(p.section("cascade")) != digest:
-                return False
-        elif key == "rule_profile":
-            continue
-        elif key == "rf_layout_config":
-            if _digest(p.section("rf_layout")) != digest:
-                return False
-        elif key == "route_config":
-            if _digest(p.section("route")) != digest:
-                return False
-        elif key == "thermal_config":
-            if _digest([p.section("thermal"), p.section("power")]) != digest:
-                return False
-        elif key == "power_config":
-            if _digest(p.section("power")) != digest:
-                return False
-        elif key == "em_hops_config":
-            cfg = p.section("em_hops")
-            if _digest([cfg, cfg.get("solver") or {"solver": "emerge", "quality": "Accurate"}]) != digest:
-                return False
-        elif key == "em_hops_table":
-            hop = p.ledger.latest().get("em_hops")
-            if not hop or _digest(_hop_loss_table(hop)) != digest:
-                return False
-        elif key == "em_fast_config":
-            cfg = p.section("em")
-            fast = cfg.get("fast") or {"solver": "emerge", "quality": "Draft", "adaptive_mesh": 4}
-            if _digest([{k: cfg.get(k) for k in _GEOMETRY_KEYS}, fast]) != digest:
-                return False
-        elif key == "spice_config":
-            cfg = p.section("spice")
-            extra = p.root / cfg["registry"] if cfg.get("registry") else None
-            parts = spice.read_netlist(p.schematic, p.work / "spice_netlist.xml")
-            reg = spice.load_registry(extra)
-            models = [spice.resolve(x, cfg.get("models") or {}, reg) for x in parts]
-            files = sorted({m["file"] for m in models if m.get("file")})
-            if _digest([cfg, [sha_file(Path(f)) for f in files]]) != digest:
-                return False
-        elif key == "requirements":
-            continue
-        else:
+        elif digest != ABSENT:
             return False
     return True
 
@@ -1133,8 +1192,7 @@ def requirements(p: Project) -> Outcome:
         if not ok:
             findings.append(Finding(f"requirements:{req['id']}",
                                     f"{req['id']}: {req['metric']} = {value}, limit [{low}, {high}]"))
-    evidence = {name: latest[name].when for name in {r["metric"].split(".")[0] for r in rows} if name in latest}
-    inputs = {"requirements": _digest([p.cfg.get("requirements"), evidence]), **_files(p, p.cfg_path)}
+    inputs = {"requirements": _config(p, "requirements"), **_files(p, p.cfg_path)}
     return Outcome(inputs, {"rows": rows, "met": sum(r["state"] == "met" for r in rows), "total": len(rows)}, findings)
 
 
@@ -1149,9 +1207,17 @@ def withdrawn_waivers(p: Project, ev: Evidence) -> list[dict]:
 def gate_state(p: Project) -> list[dict]:
     """The state of every check the project's gate requires, with staleness resolved now."""
     latest = p.ledger.latest()
+    if not p.gate():
+        # Nothing gated is not the same as everything passing.
+        return [{"check": "gate", "stage": "release", "state": "empty", "when": "",
+                 "summary": "edaloop.yaml gates no checks, so no evidence stands behind a release. A person decides what the gate holds"}]
     rows = []
     for name in p.gate():
         ev = latest.get(name)
+        if name not in REGISTRY:
+            rows.append({"check": name, "stage": "?", "state": "unknown", "when": "",
+                         "summary": f"{name} is gated in edaloop.yaml but no check has that name. See list_checks"})
+            continue
         if ev is None:
             state = "missing"
         elif not current_inputs(p, ev) or withdrawn_waivers(p, ev):
@@ -1219,6 +1285,8 @@ def release(p: Project) -> dict:
     blockers = [r for r in rows if r["state"] not in ("pass", "warn")]
     if blockers:
         return {"released": False, "blockers": blockers}
+    # The gate held on these bytes. Exports read the board again, so check that it is still them afterwards.
+    board_sha = sha_file(p.board)
     cli = toolchain.paths()["kicad_cli"]
     out = p.root / "release"
     shutil.rmtree(out, ignore_errors=True)
@@ -1235,8 +1303,12 @@ def release(p: Project) -> dict:
         r = toolchain.run(cmd, timeout=600)
         if r.returncode != 0:
             return {"released": False, "blockers": [{"check": "export", "state": "error", "summary": r.stderr.strip()[-300:]}]}
+    if sha_file(p.board) != board_sha or any(r["state"] not in ("pass", "warn") for r in gate_state(p)):
+        shutil.rmtree(out, ignore_errors=True)
+        return {"released": False, "blockers": [{"check": "export", "state": "stale",
+                                                 "summary": "the board or the evidence changed while the files were exported, so they may not match. Run release again"}]}
     latest = p.ledger.latest()
-    manifest = {"name": p.name, "board_sha256": sha_file(p.board),
+    manifest = {"name": p.name, "board_sha256": board_sha,
                 "evidence": {r["check"]: asdict(latest[r["check"]]) for r in rows},
                 "waivers": [w.__dict__ for w in p.waivers()]}
     (out / "MANIFEST.json").write_text(json.dumps(manifest, indent=1))

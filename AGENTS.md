@@ -64,7 +64,7 @@ If it changes what the figures show, redraw them with `docs/figures/build_figure
 2. **Commit and push only when asked.**
 3. **Requirements and waivers belong to a person.** Don't add a tool, default or shortcut that changes them. A waiver needs a name and a reason.
 4. **A crash is an error, never a pass.** A check that can't run must say so, and an unavailable reading must never look like a clean one.
-5. **Evidence is tied to bytes.** If a check reads a new input, add it to the check's `inputs` so that changing it makes the result stale. `current_inputs` must know any key that isn't a file.
+5. **Evidence is tied to bytes.** If a check reads a new input, add it to the check's `inputs` so that changing it makes the result stale. A key that isn't a file goes in `checks.CONFIG_DIGESTS` and is recorded through `_config`, so the check and `current_inputs` work it out the same way. A file that isn't there is recorded as absent, so creating it makes the result stale.
 6. **Routers work on copies.** Nothing may move locked RF copper or lose a ground via without the gate seeing it.
 7. **Say what a number is.** Mark assumptions and estimates, in code and in reports. Don't claim agreement with a reference you haven't compared against, and don't tune a setting until a result passes.
 
