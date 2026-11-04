@@ -45,10 +45,10 @@ Build and test the Rust crates from their own folders with `cargo build --releas
 To measure a board's RF path directly, without the ledger:
 
 ```bash
-python3 src/edaloop/scripts/rf_path.py --pcb board.kicad_pcb --chains chains.py --all
+python3 src/edaloop/scripts/rf_path.py --pcb board.kicad_pcb --chains chains.yaml --all
 ```
 
-It reports each hop's distance off axis, its spanning-tree floor, its routed length, its vias and its bends. `chains.py` lists each RF net's entry and exit pads, and `edaloop build` writes one. A hop off axis is a placement fault that re-routing can't fix. The floor is measured over the net's own pads, so a tap doesn't read as waste. `kicad_pcb.py` is the one place the pad transform lives, so don't copy it elsewhere.
+It reports each hop's distance off axis, its spanning-tree floor, its routed length, its vias and its bends. `chains.yaml` lists each RF net's entry and exit pads, and `edaloop build` writes one. It is data, never code: a Python `chains.py` is refused, and `edaloop convert-chains chains.py` turns one into YAML. A hop off axis is a placement fault that re-routing can't fix. The floor is measured over the net's own pads, so a tap doesn't read as waste. `kicad_pcb.py` is the one place the pad transform lives, so don't copy it elsewhere.
 
 The Python tests need no KiCad or solvers. They skip what they can't reach. A real change to layout or routing also needs a real run:
 

@@ -344,20 +344,70 @@ class Board(object):
 # ==========================================================================
 # the chain spec
 # ==========================================================================
+class ChainSpecError(ValueError):
+    """A chain spec that can't be read, or doesn't say what it must."""
+
+
+def _pad(text, where):
+    ref, dot, pin = str(text).partition(".")
+    if not (ref and dot and pin):
+        raise ChainSpecError("%s: %r should be REF.PIN, such as J1.1" % (where, text))
+    return (ref, pin)
+
+
 def load_chains(path):
-    """Import a chain-spec module by file path.
+    """Read a chain spec: each RF net's ENTRY and EXIT pad.
 
-    It must define CHAINS: a list of (net, (ref, pin), (ref, pin)) giving
-    each RF net's ENTRY and EXIT pad. Everything else on the net is a TAP
-    and gets a perpendicular stub off the spine. Written out rather than
-    inferred, because a "furthest pair" heuristic picks the wrong spine
-    for any multi-pad combining node.
+    Everything else on the net is a TAP and gets a perpendicular stub off
+    the spine. Written out rather than inferred, because a "furthest pair"
+    heuristic picks the wrong spine for any multi-pad combining node.
 
-    Optional: WIDTH (float, default 0.30) and NET_WIDTH ({net: float}).
+    The spec is YAML, and data only:
+
+        width_mm: 0.3              # optional, default 0.30
+        net_width_mm: {RF2: 0.5}   # optional
+        chains:
+          - {net: RF1, entry: J1.1, exit: U1.2}
+
+    Returns (chains, width, net_width), chains as (net, (ref, pin), (ref, pin)).
+    A Python chain spec is refused: it would be code run from the project
+    folder. `edaloop convert-chains` turns one into YAML.
     """
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("chainspec", path)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return (list(m.CHAINS), getattr(m, "WIDTH", 0.30),
-            dict(getattr(m, "NET_WIDTH", {})))
+    if str(path).endswith(".py"):
+        raise ChainSpecError("%s is Python, which edaloop no longer runs. Convert it with: "
+                             "edaloop convert-chains %s" % (path, path))
+    try:
+        import yaml
+    except ImportError:
+        raise ChainSpecError("reading %s needs PyYAML: pip install pyyaml, or run this through edaloop" % path) from None
+    with open(path) as fh:
+        doc = yaml.safe_load(fh)
+    if not isinstance(doc, dict) or not isinstance(doc.get("chains"), list) or not doc["chains"]:
+        raise ChainSpecError("%s: needs a non-empty 'chains:' list" % path)
+    chains = []
+    for i, row in enumerate(doc["chains"]):
+        where = "%s: chains[%d]" % (path, i)
+        if not isinstance(row, dict) or set(row) != {"net", "entry", "exit"}:
+            raise ChainSpecError("%s: needs exactly net, entry and exit" % where)
+        chains.append((str(row["net"]), _pad(row["entry"], where), _pad(row["exit"], where)))
+    unknown = set(doc) - {"chains", "width_mm", "net_width_mm"}
+    if unknown:
+        raise ChainSpecError("%s: unknown key(s) %s" % (path, ", ".join(sorted(unknown))))
+    width = float(doc.get("width_mm", 0.30))
+    net_width = {str(k): float(v) for k, v in (doc.get("net_width_mm") or {}).items()}
+    return chains, width, net_width
+
+
+def dump_chains(chains, width=None, net_width=None, note=""):
+    """Write a chain spec as YAML, with no dependency: every string is JSON-quoted, which YAML reads as is."""
+    import json
+    q = json.dumps
+    lines = ["# " + ln for ln in note.splitlines()] if note else []
+    if width is not None:
+        lines.append("width_mm: %s" % float(width))
+    if net_width:
+        lines.append("net_width_mm: {%s}" % ", ".join("%s: %s" % (q(k), float(v)) for k, v in net_width.items()))
+    lines.append("chains:")
+    for net, entry, leave in chains:
+        lines.append("  - {net: %s, entry: %s, exit: %s}" % (q(net), q("%s.%s" % tuple(entry)), q("%s.%s" % tuple(leave))))
+    return "\n".join(lines) + "\n"

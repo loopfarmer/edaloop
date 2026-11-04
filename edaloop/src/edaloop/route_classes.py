@@ -428,9 +428,8 @@ def solve_rf_width(base: Path, chains: list, start_mm: float, target: float, wor
 
 
 def _load_chains(path: Path) -> tuple[list, float, dict]:
-    ns: dict = {}
-    exec(compile(path.read_text(), str(path), "exec"), ns)       # the chain spec is the project's own Python
-    return ns["CHAINS"], ns.get("WIDTH", 0.3), ns.get("NET_WIDTH", {})
+    from .scripts.kicad_pcb import load_chains
+    return load_chains(path)
 
 
 def _op(*args, timeout=600) -> dict:

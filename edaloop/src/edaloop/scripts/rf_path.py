@@ -23,8 +23,8 @@ reports
              pair of impedance discontinuities and a stub.
     bends    direction changes on the net's polyline
 
-    python3 rf_path.py --pcb board.kicad_pcb --chains chains.py
-    python3 rf_path.py --pcb board.kicad_pcb --chains chains.py --all
+    python3 rf_path.py --pcb board.kicad_pcb --chains chains.yaml
+    python3 rf_path.py --pcb board.kicad_pcb --chains chains.yaml --all
 
 --all lists every hop; the default lists only the ones with something
 wrong and totals the rest.

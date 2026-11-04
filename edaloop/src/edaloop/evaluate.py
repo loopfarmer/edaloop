@@ -294,10 +294,10 @@ def project_for(sample: dict, out: Path, name: str, chain: list | None, width: f
     if known.get("part_watts"):
         cfg["thermal"]["part_watts"] = known["part_watts"]
     if chain:
-        (out / "chains.py").write_text(boardgen.chains_file({"chain": chain, "rf_line_width_mm": width, "layout": {}}))
+        (out / "chains.yaml").write_text(boardgen.chains_file({"chain": chain, "rf_line_width_mm": width, "layout": {}}))
         low, high = known["band_mhz"]
         cfg["em"] = {"signal_layer": "F.Cu", "ground_layer": reference, "gap_um": gap, "side_um": 3000}
-        cfg["rf"] = {"chains": "chains.py", "max_over_pct": 100, "impedance": {"target": 50, "tol": 10, "max_freq_ghz": high / 1000 * 1.05, "min_section_rl_db": 20}}
+        cfg["rf"] = {"chains": "chains.yaml", "max_over_pct": 100, "impedance": {"target": 50, "tol": 10, "max_freq_ghz": high / 1000 * 1.05, "min_section_rl_db": 20}}
         cfg["em_hops"] = {"band_ghz": [round(low * 0.95 / 1000, 3), round(high * 1.05 / 1000, 3)], "reference_layer": reference, "min_rl_db": 15, "warn_rl_db": 20}
     (out / "edaloop.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 

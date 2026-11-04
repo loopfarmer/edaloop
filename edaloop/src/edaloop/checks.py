@@ -281,10 +281,8 @@ def _segments_within(a, b, limit: float) -> bool:
 
 
 def _chains(p: Project) -> list:
-    src = p.root / p.section("rf")["chains"]
-    ns: dict = {}
-    exec(compile(src.read_text(), str(src), "exec"), ns)      # the chain spec is the project's own Python
-    return ns["CHAINS"]
+    from .scripts.kicad_pcb import load_chains
+    return load_chains(p.root / p.section("rf")["chains"])[0]
 
 
 def _chain_nets(p: Project) -> list[str]:
