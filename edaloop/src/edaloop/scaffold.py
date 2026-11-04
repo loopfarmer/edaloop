@@ -30,7 +30,7 @@ def project_yaml(root: Path) -> dict:
     board = boards[0] if boards else None
     sch = board.with_suffix(".kicad_sch") if board else None
     has_sch = bool(sch and sch.exists())
-    chains = sorted(root.glob("chains*.py"))
+    chains = sorted(root.glob("chains*.yaml"))
     has_ato = (root / "ato.yaml").exists()
     cfg: dict = {"name": root.name}
     if board:
@@ -104,7 +104,12 @@ def init(root: Path) -> dict:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(SKILL, dest)
         wrote.append(".claude/skills/edaloop/SKILL.md")
-    return {"wrote": wrote, "left_alone": kept}
+    out = {"wrote": wrote, "left_alone": kept}
+    # A Python chain spec isn't picked up any more. Say so rather than leave the RF checks out without a word.
+    old = [x.name for x in sorted(root.glob("chains*.py")) if not x.with_suffix(".yaml").exists()]
+    if old:
+        out["convert"] = [f"edaloop convert-chains {name}" for name in old]
+    return out
 
 
 def hook_message(root: Path, hook_input: dict) -> dict | None:
@@ -124,3 +129,27 @@ def hook_message(root: Path, hook_input: dict) -> dict | None:
     action = controller.next_action(p)
     text = f"edaloop: this change made {', '.join(stale)} stale. Next: {action.get('command') or action.get('then')}"
     return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
+
+
+def convert_chains(src: Path, out: Path | None = None) -> dict:
+    """Turn a Python chain spec (CHAINS, WIDTH, NET_WIDTH) into the YAML one edaloop reads.
+
+    This runs the Python file, once, because a person asked for it by name. Nothing else in
+    edaloop runs a chain spec. The YAML is read back and must say the same thing, and an
+    existing file is never overwritten.
+    """
+    from .scripts.kicad_pcb import dump_chains, load_chains
+    src = Path(src)
+    out = Path(out) if out else src.with_suffix(".yaml")
+    if out.exists():
+        raise FileExistsError(f"{out} already exists. Move it, or name another with -o")
+    ns: dict = {}
+    exec(compile(src.read_text(), str(src), "exec"), ns)        # the one place, and only on request
+    chains = [(str(net), (str(a[0]), str(a[1])), (str(b[0]), str(b[1]))) for net, a, b in ns["CHAINS"]]
+    width, net_width = float(ns.get("WIDTH", 0.3)), {str(k): float(v) for k, v in (ns.get("NET_WIDTH") or {}).items()}
+    out.write_text(dump_chains(chains, width, net_width, f"Converted from {src.name} by edaloop convert-chains."))
+    if load_chains(out) != (chains, width, net_width):
+        out.unlink()
+        raise RuntimeError(f"the YAML written for {src.name} didn't read back the same, so it was removed")
+    return {"written": str(out), "chains": len(chains),
+            "next": f"set rf.chains to {out.name} in edaloop.yaml, then delete {src.name}"}

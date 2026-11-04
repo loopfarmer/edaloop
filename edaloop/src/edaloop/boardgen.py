@@ -94,12 +94,11 @@ def project_file(bench: dict, name: str) -> dict:
 
 
 def chains_file(bench: dict) -> str:
-    rows = []
-    for net, entry, leave in [*bench["chain"], *(bench.get("extra_chains") or [])]:
-        rows.append(f'    ({net!r}, {tuple(entry.split("."))!r}, {tuple(leave.split("."))!r}),')
-    return ('# Generated from the board description. Edit that, not this.\n'
-            f'WIDTH = {bench["rf_line_width_mm"]}\nNET_WIDTH = {(bench["layout"].get("net_width") or {})!r}\n'
-            'CHAINS = [\n' + "\n".join(rows) + '\n]\n')
+    from .scripts.kicad_pcb import dump_chains
+    rows = [(net, tuple(entry.split(".", 1)), tuple(leave.split(".", 1)))
+            for net, entry, leave in [*bench["chain"], *(bench.get("extra_chains") or [])]]
+    return dump_chains(rows, bench["rf_line_width_mm"], bench["layout"].get("net_width") or {},
+                       "Generated from the board description. Edit that, not this.")
 
 
 def project_yaml(bench: dict, name: str, chains: str) -> dict:
@@ -216,7 +215,7 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     (out / "sym-lib-table").write_text('(sym_lib_table\n  (version 7)\n  (lib (name "edaloop")(type "KiCad")'
                                        '(uri "${KIPRJMOD}/edaloop.kicad_sym")(options "")(descr ""))\n)\n')
     shutil.copy(bench_path, out / "board_description.yaml")
-    chains = f"chains_{name}.py"
+    chains = f"chains_{name}.yaml"
     (out / chains).write_text(chains_file(bench))
     (out / "edaloop.yaml").write_text(yaml.safe_dump(project_yaml(bench, name, chains), sort_keys=False, width=120))
     seed = out / ".seed.kicad_pcb"

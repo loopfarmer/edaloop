@@ -62,9 +62,9 @@ def test_compare_copper_separates_moved_from_added(tmp_path):
 
 
 def test_losing_ground_vias_fails_rf_preserved(tmp_path):
-    chains = 'CHAINS = [("RF", ("J1", "1"), ("J2", "1"))]\n'
-    (tmp_path / "c.py").write_text(chains)
-    p = make(tmp_path, "rf: {chains: c.py}\n")
+    chains = 'chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n'
+    (tmp_path / "c.yaml").write_text(chains)
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
     assert checks.run_check(p, "rf_preserved").status == "pass"
     (tmp_path / "b.kicad_pcb").write_text(PCB.replace('(via (at 3 3) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "GND"))', ""))
     ev = checks.run_check(p, "rf_preserved")
@@ -293,9 +293,9 @@ def test_power_solver_keeps_a_narrow_neckdown_visible():
 
 
 def test_copper_under_an_rf_line_fails_rf_reference(tmp_path):
-    chains = 'CHAINS = [("RF", ("J1", "1"), ("J2", "1"))]\n'
-    (tmp_path / "c.py").write_text(chains)
-    p = make(tmp_path, "rf: {chains: c.py}\nroute: {reference_layers: [In1.Cu], keep_nets: [GND]}\n")
+    chains = 'chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n'
+    (tmp_path / "c.yaml").write_text(chains)
+    p = make(tmp_path, "rf: {chains: c.yaml}\nroute: {reference_layers: [In1.Cu], keep_nets: [GND]}\n")
     assert checks.run_check(p, "rf_reference").status == "pass"
     extra = '(segment (start 5 -5) (end 5 5) (width 0.2) (layer "In1.Cu") (net "VDD"))\n)'
     (tmp_path / "b.kicad_pcb").write_text(PCB.rstrip()[:-1] + extra)
@@ -509,7 +509,7 @@ def test_bench_catches_a_wrong_bias_and_a_missing_model(tmp_path):
 
 # ---------------------------------------------------------------- building a board from a description
 
-def test_build_files_carry_the_description():
+def test_build_files_carry_the_description(tmp_path):
     import yaml
 
     from edaloop import boardgen, testbench
@@ -518,8 +518,12 @@ def test_build_files_carry_the_description():
     sheet = schematic.schematic(bench, "x")
     assert sheet.count("(no_connect") == 3 and 'global_label "LNA1OUT"' in sheet and "(wire" in sheet
     assert '(symbol "U2"' in schematic.symbol_library(sheet)
-    chains = boardgen.chains_file(bench)
-    assert "('BIAS1', ('L1', '2'), ('R1', '2'))" in chains
+    from edaloop.scripts.kicad_pcb import load_chains
+    spec = tmp_path / "chains.yaml"
+    spec.write_text(boardgen.chains_file(bench))
+    chains, width, net_width = load_chains(spec)
+    assert ("BIAS1", ("L1", "2"), ("R1", "2")) in chains and width == bench["rf_line_width_mm"]
+    assert net_width == bench["layout"]["net_width"]
     rules = boardgen.project_file(bench, "x")["board"]["design_settings"]["rules"]
     assert rules["min_through_hole"] <= 0.2     # vias are 0.2 mm drill: KiCad's default rule would reject them all
 
@@ -865,8 +869,8 @@ def test_retries_stop_when_a_long_attempt_gains_nothing():
 def test_one_unsolved_hop_fails_without_losing_the_others(tmp_path, monkeypatch):
     from edaloop import em_hops, route_classes
 
-    p = _tiny_project(tmp_path, "rf:\n  chains: c.py\nem_hops:\n  band_ghz: [1, 2]\n")
-    (tmp_path / "c.py").write_text("")
+    p = _tiny_project(tmp_path, "rf:\n  chains: c.yaml\nem_hops:\n  band_ghz: [1, 2]\n")
+    (tmp_path / "c.yaml").write_text("")
     monkeypatch.setattr(route_classes, "_load_chains", lambda path: ([("A", ("U1", "1"), ("U2", "1")), ("B", ("U2", "2"), ("U3", "1"))], 0.36, {}))
     monkeypatch.setattr(em_hops, "run", lambda *a, **k: {
         "A": {"rl_db": 30.0, "il_max_db": 0.1}, "B": {"unsolved": "no field", "digest": "x"}})
@@ -1227,8 +1231,8 @@ def test_a_port_follows_the_track_off_a_land():
 def test_a_hop_reading_as_open_is_flagged(tmp_path, monkeypatch):
     from edaloop import em_hops, route_classes
 
-    p = _tiny_project(tmp_path, "rf:\n  chains: c.py\nem_hops:\n  band_ghz: [1, 2]\n")
-    (tmp_path / "c.py").write_text("")
+    p = _tiny_project(tmp_path, "rf:\n  chains: c.yaml\nem_hops:\n  band_ghz: [1, 2]\n")
+    (tmp_path / "c.yaml").write_text("")
     monkeypatch.setattr(route_classes, "_load_chains", lambda path: ([("A", ("U1", "1"), ("U2", "1"))], 0.36, {}))
     monkeypatch.setattr(em_hops, "run", lambda *a, **k: {"A": {"rl_db": 0.0, "il_max_db": 66.9}})
     assert [f.id for f in checks.em_hops(p).findings][0] == "em_hops:A:open"
@@ -1521,8 +1525,8 @@ def test_rf_path_script_ships_with_edaloop(tmp_path):
   (segment (start 0 0) (end 12 0) (width 0.3) (layer "F.Cu") (net "RF"))
   (via (at 12 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "RF")))
 """)
-    chains = tmp_path / "chains.py"
-    chains.write_text('CHAINS = [("RF", ("J1", "1"), ("U1", "1"))]\n')
+    chains = tmp_path / "chains.yaml"
+    chains.write_text('chains:\n  - {net: RF, entry: J1.1, exit: U1.1}\n')
     scripts = Path(checks.__file__).with_name("scripts")
     out = subprocess.run([sys.executable, "-c", checks._RF_PATH_DRIVER, str(scripts), str(board), str(chains)], capture_output=True, text=True, check=True)
     row = json.loads(out.stdout)[0]
@@ -1578,7 +1582,7 @@ def test_eagle_exporter_ships_with_its_dtd():
 
 # ---------------------------------------------------------------- evidence goes stale when anything it read changes
 
-CHAINS = 'CHAINS = [("RF", ("J1", "1"), ("J2", "1"))]\n'
+CHAINS = 'chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n'
 PROFILE = """manufacturer: {name: Test fab}
 published_capabilities:
   mechanical_drill: {minimum_in: 0.008, preferred_design_mm: 0.3}
@@ -1592,8 +1596,8 @@ def _rules_project(tmp_path):
         'smd rect (net', 'smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net')
     (tmp_path / "pack").mkdir()
     (tmp_path / "pack" / "fab.yaml").write_text(PROFILE)
-    (tmp_path / "c.py").write_text(CHAINS)
-    p = make(tmp_path, f"rf: {{chains: c.py}}\nrules: {{pack: {tmp_path / 'pack'}, profile: fab.yaml}}\n")
+    (tmp_path / "c.yaml").write_text(CHAINS)
+    p = make(tmp_path, f"rf: {{chains: c.yaml}}\nrules: {{pack: {tmp_path / 'pack'}, profile: fab.yaml}}\n")
     (tmp_path / "b.kicad_pcb").write_text(placed)
     return p
 
@@ -1614,23 +1618,23 @@ def test_changing_rf_settings_or_chains_makes_rules_stale(tmp_path):
     assert not checks.current_inputs(p, ev)
     p.cfg["rf"].pop("impedance")
     assert checks.current_inputs(p, ev)
-    (tmp_path / "c.py").write_text(CHAINS + 'CHAINS.append(("RF2", ("J2", "1"), ("J3", "1")))\n')
+    (tmp_path / "c.yaml").write_text(CHAINS + '  - {net: RF2, entry: J2.1, exit: J3.1}\n')
     assert not checks.current_inputs(p, ev)
 
 
 @pytest.mark.parametrize("name", ["rf_reference", "rf_preserved"])
 def test_changing_the_chain_list_makes_rf_checks_stale(tmp_path, name):
-    (tmp_path / "c.py").write_text(CHAINS)
-    p = make(tmp_path, "rf: {chains: c.py}\n")
+    (tmp_path / "c.yaml").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
     ev = checks.run_check(p, name)
     assert ev.status == "pass" and checks.current_inputs(p, ev)
-    (tmp_path / "c.py").write_text(CHAINS + 'CHAINS.append(("GND", ("J2", "2"), ("J3", "2")))\n')
+    (tmp_path / "c.yaml").write_text(CHAINS + '  - {net: GND, entry: J2.2, exit: J3.2}\n')
     assert not checks.current_inputs(p, ev)
 
 
 def test_deleted_rf_baseline_is_not_quietly_re_recorded(tmp_path):
-    (tmp_path / "c.py").write_text(CHAINS)
-    p = make(tmp_path, "rf: {chains: c.py}\n")
+    (tmp_path / "c.yaml").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
     assert "baseline recorded" in checks.run_check(p, "rf_preserved").summary
     # A router moves RF copper, and the baseline that would have caught it goes missing.
     (tmp_path / "b.kicad_pcb").write_text(PCB.replace("(end 10 5)", "(end 10 6)"))
@@ -1730,8 +1734,8 @@ def test_release_refused_if_the_board_changes_during_export(tmp_path, monkeypatc
 
 
 def test_rf_baseline_lives_beside_the_project_and_survives_a_lost_ledger(tmp_path):
-    (tmp_path / "c.py").write_text(CHAINS)
-    p = make(tmp_path, "rf: {chains: c.py}\n")
+    (tmp_path / "c.yaml").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
     checks.run_check(p, "rf_preserved")
     assert (tmp_path / "rf_baseline.json").exists()
     # A fresh clone has no .edaloop/, but the committed baseline still holds the copper.
@@ -1742,8 +1746,8 @@ def test_rf_baseline_lives_beside_the_project_and_survives_a_lost_ledger(tmp_pat
 
 
 def test_a_baseline_in_the_old_place_moves_without_counting_as_changed(tmp_path):
-    (tmp_path / "c.py").write_text(CHAINS)
-    p = make(tmp_path, "rf: {chains: c.py}\n")
+    (tmp_path / "c.yaml").write_text(CHAINS)
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
     checks.run_check(p, "rf_preserved")
     old = tmp_path / ".edaloop" / "rf_baseline.json"
     (tmp_path / "rf_baseline.json").rename(old)
@@ -1908,3 +1912,49 @@ def test_scripts_for_kicads_python_stay_python_3_9(script):
     import ast
     # KiCad ships its own Python 3.9, and these run under it. CI's Python is newer and would accept 3.10 syntax.
     ast.parse(Path(checks.__file__).with_name(script).read_text(), feature_version=(3, 9))
+
+
+# ---------------------------------------------------------------- the chain spec is data, not code
+
+def test_a_python_chain_spec_is_refused_not_run(tmp_path):
+    from edaloop.scripts.kicad_pcb import ChainSpecError, load_chains
+    marker = tmp_path / "ran"
+    (tmp_path / "c.py").write_text(f"open({str(marker)!r}, 'w').write('x')\nCHAINS = []\n")
+    with pytest.raises(ChainSpecError, match="convert-chains"):
+        load_chains(tmp_path / "c.py")
+    assert not marker.exists()
+    p = make(tmp_path, "rf: {chains: c.py}\n")
+    ev = checks.run_check(p, "rf_reference")
+    assert ev.status == "error" and "convert-chains" in ev.summary and not marker.exists()
+
+
+@pytest.mark.parametrize("body, why", [
+    ("chains: []\n", "non-empty"),
+    ("chains:\n  - {net: RF, entry: J1, exit: J2.1}\n", "REF.PIN"),
+    ("chains:\n  - {net: RF, entry: J1.1}\n", "net, entry and exit"),
+    ("chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\nwidth: 0.3\n", "unknown key"),
+])
+def test_a_malformed_chain_spec_says_what_is_wrong(tmp_path, body, why):
+    from edaloop.scripts.kicad_pcb import ChainSpecError, load_chains
+    (tmp_path / "c.yaml").write_text(body)
+    with pytest.raises(ChainSpecError, match=why):
+        load_chains(tmp_path / "c.yaml")
+
+
+def test_convert_chains_reads_back_the_same_and_never_overwrites(tmp_path):
+    from edaloop.scaffold import convert_chains
+    from edaloop.scripts.kicad_pcb import load_chains
+    old = tmp_path / "chains_demo.py"
+    old.write_text('WIDTH = 0.36\nNET_WIDTH = {"BIAS": 0.3}\n'
+                   'CHAINS = [("RF", ("J1", "1"), ("U1", "2")), ("BIAS", ("L1", "2"), ("R1", "2"))]\n')
+    done = convert_chains(old)
+    assert done["written"].endswith("chains_demo.yaml") and done["chains"] == 2
+    assert load_chains(tmp_path / "chains_demo.yaml") == (
+        [("RF", ("J1", "1"), ("U1", "2")), ("BIAS", ("L1", "2"), ("R1", "2"))], 0.36, {"BIAS": 0.3})
+    with pytest.raises(FileExistsError):
+        convert_chains(old)
+
+
+def test_init_points_at_a_python_chain_spec_it_cannot_use(tmp_path):
+    (tmp_path / "chains.py").write_text("CHAINS = []\n")
+    assert init(tmp_path)["convert"] == ["edaloop convert-chains chains.py"]

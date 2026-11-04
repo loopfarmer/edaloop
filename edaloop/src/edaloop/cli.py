@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import checks, controller, route, toolchain
 from .project import Project, ProjectError
+from .scripts.kicad_pcb import ChainSpecError
 
 
 def _out(data, as_json, text):
@@ -79,6 +80,9 @@ def main(argv=None):
     ds.add_argument("-o", "--output", type=Path, required=True)
     ds.add_argument("--band-mhz", type=float, nargs=2, required=True, metavar=("LOW", "HIGH"))
     ds.add_argument("--name", help="board name, by default the schematic's")
+    cc = sub.add_parser("convert-chains", help="turn a Python chain spec (chains.py) into the YAML one edaloop reads")
+    cc.add_argument("chains", help="the .py chain spec")
+    cc.add_argument("-o", "--output", help="the .yaml to write (default: beside it)")
     sub.add_parser("ground", help="place ground vias at ground pads, before routing")
     sub.add_parser("finish", help="adopt the by-class route, add the RF fence and stitching, and refill")
     args = ap.parse_args(argv)
@@ -99,6 +103,10 @@ def main(argv=None):
         if args.cmd == "init":
             from .scaffold import init
             _out(init(Path(args.project)), True, str)
+            return 0
+        if args.cmd == "convert-chains":
+            from .scaffold import convert_chains
+            _out(convert_chains(Path(args.chains), Path(args.output) if args.output else None), True, str)
             return 0
         if args.cmd == "hook":
             from .scaffold import hook_message
@@ -229,7 +237,7 @@ def main(argv=None):
             out = write_report(p, p.root / args.output)
             print(out)
         return 0
-    except ProjectError as e:
+    except (ProjectError, ChainSpecError, FileExistsError) as e:
         print(f"edaloop: {e}", file=sys.stderr)
         return 2
 
