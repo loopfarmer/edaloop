@@ -331,7 +331,7 @@ def checks_score(sample: dict, out: Path, chain: list | None) -> list[dict]:
             rows.append(_row("known.opens", None, f"{m['unconnected']} open connections, unjudged: the outline isn't closed, so KiCad couldn't refill the pours"))
         else:
             rows.append(_row("known.opens", m["unconnected"] == 0, f"{m['unconnected']} open connections on a board that works"))
-        hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") != "drc:unconnected"]
+        hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") not in ("drc:unconnected", "drc:refill_blocked")]  # the note on blocked refills is about opens, read above
         # Copper drawn inside an Eagle footprint arrives with no net, so it reads as touching what it was made to touch.
         no_net = [f for f in hard if "[<no net>]" in f["message"] or "<no net>" in f["message"]]
         errs = len(hard) - len(no_net)
