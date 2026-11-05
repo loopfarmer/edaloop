@@ -1,0 +1,27 @@
+# Weekly update pull requests, grouped so each ecosystem is one review.
+# Rust's toolchain is pinned in ci.yml and moves by hand: a new clippy brings new lints.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    groups:
+      actions: {patterns: ["*"]}
+
+  - package-ecosystem: uv
+    directory: /edaloop
+    schedule: {interval: weekly}
+    groups:
+      python: {patterns: ["*"]}
+
+  - package-ecosystem: cargo
+    directory: /boardhand
+    schedule: {interval: weekly}
+    groups:
+      boardhand: {patterns: ["*"]}
+
+  - package-ecosystem: cargo
+    directory: /boardfield
+    schedule: {interval: weekly}
+    groups:
+      boardfield: {patterns: ["*"]}
