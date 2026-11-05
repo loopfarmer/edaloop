@@ -12,7 +12,7 @@ uv run edaloop eval lora buck qtpy --level checks
 
 `samples.yaml` pins each board to a commit. The files are fetched into `~/.cache/edaloop/evaluation` and aren't stored in this repository. Adafruit's designs are CC BY-SA 3.0 and stay under that licence, in Adafruit's repositories.
 
-The last five samples are open RF designs in native KiCad, from Great Scott Gadgets, LibreVNA and Lime Microsystems. Each entry names its own licence. A KiCad file gets upgraded on a copy with `kicad-cli pcb upgrade`, and `import.*` then holds that copy against the file as released. These boards have no verified RF path, stated load or stackup here unless `samples.yaml` says so, so most readings on them are reported, not judged.
+The last five samples are open RF designs in native KiCad, from Great Scott Gadgets, LibreVNA and Lime Microsystems. Each entry names its own licence. A KiCad file gets upgraded on a copy with `kicad-cli pcb upgrade`, and `import.*` then holds that copy against the file as released. A sample that names its `project` also gets that project's custom rules file, `.kicad_dru`, when the commit has one, since KiCad's DRC reads it. These boards have no verified RF path, stated load or stackup here unless `samples.yaml` says so, so most readings on them are reported, not judged.
 
 `--level regenerate` rebuilds a board from its netlist and holds the result against the released layout. It needs an RF path, because the placer only handles RF rows.
 

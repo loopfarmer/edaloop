@@ -116,6 +116,52 @@ def test_tool_crash_is_an_error_never_a_pass(tmp_path):
     assert not controller.status(p)["ready_to_release"] or "capture" not in p.gate()
 
 
+def test_a_missing_rule_pack_says_so_and_is_an_error(tmp_path):
+    p = make(tmp_path, f"rules: {{pack: {tmp_path / 'no-pack'}}}\n")
+    ev = checks.run_check(p, "rules")
+    assert ev.status == "error" and "ToolMissing" in ev.summary and "Install the rule pack" in ev.summary
+
+
+def test_drc_evidence_goes_stale_when_custom_rules_appear_or_change(tmp_path, monkeypatch):
+    import json
+    import subprocess
+
+    p = make(tmp_path)
+
+    def fake_drc(cmd, **kw):
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.write_text(json.dumps({"violations": [], "unconnected_items": [], "schematic_parity": []}))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(checks.toolchain, "run", fake_drc)
+    ev = checks.run_check(p, "drc")
+    # kicad-cli reads b.kicad_dru beside the board, so adding one changes what DRC would say.
+    assert ev.status == "pass" and ev.inputs.get("b.kicad_dru") == checks.ABSENT and checks.current_inputs(p, ev)
+    (tmp_path / "b.kicad_dru").write_text("(version 1)\n")
+    assert not checks.current_inputs(p, ev)
+    ev = checks.run_check(p, "drc")
+    (tmp_path / "b.kicad_dru").write_text('(version 1)\n(rule "x" (constraint clearance (min 0.1mm)))\n')
+    assert not checks.current_inputs(p, ev)
+
+
+def test_drc_says_when_an_open_outline_left_the_pours_unfilled(tmp_path, monkeypatch):
+    import subprocess
+
+    p = make(tmp_path)
+    outline = {"type": "invalid_outline", "severity": "error", "description": "Board has malformed outline (not a closed shape)", "items": []}
+    gap = {"description": "Missing connection between items", "items": [{"description": "Pad 7 [GND] of U1 on F.Cu"}, {"description": "Zone [GND] on F.Cu"}]}
+
+    def fake_drc(cmd, **kw):
+        Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps({"violations": [outline], "unconnected_items": [gap], "schematic_parity": []}))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(checks.toolchain, "run", fake_drc)
+    ev = checks.run_check(p, "drc")
+    assert ev.status == "fail" and ev.metrics["refill_blocked"] and ev.findings[0]["id"] == "drc:refill_blocked"
+    # The opens are still on record: the note explains them, it doesn't hide them.
+    assert ev.metrics["unconnected"] == 1 and any(f["id"] == "drc:unconnected" for f in ev.findings)
+    (tmp_path / "edaloop.yaml").write_text("name: t\nboard: b.kicad_pcb\ngate: [project_files]\ndrc: {refill_zones: false}\n")
+    assert not checks.run_check(Project(tmp_path), "drc").metrics["refill_blocked"]
+
+
 def test_em_refuses_draft_and_single_solver(tmp_path):
     p = make(tmp_path, "em: {solvers: [{solver: palace, quality: Draft}, {solver: openems}]}\n")
     assert "refused" in checks.run_check(p, "em_crosscheck").summary
@@ -963,6 +1009,20 @@ def test_describe_finds_the_rf_path_and_leaves_out_the_taps(tmp_path):
     assert d["project"]["rails"][0]["loads"] == {"R1.1": describe.NEEDED}
 
 
+def test_describe_follows_a_path_between_two_ports_of_one_footprint(tmp_path):
+    from edaloop import describe
+    # An in-line amplifier: one footprint holds the plug at one end and the jack at the other, so its two signal pins are both RF ports.
+    parts = {"P1": "SMA-KIT-1.5MF", "C1": "100pF", "U1": "LNA", "C2": "100pF", "L1": "39nH"}
+    nets = {"IN": ["P1.3", "C1.1", "L1.1"], "A": ["C1.2", "U1.1"], "B": ["U1.3", "C2.1"], "OUT": ["C2.2", "P1.1"],
+            "VCC": ["L1.2", "U1.4"], "GND": ["P1.2", "P1.4", "U1.2"]}
+    d = describe.describe(_netlist(tmp_path, nets, parts), "x", [902, 928])
+    assert [c[1:] for c in d["chain"]] == [["P1.3", "C1.1"], ["C1.2", "U1.1"], ["U1.3", "C2.1"], ["C2.2", "P1.1"]] or \
+           [c[1:] for c in d["chain"]] == [["P1.1", "C2.2"], ["C2.1", "U1.3"], ["U1.1", "C1.2"], ["C1.1", "P1.3"]]
+    # A header is no RF port, however many signal pins it has, so a lone one still isn't a path.
+    with pytest.raises(describe.DescribeError):
+        describe.describe(_netlist(tmp_path, {"A": ["J1.1", "C1.1"], "B": ["C1.2", "J1.2"]}, {"J1": "header", "C1": "100nF"}), "x", [1, 2])
+
+
 def test_describe_refuses_a_board_with_one_connector(tmp_path):
     from edaloop import describe
     with pytest.raises(describe.DescribeError):
@@ -1217,6 +1277,27 @@ def test_hops_solve_at_once_and_a_failure_stays_with_its_hop(tmp_path):
     assert out["a"] == (tmp_path / "good", 1.0) and out["b"] == "no field"
 
 
+def test_a_hop_killed_for_memory_gets_one_more_go_alone(tmp_path):
+    from edaloop import em_hops
+
+    tries = {"a": 0, "b": 0, "c": 0}
+
+    def solve(ws):
+        tries[ws.name] += 1
+        if ws.name == "a" and tries["a"] == 1:
+            raise RuntimeError(f"emerge: solver produced no result: the solver was {em_hops.KILLED} (code 137), most likely out of memory")
+        if ws.name == "b":
+            raise RuntimeError("no field")
+        if ws.name == "c":
+            raise RuntimeError(f"the solver was {em_hops.KILLED}")
+        return (ws, 1.0)
+    out = em_hops.solve_unique({k: tmp_path / k for k in tries}, solve, 3)
+    assert out["a"] == (tmp_path / "a", 1.0) and tries["a"] == 2
+    # Any other failure isn't repeated, and one that fails alone as well says so.
+    assert out["b"] == "no field" and tries["b"] == 1
+    assert tries["c"] == 2 and out["c"].endswith("(also when run alone)")
+
+
 @pytest.mark.parametrize("args", [["status"], ["next"], ["checks"]])
 def test_every_project_command_starts(tmp_path, monkeypatch, capsys, args):
     # A function-level import in main() once shadowed a module for every other command, and nothing noticed.
@@ -1465,6 +1546,24 @@ def test_a_port_follows_the_track_off_a_land():
     # A track that agrees with the line, or none at all, leaves the port on the line.
     assert leaving_direction(pad, [NS(start=(0.0, 0.0), end=(2.0, 2.0))], (0.70711, 0.70711)) == (0.70711, 0.70711)
     assert leaving_direction(pad, [], chord) == chord
+    # With a tap on the land, two tracks leave it. The hop follows the one heading for its far end, whichever the file lists first.
+    tap, line = NS(start=(0.0, 0.0), end=(0.0, -3.0)), NS(start=(0.0, 0.0), end=(2.0, 2.0))
+    assert leaving_direction(pad, [tap, line], (0.6, 0.8)) == pytest.approx((0.70711, 0.70711), abs=1e-4)
+    assert leaving_direction(pad, [line, tap], (0.6, 0.8)) == pytest.approx((0.70711, 0.70711), abs=1e-4)
+
+
+def test_a_port_sits_on_a_track_that_leaves_a_wide_land_off_centre():
+    from types import SimpleNamespace as NS
+
+    from edaloop import em_hops
+
+    # A connector land 1.5 mm wide, with the track drawn out of it a third of a millimetre off its centre line.
+    pad = {"x": 0.0, "y": 0.0, "w": 1.5, "h": 1.6, "rot": 0}
+    track = NS(start=(0.333, -0.333), end=(1.4, -0.333), width=0.29)
+    at = em_hops.land_edge(pad, (1.0, 0.0), [track])
+    assert at[0] == pytest.approx(0.755) and at[1] == pytest.approx(-0.333)
+    # A track on the centre line keeps the port where it always was.
+    assert em_hops.land_edge(pad, (1.0, 0.0), [NS(start=(0.0, 0.0), end=(1.4, 0.0), width=0.29)]) == pytest.approx((0.755, 0.0))
 
 
 def test_a_hop_reading_as_open_is_flagged(tmp_path, monkeypatch):
@@ -1615,6 +1714,31 @@ def test_released_kicad_file_is_read_before_any_upgrade(tmp_path):
     assert facts["tracks"] == 1 and facts["vias"] == 1 and facts["copper_layers"] == 2
     assert facts["groups"] == [frozenset({"P1.1", "C1.1"})] and facts["elements"] == {"P1", "C1"}
     assert facts["rules"] == {"clearance": 0.127, "width": 0.1524, "edge": 0.1}
+
+
+def test_an_evaluation_fetches_a_projects_custom_rules_when_it_has_them(tmp_path, monkeypatch):
+    import io
+    import urllib.error
+
+    from edaloop import evaluate
+    asked = []
+
+    def urlopen(url, timeout=None):
+        asked.append(url.rsplit("/", 1)[-1])
+        if url.endswith(".kicad_dru") and "norules" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        return io.BytesIO(b"(version 1)")
+    monkeypatch.setattr(evaluate, "CACHE", tmp_path)
+    monkeypatch.setattr(evaluate.urllib.request, "urlopen", urlopen)
+    sample = {"owner": "o", "repo": "r", "commit": "c", "file": "hw/VNA.kicad_pcb", "project": "hw/VNA.kicad_pro"}
+    board = evaluate.fetch(sample)
+    assert board.with_suffix(".kicad_dru").read_bytes() == b"(version 1)" and "VNA.kicad_dru" in asked
+    # A project with none is recorded as having none, not refetched, and is no error.
+    other = evaluate.fetch({**sample, "repo": "norules"})
+    assert not other.with_suffix(".kicad_dru").exists() and other.with_name("board.kicad_dru.absent").exists()
+    asked.clear()
+    evaluate.fetch({**sample, "repo": "norules"})
+    assert asked == []
 
 
 def test_unstated_rf_path_reads_as_info_not_as_none(tmp_path, monkeypatch):

@@ -192,9 +192,18 @@ def drc(p: Project) -> Outcome:
     if len(set(counts_seen)) > 1:
         findings.append(Finding("drc:not_repeatable", f"identical input gave {counts_seen} violations; the worst is reported", "warning"))
     counts = collections.Counter(v["type"] for v in d["violations"])
+    # KiCad won't fill a zone on a board whose outline doesn't close, so a refill empties every pour and its nets read as open.
+    # Those opens are about the outline, not the copper, and saying so keeps them from being chased as routing faults.
+    refill_blocked = "--refill-zones" in cmd and counts.get("invalid_outline", 0) > 0
+    if refill_blocked:
+        findings.insert(0, Finding("drc:refill_blocked", f"the board outline isn't a closed shape ({counts['invalid_outline']} invalid_outline), so KiCad "
+                                   f"couldn't refill the zones. The {len(d['unconnected_items'])} unconnected item(s) may only be pours left empty: "
+                                   "close the outline first"))
     metrics = {"runs": counts_seen, "violations": len(d["violations"]), "unconnected": len(d["unconnected_items"]),
-               "parity": len(d["schematic_parity"]), "by_type": dict(counts), "open_nets": dict(open_nets.most_common())}
-    return Outcome({**_files(p, p.board, p.project_file, p.schematic), "drc_config": _config(p, "drc_config")}, metrics, findings,
+               "parity": len(d["schematic_parity"]), "by_type": dict(counts), "open_nets": dict(open_nets.most_common()), "refill_blocked": refill_blocked}
+    # kicad-cli also reads the board's custom rules file when there is one, so its bytes, or that there's none, are part of the evidence.
+    rules_file = p.board.with_suffix(".kicad_dru")
+    return Outcome({**_files(p, p.board, p.project_file, rules_file, p.schematic), "drc_config": _config(p, "drc_config")}, metrics, findings,
                    {"kicad-cli": d.get("kicad_version", "")}, [str(out.relative_to(p.root))])
 
 
@@ -720,7 +729,12 @@ def em_hops(p: Project) -> Outcome:
 def _rule_profile(p: Project) -> tuple[Path, dict]:
     cfg = p.section("rules")
     pack = Path(cfg.get("pack") or toolchain.paths()["rule_pack"]).expanduser()
-    return pack, yaml.safe_load((pack / cfg.get("profile", "manufacture/summit_standard.yaml")).read_text())
+    profile = pack / cfg.get("profile", "manufacture/summit_standard.yaml")
+    if not profile.exists():
+        # Said plainly, since a bare FileNotFoundError reads like a fault in the board rather than a missing install.
+        raise toolchain.ToolMissing(f"no fabricator profile at {profile}. Install the rule pack, or point rules.pack in edaloop.yaml "
+                                    "or rule_pack in toolchain.yaml at one. `edaloop doctor` says what it found")
+    return pack, yaml.safe_load(profile.read_text())
 
 
 @check("rules", "verify")
@@ -899,7 +913,10 @@ def _em_run(p: Project, cfg: dict, ws: Path, label: str, layout: str, s: dict) -
     (ws / f"{label}.log").write_text(r.stdout + r.stderr)
     s2p = result()
     if s2p is None:
-        raise RuntimeError(f"{label}: solver produced no result: {(r.stdout + r.stderr).strip()[-800:]}")
+        text = r.stdout + r.stderr
+        # Said first, since the tail of the log is mid-solve and doesn't say why it stopped. Code 137 is SIGKILL, most often the kernel out of memory.
+        why = "the solver was killed by the system (code 137), most likely out of memory. " if r.returncode == 137 or "exited with code 137" in text else ""
+        raise RuntimeError(f"{label}: solver produced no result: {why}{text.strip()[-800:]}")
     return s2p, round(time.time() - t0, 1)
 
 
