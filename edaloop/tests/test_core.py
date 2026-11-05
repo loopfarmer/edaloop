@@ -2210,12 +2210,13 @@ def test_a_part_with_no_value_shows_the_same_one_on_sheet_and_board():
     from edaloop import schematic
 
     assert schematic.shown_value("JP1", {"value": ""}) == "JP1" and schematic.shown_value("JP1", {}) == "JP1"
-    assert schematic.shown_value("C1", {"value": "100n"}) == "100n"
+    assert schematic.shown_value("C1", {"value": "100n"}) == "100n" and schematic.shown_value("D1", {"value": "  NSR0320"}) == "NSR0320"
+    assert schematic.shown_value("D1", {"value": "   "}) == "D1"
     sheet = schematic.Sheet("x", "x")
     schematic.add_part(sheet, "JP1", {"value": ""}, "lib:fp", (0.0, 0.0), {"1": (0.0, 0.0, 0)}, "box", w=5.08, h=5.08)
     assert '(property "Value" "JP1"' in sheet.items[-1]
     # The board side is written under KiCad's Python, so hold its source to the same rule.
-    assert 'fp.SetValue(str(part.get("value") or ref))' in Path(schematic.__file__).with_name("kicad_ops.py").read_text()
+    assert 'fp.SetValue(str(part.get("value") or "").strip() or ref)' in Path(schematic.__file__).with_name("kicad_ops.py").read_text()
 
 
 def test_a_chips_rf_pad_faces_along_the_line_from_its_own_side(monkeypatch):

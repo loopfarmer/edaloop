@@ -129,8 +129,9 @@ def _body(kind: str, w: float, h: float) -> str:
 
 def shown_value(ref: str, part: dict) -> str:
     """The Value written for a part, on the sheet and on the board alike. KiCad reads a symbol's empty Value as its reference, which is also its
-    library name here, but keeps a footprint's empty, so a part with no value failed schematic parity. kicad_ops.py writes the same."""
-    return str(part.get("value") or ref)
+    library name here, but keeps a footprint's empty, so a part with no value failed schematic parity. A value an Eagle file wrote as
+    "  NSR0320" failed it too, so surrounding space goes. kicad_ops.py writes the same."""
+    return str(part.get("value") or "").strip() or ref
 
 
 def add_part(sheet: Sheet, ref: str, part: dict, footprint: str, at: tuple, pins: dict[str, tuple], kind: str, w: float = 0.0, h: float = 0.0,
