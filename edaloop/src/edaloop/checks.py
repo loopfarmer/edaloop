@@ -950,6 +950,13 @@ def em_crosscheck(p: Project) -> Outcome:
                                "unless marked probe: true, which keeps it out of any passing result")
     if len({s["solver"] for s in solvers}) < 2:
         raise RuntimeError("em_crosscheck needs at least two different solvers")
+    missing = toolchain.em_solvers_missing(s["solver"] for s in solvers)
+    if missing:
+        # Before any solve, so a missing third solver doesn't cost the other two theirs first. The list is the person's: drop a solver
+        # from em.solvers to run without it, as long as two different ones remain.
+        raise toolchain.ToolMissing(f"em_crosscheck is set to use {', '.join(missing)}, which circuitRF reports as not installed. Install with "
+                                    + " and ".join(f"`circuitrf solver install {k} --yes`" for k in missing)
+                                    + ", or remove it from em.solvers in edaloop.yaml if two different solvers remain")
     board = Board(p.board)
     nets = _chain_nets(p)
     widths = sorted({t.width for t in board.tracks if t.net in nets and t.kind == "segment"})

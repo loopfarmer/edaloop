@@ -33,7 +33,7 @@ jobs:
           cache-dependency-glob: edaloop/uv.lock
       # The tests need no KiCad or solvers, and skip what they can't reach.
       - run: uv sync --extra dev --locked --python ${{ matrix.python }}
-      - run: uv run ruff check src tests
+      - run: uv run ruff check .
       - run: uv run pytest -ra
 
   rust:

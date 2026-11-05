@@ -91,6 +91,22 @@ def circuitrf_env() -> dict[str, str]:
     return {"DOTNET_ROOT": paths()["dotnet_root"], "DOTNET_CLI_TELEMETRY_OPTOUT": "1"}
 
 
+EM_SOLVER_NAMES = {"palace": "Palace", "openems": "openEMS", "emerge": "EMerge"}
+
+
+def em_solvers_missing(kinds) -> list[str]:
+    """The configured EM solvers circuitRF reports as not installed, by their names in edaloop.yaml. Read once per call, from
+    `circuitrf solver list`, so a check can refuse before spending a solve on the ones that are there. A circuitRF that can't
+    list its solvers is not taken to have them."""
+    kinds = sorted({str(k).lower() for k in kinds})
+    exe = paths()["circuitrf"]
+    if not Path(exe).exists():
+        raise ToolMissing(f"circuitRF is not built at {exe}. Run edaloop doctor for how to build it")
+    r = run([exe, "solver", "list"], env=circuitrf_env())
+    listed = r.stdout if r.returncode == 0 else ""
+    return [k for k in kinds if f"{EM_SOLVER_NAMES.get(k, k)}: installed" not in listed]
+
+
 def ato_shim() -> Path:
     return CACHE / "ato-shim"
 

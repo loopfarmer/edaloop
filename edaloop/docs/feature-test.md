@@ -1,6 +1,6 @@
 # Feature test: the testbench boards
 
-This is a run of every edaloop step that the available tools allow on the testbench boards, with what each one produced. It's here to show what a run looks like, and to record what this exercise found and fixed. Readings here are solver estimates on an unrouted board, not measurements.
+This is a run of every edaloop step that the available tools allow on the testbench boards, with what each one produced. It's here to show what a run looks like, and to record what this exercise found and fixed. Every reading here is a solver estimate, not a measurement. The first sections are from placed but unrouted boards; [Routed run](#routed-run) is from a later run with the routers and EM solvers built.
 
 ## Setup
 
@@ -51,9 +51,29 @@ The heat graph from `thermal_field` on gain_block_demo, with part heat:
 - **`edaloop bench <name>` crashed.** It wanted a path. It now finds a shipped bench by name, and lists them when the name is wrong.
 - **The heat map had no scale.** `boardfield`'s PNG was 200 × 100 pixels, coloured from 0 C, with no axes or labels. It now colours from the coolest cell to the hottest and reports that range (`png_rise_range_c`). `thermal_field` also writes an SVG with the board edge, each part, the hotspot, and a scale in C with the rise beside it.
 
+## Routed run
+
+A later run built circuitRF 1.7.0 with EMerge 3.0.0 and openEMS 0.37.0, and KiCadRoutingTools from source, then ran `edaloop make` on both demos. Palace wasn't installed.
+
+| Check | gain_block_demo | four_channel_demo |
+|---|---|---|
+| `drc`, `erc`, `project_files` | pass | pass |
+| `rf_path` | pass, within 0.01% of each hop's floor | pass, 41.20 mm routed against a 41.20 mm floor |
+| `rf_reference`, `rf_preserved` | pass. Baseline for 6 RF nets | pass. Baseline for 16 RF nets |
+| `impedance` | warn: 28.9 ohm over 512 um on each bias choke's land, 35 dB return loss at 1.575 GHz | the same, on all four channels |
+| `rf_layout` | warn: the 100 nF series caps resonate near 0.02 GHz, below the band | the same, on all eight |
+| `power` | pass | pass: 0.24 mm VDD, 9.99 C rise, 3.8 to 14.9 mV drop |
+| `thermal_field` | warn: 31.6 C rise under the parts from 0.58 W, with no limit set | warn: 46.8 C from 1.16 W, with no limit set |
+| `em_hops` | pass: every hop solved with its ground vias. Input hops about 48 dB return loss, output hops 28.6 dB, 0.112 dB worst-case insertion loss summed along the chain | pass: all 16 hops solved. 48.0 to 48.4 dB on input and coupling hops, 28.6 to 28.7 dB on the four amplifier outputs, 0.055 dB worst-case insertion loss per channel. 17 minutes on 4 cores |
+| `em_crosscheck` | fail, `no_majority`, run with `em.solvers` cut to EMerge and openEMS: EMerge Accurate reads 49.17 ohm, openEMS 52.81 ohm, and the 2D reference 49.7 ohm | not run |
+| `requirements` | fail, from `em_crosscheck` | fail, from `em_crosscheck` |
+
+The output hops read lower than the rest because each one carries the bias choke's pad on the line, the low-impedance section `impedance` reports. All four channels read alike.
+
+The cross-check result is the openEMS bias described in [openems-coupon-bias.md](openems-coupon-bias.md): the 2D reference backs EMerge, but two solvers can't outvote each other, so the check fails rather than pick one. A third solver, normally Palace, is what settles it. Before this run the check spent a full EMerge solve before failing on Palace's absence. It now refuses at once, naming the missing solver and how to install it.
+
 ## Not run, and why
 
-- **Routing** (`route`, `make`): it needs circuitRF to solve the RF width, and KiCadRoutingTools for power and signal. Building both was blocked in this environment, because it runs downloaded code.
-- **S-parameters** (`impedance`, `em_fast`, `em_hops`, `em_crosscheck`): these need circuitRF and its EM solvers, and a routed board.
-- **RF coupling between lines:** `rf_layout` measures parallel runs and pad-gap intrusions, but only on routed copper. There's no coupling simulation yet without the EM solvers.
-- **`rf_path`, `rf_preserved` and `rules`:** these need routed copper, or a fabricator rule pack.
+- **A three-solver `em_crosscheck`:** Palace wasn't installed.
+- **RF coupling between lines:** `rf_layout` measures parallel runs and pad-gap intrusions on routed copper. Coupling between separate lines isn't simulated: each `em_hops` model holds one line.
+- **`rules`:** this needs a fabricator rule pack.
