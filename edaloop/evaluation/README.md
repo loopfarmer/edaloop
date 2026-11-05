@@ -34,7 +34,7 @@ Each item is one of:
 |---|---|
 | `import.copper`, `import.nets` | Track, via and net counts in the released Eagle or KiCad file. |
 | `describe.rf_path` | The RF path each board really has, or that it has none. |
-| `known.opens`, `known.drc` | A shipping board has no opens and meets the clearances in its own file. |
+| `known.opens`, `known.drc` | A shipping board has no opens and meets the clearances in its own file. Copper drawn inside an Eagle footprint imports on no net, so what it touches, and an open at a pad it covers, is counted apart and named. DRC errors the designer approved in Eagle are counted, but they carry no name or reason, so they never waive anything. |
 | `known.fabricator` | It was fabricated, so a fabricator-limit failure is suspect. |
 | `regen.connects` | A rebuild has no opens or errors, and joins the same pads as the released board. |
 | `fritzing.pins`, `fritzing.pads`, `fritzing.size` | Adafruit's own Fritzing part for the board, drawn separately from its netlist. Parts are pinned by commit, fetched at run time, and CC BY-SA. |

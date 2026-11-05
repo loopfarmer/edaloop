@@ -177,7 +177,8 @@ def drc(p: Project) -> Outcome:
             d = this                # the worst run is the evidence
     findings = []
     for v in d["violations"]:
-        where = v["items"][0]["description"] if v.get("items") else ""
+        # Every item, not just the first: which side is on no net, or is a hole, decides what the violation means.
+        where = " and ".join(i.get("description", "")[:70] for i in v.get("items", []))
         sev = "error" if v["severity"] == "error" else "warning"
         findings.append(Finding(f"drc:{v['type']}", f"{v['description']} - {where}"[:240], sev))
     open_nets = collections.Counter()
@@ -732,8 +733,8 @@ def _rule_profile(p: Project) -> tuple[Path, dict]:
     profile = pack / cfg.get("profile", "manufacture/summit_standard.yaml")
     if not profile.exists():
         # Said plainly, since a bare FileNotFoundError reads like a fault in the board rather than a missing install.
-        raise toolchain.ToolMissing(f"no fabricator profile at {profile}. Install the rule pack, or point rules.pack in edaloop.yaml "
-                                    "or rule_pack in toolchain.yaml at one. `edaloop doctor` says what it found")
+        raise toolchain.ToolMissing(f"no fabricator rule profile at {profile}. Install the rule pack. Set rule_pack in the toolchain config, "
+                                    "or rules.pack and rules.profile in edaloop.yaml. `edaloop doctor` says what it found")
     return pack, yaml.safe_load(profile.read_text())
 
 
