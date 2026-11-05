@@ -15,45 +15,32 @@ A clean DRC says nothing about any of this. These rules come from RF design revi
 | Keep other nets out of an RF part's pad gap | A trace between a choke's or a link's pads couples into the line | Reported. The layer cost makes it rare, and nothing forbids it yet | `pad_gap` |
 | Keep other nets out of a limiter's pad field, on every layer | It splits the ground the part is referenced to | Reported, as above | `limiter` |
 | Don't run other nets alongside an RF line | A long parallel run couples. Angle away from the line | Reported, as above | `parallel` |
-| Put a choke at the RF junction, with its pad in the trace if it fits | A stub loads the line | Placer and `plan_tap` | `tap` |
+| Put a choke at the RF junction, with its pad in the trace if it fits | A stub loads the line | Placer and `plan_tap` | `tap`, past `tap_max_mm` (default 3 mm) from the line's centre |
+| Or, if you choose, put a shunt tap's RF pad beside the line: `tap_stub_mm` from the line's edge to the pad's edge, on a stub of the line's width. Off by default (`null`) | The line then keeps its own width past the tap, so `impedance` no longer sees a low section. It doesn't take the land's capacitance away, and measured worse here: see [Taps beside the line](#taps-beside-the-line). 0.1 mm is a common fabricator's minimum solder-mask web, the least that keeps the land's mask opening off the line: an assumption, so check your fabricator's. Either axis, either side: a rail's choke rises from the line and a part to ground hangs below it | Placer, `kicad_ops._derive_layout`, from the line's width and the pad's own size. `plan_tap` lays the stub, and `ground.pad_vias` plans around it | `taps_through_land` lists each two-pad shunt part whose land the net's track enters and leaves. With `tap_stub_mm` set, each one is a `tap_land` warning |
 | Put the smallest bypass nearest the choke's cold end, then larger | At GHz only the small one is still a capacitor. Feed arrives at the largest first | Placer | `bypass_order`, `bypass_far` |
 | Choose a capacitor from its measured S-parameters | A real 0402 has about 0.35 nH of its own, so above its resonance it's an inductor. An ideal-part reactance misleads | Your decision. The check estimates from typical inductance and asks you to look | `series_cap`, `bypass_z` |
 | Don't tie filters at a plain node | A lossless node reflects what each filter rejects, so loss swings with phase | Your decision | `tee` |
 | State the stackup and CPWG callout to the fabricator | A width only means 50 ohm on the stackup it was solved for | `review_pack` writes `fab_notes.txt` | Review |
 
-## Why a choke's pad stays on the line
+## Taps beside the line
 
-On every routed demo board, `impedance` reports a 28.9 ohm section on each bias choke's 0603 land, where the 0.36 mm line runs through it. `em_hops` reads those hops at about 28.7 dB return loss, against 48 dB for the rest.
+On every routed demo board, `impedance` reports a 28.9 ohm section on each bias choke's 0603 land, where the 0.36 mm line runs through it, and `em_hops` reads those hops at about 28.7 dB return loss against 48 dB for the rest. Putting the land beside the line was tried on gain_block_demo, with `tap_stub_mm: 0.1` and the full `edaloop make`. The line was the same, and each choke's land sat 0.72 mm off it on a 0.36 mm stub. These are EMerge readings of copper alone, with no parts, in band (0.9 to 1.5 GHz):
 
-### The experiment
-
-Moving the land beside the line was tried on gain_block_demo, as an experiment that wasn't kept:
-- each land sat 0.72 mm off the line, joined by a 0.36 mm stub, with its edge 0.1 mm from the line's;
-- the routed line was otherwise the same;
-- it ran through the full `edaloop make`.
-
-These are EMerge readings of copper alone, with no parts, in band (0.9 to 1.5 GHz):
-
-| | Pad on the line (as built) | Pad beside the line |
+| | Pad on the line (default) | Pad beside the line, 0.1 mm stub |
 |---|---|---|
 | `em_hops` LNA1OUT, LNA2OUT, COAX | 28.7, 28.6, 28.7 dB | 25.0, 24.9, 25.0 dB |
 | `em_hops` IN, LNA1IN, LNA2IN | 48.2, 47.9, 48.4 dB | 48.2, 48.3, 48.4 dB |
 | Worst-case insertion loss, summed along the chain | 0.112 dB | 0.149 dB |
-| `impedance` | warn, on each choke's land | pass |
-| `rf_path` | pass, 0.01% over its floor | fail, 7.46% over |
+| `impedance` | warn: 28.9 ohm over 512 um on each choke's land | pass |
+| `rf_path` | pass, 0.01% over its floor | fail, 7.46% over: each choke hop 10.8 to 11.1% |
+| `drc` | pass | pass |
+| Ground vias after `ground`, and on the finished board | 36, 105 | 36, 102 |
 
-### Why it was worse
+So the land beside the line is worse by about 3.7 dB. What loads the line is the land's area over In1.Cu, 0.21 mm below. On the line, 0.34 mm² of the land's 0.83 mm² is the line's own copper, so the land adds about 0.49 mm². Beside it, the whole land and the stub are added, about 0.87 mm². That's a rough area count, not a solve, but it points the same way as the solve. A 0.1 mm stub is far too short at 1.5 GHz to isolate the land, and `impedance` passes only because a cross-section of the line no longer crosses the land.
 
-Beside the line it's worse by about 3.7 dB:
-- **What loads the line is the land's area over In1.Cu,** 0.21 mm below.
-- **On the line,** about 0.34 mm² of the land's 0.83 mm² is the line's own copper, so the land adds about 0.49 mm².
-- **Beside the line,** the whole land and the stub are added, about 0.87 mm². That's a rough area count, not a solve, but it points the same way as the solve.
-- **The stub is far too short to isolate the land.** At 0.1 mm, it does nothing at 1.5 GHz.
-- **`impedance` misleads here.** It passes only because a cross-section of the line no longer crosses the land.
+`rf_path` fails because its floor joins the net's pads by straight lines, which can run diagonally through the tap, and the routed line plus a square stub is longer. That's how the floor is defined, so a board with taps beside the line would need a person to accept that reading or the floor's definition to change.
 
-### What might help
-
-To lower a choke's load, the copper under it has to change: a smaller land, or `layout.tap_plane_void_mm`, which clears the plane under it and so is your call. Neither has been measured.
+To lower a choke's load, the copper under it has to change: a smaller land, or `layout.tap_plane_void_mm`, which clears the plane under it and so is your call. Neither was measured here.
 
 ## What `em_hops` solves for each hop
 

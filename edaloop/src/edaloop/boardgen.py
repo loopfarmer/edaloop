@@ -16,12 +16,15 @@ from pathlib import Path
 
 import yaml
 
+from . import rf_rules, toolchain
 from . import schematic as drawing
-from . import toolchain
 from .project import ProjectError
 
 OPS = Path(__file__).with_name("kicad_ops.py")
 STANDARD_LIBS = ["/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints", "/usr/share/kicad/footprints"]
+# Stand-ins for the shipped testbenches' own land patterns, so they build with nothing fetched. Searched after any folder the
+# caller names, so a real library of the same name wins. data/footprints/README.md says what each one is and what it assumes.
+BUNDLED_FOOTPRINTS = Path(__file__).with_name("data") / "footprints"
 NS = uuid.UUID("6f2a6c1e-0b5e-4d0a-9f55-0d3b7d1f7a10")
 
 RULES = {"min_clearance": 0.0, "min_connection": 0.0, "min_copper_edge_clearance": 0.5, "min_hole_clearance": 0.25,
@@ -158,6 +161,8 @@ def project_yaml(bench: dict, name: str, chains: str) -> dict:
                              {"id": "R6", "text": "Field solvers agree to 2%", "metric": "em_crosscheck.spread_pct", "max": 2},
                              {"id": "R7", "text": "Each RF hop's copper returns at least 15 dB in band", "metric": "em_hops.worst_rl_db",
                               "min": 15}],
+            # The RF layout rules' limits, which placement builds to and the rf_layout check measures. Only what the description sets.
+            **({"rf_layout": dict(cfg["rf_layout"])} if cfg.get("rf_layout") else {}),
             "gate": gate, "waivers": []}
 
 
@@ -222,6 +227,7 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise BuildError(f"{out} isn't empty. Build into a new folder, so that no routed board is overwritten")
+    footprint_dirs = [*footprint_dirs, BUNDLED_FOOTPRINTS]
     libs = {f.split(":")[0] for f in bench["layout"]["footprints"].values()}
     table = []
     copied = set()
@@ -251,6 +257,8 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     spec = out / ".build_spec.json"
     spec.write_text(json.dumps({
         "parts": bench["parts"], "chain": [*bench["chain"]], "nets": bench["nets"], "pins": drawing.pin_map(bench), "open_pins": bench.get("open_pins") or [], "layout": bench["layout"],
+        "rf_line_width_mm": bench["rf_line_width_mm"], "net_width": bench["layout"].get("net_width") or {},
+        "rf_layout": {**rf_rules.DEFAULTS, **((bench.get("project") or {}).get("rf_layout") or {})},
         "outline": bench.get("outline_mm"), "lib_dirs": [str(out), *[str(x) for x in footprint_dirs], *STANDARD_LIBS],
         "uuids": sheets["uuids"], "sheet_of": sheets["placed"], "root": _uid(name, "root"),
         "sheet": "Root"}))
