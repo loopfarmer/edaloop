@@ -166,6 +166,13 @@ def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = 
     """
     from . import checks, controller, ground, route_classes
     from .project import Project
+    if Path(out).is_dir() and any(Path(out).iterdir()):
+        return {"made": False, "stopped_at": "build", "refused": f"{out} isn't empty. Build into a new folder, so that no routed board is overwritten"}
+    missing = toolchain.missing_for_make()
+    if missing:
+        # Say it before placing anything: a run that would stop at routing does nothing useful first.
+        return {"made": False, "stopped_at": "preflight", "missing": missing,
+                "hint": "edaloop build, ground and the KiCad checks still run without the routers. See Requirements in the README"}
     try:
         built = build(bench_path, out, footprint_dirs)
     except BuildError as e:

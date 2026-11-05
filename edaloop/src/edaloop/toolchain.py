@@ -68,6 +68,25 @@ def run(cmd, cwd=None, env=None, timeout=None) -> subprocess.CompletedProcess:
                           f"for how to set it up, or set {name} in ~/.config/edaloop/toolchain.yaml") from e
 
 
+def missing_for_make() -> list[dict]:
+    """The tools `edaloop make` needs that aren't where edaloop looks, found without running anything.
+
+    `doctor` runs each tool and says more. This is the quick look `make` takes before it places a part, so a
+    missing router stops it at the start rather than after placement and grounding.
+    """
+    p = paths()
+    wanted = [("kicad_cli", "kicad-cli", "placement, DRC and fabrication", "install KiCad 10"),
+              ("kicad_python", "KiCad's Python", "board edits through pcbnew", "install KiCad 10"),
+              ("circuitrf", "circuitRF", "the RF line width", "clone potatobeanradio/circuitRF to ~/.cache/edaloop/circuitRF, then dotnet build src/Cli -c Release"),
+              ("krt", "KiCadRoutingTools", "power and signal routing", "clone it to ~/.cache/edaloop/ext and run build_router.py")]
+    out = []
+    for key, name, role, fix in wanted:
+        where = Path(p[key]) / "rust_router/grid_router.so" if key == "krt" else Path(p[key])
+        if not (where.exists() or (key == "kicad_cli" and shutil.which(p[key]))):
+            out.append({"tool": name, "key": key, "for": role, "looked_at": str(where), "fix": fix})
+    return out
+
+
 def circuitrf_env() -> dict[str, str]:
     return {"DOTNET_ROOT": paths()["dotnet_root"], "DOTNET_CLI_TELEMETRY_OPTOUT": "1"}
 

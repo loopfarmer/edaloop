@@ -2321,3 +2321,16 @@ def test_no_via_is_placed_in_a_keepout_rule_area():
     assert not field.clear(5.0, 5.0)                     # inside
     assert not field.clear(5.0, 5.0 - 0.95 - 0.2)         # outside, but the ring would overlap the edge
     assert field.clear(5.0, 5.0 - 0.95 - ground.RADIUS - 0.01)
+
+
+def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatch):
+    from edaloop import boardgen
+    monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "py"),
+                                                     "circuitrf": str(tmp_path / "crf"), "krt": str(tmp_path / "krt")})
+    (tmp_path / "kicad-cli").write_text("")
+    (tmp_path / "py").write_text("")
+    out = tmp_path / "board"
+    got = boardgen.make(Path("unused.yaml"), out, [])
+    assert got["made"] is False and got["stopped_at"] == "preflight"
+    assert {m["tool"] for m in got["missing"]} == {"circuitRF", "KiCadRoutingTools"}
+    assert not out.exists()                     # nothing placed, nothing written
