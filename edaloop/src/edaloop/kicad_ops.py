@@ -350,6 +350,13 @@ def _derive_layout(fps, spec):
             walk.append([ref, _rot_for(fps[ref], pin, following[1].split(".")[1], travel), pin, following[1].split(".")[1]])
         else:
             walk.append([ref, _rot_for(fps[ref], None, pin, (-travel[0], -travel[1])), pin, None])
+    # A person's rotation for a part wins over the derived one. A part whose RF pads sit on opposite corners, like a TT1224
+    # limiter, is otherwise turned to put both on the line, which can make it far longer along the row.
+    turned = layout.get("rotation") or {}
+    for walk_row in rows:
+        for item in walk_row:
+            if item[0] in turned:
+                item[1] = float(turned[item[0]])
     return rows, attach
 
 

@@ -35,6 +35,7 @@ All of these go under `layout`, and all are optional except `footprints`.
 | `axis` | `x` | The direction the RF line runs. |
 | `line` | | The RF line's position across the board. |
 | `gap_mm` | `0.1` | Courtyard gap between parts on the line. |
+| `rotation` | none | A part's rotation in degrees, by reference, in place of the derived one. For a part whose RF pads sit on opposite corners, like a TT1224 limiter: derived, it turns to put both pads on the line, which can make it much longer along the row. Set square, the hop after it runs off the line's axis, and `rf_path` reports that. Which to accept is your call. |
 | `row_gap_mm` | `1.3` | Gap between one row's parts and the next row's. |
 | `columns` | `1` | Rows per column follow from this, for a long many-channel board. Connectors in inner columns aren't at a board edge, so this suits vertical connectors. |
 | `column_gap_mm` | `3` | Gap between columns. |
