@@ -75,18 +75,25 @@ class Field:
         self.lines = lines          # planned copper that isn't laid yet: (a, b, half width)
         self.x1, self.y1, self.x2, self.y2 = facts["outline"]
         self.keepouts = [k["pts"] for k in facts.get("keepouts") or [] if len(k["pts"]) >= 3]
+        # Every drilled pad is a hole, whatever its net. A footprint's own ground holes (a land pattern's vias, a filter's
+        # plated ground holes) aren't foreign copper, but a new via's drill must still keep its distance from them.
+        self.holes = [(p["x"], p["y"], p["drill"]) for p in facts["pads"] if (p.get("drill") or 0) > 0]
 
     def clear(self, x: float, y: float) -> bool:
         reach = RADIUS + CLEAR
         margin = RADIUS + 0.55
         if not (self.x1 + margin <= x <= self.x2 - margin and self.y1 + margin <= y <= self.y2 - margin):
             return False
-        if any(pad_gap(p, x, y) < reach for p in self.foreign):
+        # A pad's own clearance, where its land pattern sets one, replaces the net class's.
+        if any(pad_gap(p, x, y) < RADIUS + max(CLEAR, p.get("clearance") or 0.0) for p in self.foreign):
             return False
         # KiCad flags a via that so much as overlaps a rule area forbidding vias, so the whole ring must stay out.
         if any(_in_polygon(x, y, pts) or _polygon_gap(x, y, pts) < RADIUS for pts in self.keepouts):
             return False
         if any(_seg_gap((x, y), a, b) < reach + hw for a, b, hw in self.tracks + self.lines):
+            return False
+        # The same edge-to-edge gap as two of these vias at their pitch.
+        if any(math.hypot(x - hx, y - hy) < (DRILL + d) / 2 + HOLE_PITCH - DRILL for hx, hy, d in self.holes):
             return False
         return all(math.hypot(x - vx, y - vy) >= HOLE_PITCH for vx, vy in self.vias)
 
@@ -108,7 +115,7 @@ def _stub_clear(field: Field, a: tuple, b: tuple) -> bool:
     reach = STUB / 2 + CLEAR
     for k in range(9):
         q = (a[0] + (b[0] - a[0]) * k / 8, a[1] + (b[1] - a[1]) * k / 8)
-        if any(pad_gap(x, *q) < reach for x in field.foreign):
+        if any(pad_gap(x, *q) < STUB / 2 + max(CLEAR, x.get("clearance") or 0.0) for x in field.foreign):
             return False
         if any(_seg_gap(q, s, e) < reach + hw for s, e, hw in field.lines):
             return False

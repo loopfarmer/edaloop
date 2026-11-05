@@ -179,7 +179,10 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
         by_ref.setdefault(p["ref"], []).append(p)
     yard = {y["ref"]: y for y in facts.get("courtyards", [])}
     rf_nets = {row[0] for row in chains}
-    ground_vias = [t.start for t in tracks if t.kind == "via" and t.net == "GND"]
+    # A plated ground hole reaches the plane whether the router drew it or the footprint brought it: KiCad's TT1224 PL-258
+    # land pattern carries its maker's vias as pads. An unplated hole has no net, so it isn't counted.
+    ground_vias = [t.start for t in tracks if t.kind == "via" and t.net == "GND"] + \
+        [(p["x"], p["y"]) for p in pads if p["net"] == "GND" and (p.get("drill") or 0) > 0]
     findings: list[tuple] = []
     metrics: dict = {}
 

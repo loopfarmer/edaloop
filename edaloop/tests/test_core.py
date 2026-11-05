@@ -2069,6 +2069,23 @@ def test_makers_ground_patterns_and_fence_pitch():
     assert rf_rules.fence_pitch(10.0) < 1.0                            # and a higher band tightens it
 
 
+def test_a_footprints_own_plated_ground_holes_count_as_ground_vias():
+    # KiCad's TT1224 PL-258 footprint carries the maker's vias under the body as GND pads with a drill. Once ground stopped
+    # stacking its own vias on them, the audit read the rows as empty.
+    from edaloop import rf_rules
+    pads = [_pad("U1", "1", "IN", 0.0, 0.0), _pad("U1", "6", "GND", 0.0, 2.0), _pad("U1", "3", "OUT", 2.0, 0.0), _pad("U1", "4", "GND", 2.0, 2.0)]
+    parts = {"U1": {"mpn": "RLM-63-2W+"}}
+    metrics, _ = rf_rules.audit([], {"pads": pads}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
+    assert any("between pads 1 and 6" in s for s in metrics["ground_pattern_short"])
+    holes = [{**_pad("U1", "2", "GND", 0.0, 1.0), "drill": 0.3}, {**_pad("U1", "2", "GND", 2.0, 1.0), "drill": 0.3}]
+    metrics, _ = rf_rules.audit([], {"pads": pads + holes}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
+    assert not any("row under the body" in s for s in metrics["ground_pattern_short"])
+    # An unplated hole has no net and reaches nothing.
+    npth = [{**h, "net": ""} for h in holes]
+    metrics, _ = rf_rules.audit([], {"pads": pads + npth}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
+    assert any("between pads 1 and 6" in s for s in metrics["ground_pattern_short"])
+
+
 def test_a_real_capacitor_has_inductance():
     from edaloop import rf_rules
 
@@ -2774,6 +2791,36 @@ def test_no_via_is_placed_in_a_keepout_rule_area():
     assert not field.clear(5.0, 5.0)                     # inside
     assert not field.clear(5.0, 5.0 - 0.95 - 0.2)         # outside, but the ring would overlap the edge
     assert field.clear(5.0, 5.0 - 0.95 - ground.RADIUS - 0.01)
+
+
+def test_no_via_is_placed_on_a_footprints_own_ground_hole():
+    # lband_element's TT1224 land pattern carries its own ground vias as pads, and its filters have plated ground holes.
+    # ground placed vias on top of them (holes co-located) and 0.16 mm from them (hole to hole), as only other nets' pads were obstacles.
+    from edaloop import ground
+    hole = {"ref": "U1", "pad": "2", "net": "GND", "x": 10.0, "y": 10.0, "w": 0.6, "h": 0.6, "rot": 0, "drill": 0.3}
+    field = ground.Field({"pads": [hole], "outline": [0, 0, 20, 20]}, [], [], [])
+    assert not field.clear(10.0, 10.0)                                   # co-located
+    gap = ground.HOLE_PITCH - ground.DRILL                               # the gap two of its own vias keep
+    edge = (ground.DRILL + 0.3) / 2 + gap
+    assert not field.clear(10.0 + edge - 0.01, 10.0)
+    assert field.clear(10.0 + edge + 0.01, 10.0)
+    # An SMD ground pad has no hole, so a via may still weld to it.
+    smd = {**hole, "drill": 0}
+    assert ground.Field({"pads": [smd], "outline": [0, 0, 20, 20]}, [], [], []).clear(10.0 + 0.5, 10.0)
+
+
+def test_no_via_is_placed_inside_a_pads_own_clearance():
+    # KiCad's TT1224 PL-258 land pattern asks for 0.94 mm round its RF pads. ground used the 0.2 mm net class, so a via landed
+    # 0.56 mm from lband_element's limiter output.
+    from edaloop import ground
+    rf = {"ref": "U1", "pad": "4", "net": "LIM", "x": 10.0, "y": 10.0, "w": 0.6, "h": 0.6, "rot": 0, "drill": 0, "clearance": 0.9398}
+    field = ground.Field({"pads": [rf], "outline": [0, 0, 20, 20]}, [], [], [])
+    at = 10.0 + 0.3 + ground.RADIUS
+    assert not field.clear(at + 0.5, 10.0)
+    assert field.clear(at + 0.9398 + 0.01, 10.0)
+    # With no override, the net class still rules.
+    plain = ground.Field({"pads": [{**rf, "clearance": None}], "outline": [0, 0, 20, 20]}, [], [], [])
+    assert plain.clear(at + ground.CLEAR + 0.01, 10.0)
 
 
 def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatch):

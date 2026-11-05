@@ -39,6 +39,27 @@ KiCad 10.0.8, `pcbnew` and ngspice 44.2 ran from KiCad's Docker image (`kicad/ki
 
 These pass `bench` (connectivity, the RF chain, the design table, band edges where given, and DC bias through ngspice). They can't be built, because their RF parts use land patterns (`RFLib_FP`, `CBandLib_FP`) that aren't in this repository.
 
+lband_element was then run through `make` on a copy of its description, outside the repository, with its two missing land patterns pointed at KiCad's stock ones:
+- `Filter:Filter_Mini-Circuits_FV1206` for the LFCN filters;
+- `RF_Mini-Circuits:Mini-Circuits_TT1224_LandPatternPL-258_ClockwisePinNumbering` for the RLM limiter.
+
+Their pad numbers match the description's nets, but neither footprint was checked against Mini-Circuits' own drawing, which this environment couldn't fetch. So these readings rest on KiCad's footprints.
+
+| Check | Result |
+|---|---|
+| `erc`, `rf_path`, `rf_reference`, `power`, `spice`, `cascade` | pass. Power: 7.9 mV worst drop, 0.61 C rise |
+| `drc` | fail: 6 `annular_width` errors, all on the stock FV1206's plated ground holes (0.155 mm ring against the board's 0.1778 mm) |
+| `em_hops` | pass: all 8 hops. 30.7 dB worst return loss, on the two hops carrying a bias choke's land; 49.8 to 62.0 dB on the rest. 0.125 dB worst-case insertion loss along the chain |
+| `rf_layout` | warn: two fence gaps at part pads, and the 100 nF series caps |
+| `em_crosscheck` | error: Palace not installed |
+
+cband_element still can't be built: KiCad has no land pattern for its MC1631-1 or DQ1225 parts.
+
+That run found three edaloop faults, now fixed:
+- **Vias on a footprint's own holes.** `ground` placed vias on top of the TT1224 pattern's own vias (4 co-located holes) and 0.16 to 0.18 mm from the filters' plated holes (18 hole-to-hole faults). Only other nets' pads were obstacles.
+- **A pad's own clearance.** With those holes avoided, a via moved to 0.56 mm from the limiter's output, inside the 0.94 mm clearance the land pattern sets on that pad, and routing stopped. `ground` used the 0.2 mm net class everywhere.
+- **The maker's pattern read as missing.** `rf_layout` then reported the maker's via rows as missing, because it counted only board vias, not a footprint's own plated ground holes.
+
 The heat graph from `thermal_field` on gain_block_demo, with part heat:
 
 ![Heat graph of gain_block_demo with part heat: 48.0 to 57.4 C, hottest under U1](figures/gain_block_demo_heat.svg)
