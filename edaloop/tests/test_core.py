@@ -111,9 +111,9 @@ def test_waived_finding_passes_but_stays_on_record(tmp_path):
 
 def test_tool_crash_is_an_error_never_a_pass(tmp_path):
     p = make(tmp_path)
-    ev = checks.run_check(p, "cascade")          # no cascade section, so it raises
-    assert ev.status == "error"
-    assert not controller.status(p)["ready_to_release"] or "cascade" not in p.gate()
+    ev = checks.run_check(p, "capture")          # no capture.kind, so it raises
+    assert ev.status == "error" and "RuntimeError" in ev.summary
+    assert not controller.status(p)["ready_to_release"] or "capture" not in p.gate()
 
 
 def test_em_refuses_draft_and_single_solver(tmp_path):
@@ -2213,6 +2213,37 @@ def test_a_missing_tool_is_named_not_a_raw_traceback(monkeypatch, tmp_path):
     assert ev.status == "error" and "circuitrf isn't installed" in ev.summary
 
 
+def test_rf_checks_with_no_rf_copper_say_so_rather_than_pass(tmp_path):
+    # An RF net in the chain spec with no copper on the board: a placed but unrouted board.
+    (tmp_path / "c.yaml").write_text('chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n  - {net: RF2, entry: J2.2, exit: J3.1}\n')
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
+    ev = checks.run_check(p, "rf_reference")
+    assert ev.status == "fail" and any(f["id"] == "rf_reference:unrouted" and "RF2" in f["message"] for f in ev.findings)
+    assert checks._no_rf_copper("x", {"RF"}, Board(tmp_path / "b.kicad_pcb").tracks) == []
+
+
+def test_heat_svg_carries_a_scale_in_absolute_temperature_and_the_parts(tmp_path):
+    import base64
+
+    from edaloop import thermal
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text(PCB.replace('(footprint "x"', '(footprint "x" (at 0 0) (property "Reference" "U1" (at 0 0 0))').replace(
+        'smd rect (net', 'smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net'))
+    png = tmp_path / "heat.png"     # a 1x1 PNG: the renderer embeds whatever boardfield drew
+    png.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"))
+    result = {"png_rise_range_c": [2.0, 12.0], "hotspot": {"x": 0.0, "y": 0.0, "temp_c": 37.0, "rise_c": 12.0}}
+    svg = thermal.heat_svg(png, result, [-5, -5, 5, 5], board, tmp_path / "heat.svg", "demo").read_text()
+    assert "37.0 C" in svg and "27.0 C" in svg and "rise 2.0" in svg          # ambient 25 C plus the rise, both shown
+    assert ">U1<" in svg and "data:image/png;base64," in svg and "not a measurement" in svg
+    del result["png_rise_range_c"]
+    assert "no scale" in thermal.heat_svg(png, result, [-5, -5, 5, 5], board, tmp_path / "h2.svg", "demo").read_text()
+
+
+def test_cascade_with_no_stage_table_says_so_rather_than_crash(tmp_path):
+    p = make(tmp_path, "cascade: {freq_mhz: [], stages: []}\n")
+    ev = checks.run_check(p, "cascade")
+    assert ev.status == "fail" and ev.findings[0]["id"] == "cascade:no_stages" and "stages and freq_mhz" in ev.findings[0]["message"]
+
 # ---------------------------------------------------------------- RF connector ground pads
 
 UFL = "Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical"
@@ -2290,3 +2321,16 @@ def test_no_via_is_placed_in_a_keepout_rule_area():
     assert not field.clear(5.0, 5.0)                     # inside
     assert not field.clear(5.0, 5.0 - 0.95 - 0.2)         # outside, but the ring would overlap the edge
     assert field.clear(5.0, 5.0 - 0.95 - ground.RADIUS - 0.01)
+
+
+def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatch):
+    from edaloop import boardgen
+    monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "py"),
+                                                     "circuitrf": str(tmp_path / "crf"), "krt": str(tmp_path / "krt")})
+    (tmp_path / "kicad-cli").write_text("")
+    (tmp_path / "py").write_text("")
+    out = tmp_path / "board"
+    got = boardgen.make(Path("unused.yaml"), out, [])
+    assert got["made"] is False and got["stopped_at"] == "preflight"
+    assert {m["tool"] for m in got["missing"]} == {"circuitRF", "KiCadRoutingTools"}
+    assert not out.exists()                     # nothing placed, nothing written

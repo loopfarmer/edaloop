@@ -86,6 +86,18 @@ chain:
   - [OUT4, U4.1, C14.1]
   - [O4, C14.2, J8.1]
 
+# One channel's chain, which is one stage. The four channels are the same part on the same layout, so one table
+# stands for each. Datasheet-style typical values for the PSA4-5043+, as in gain_block_demo. Nothing here has been measured.
+stages:
+  - name: U1
+    gain_db: [[500, 20.3], [900, 18.4], [1500, 16.4]]
+    nf_db: [[500, 0.7], [900, 0.8], [1500, 0.95]]
+    oip3_dbm: [[500, 38.5], [900, 38], [1500, 37]]
+# Worked by hand: one stage, so Friis returns its own values.
+band_expect:
+  900: {gain_db: 18.4, nf_db: 0.8, oip3_dbm: 38.0}
+  1500: {gain_db: 16.4, nf_db: 0.95, oip3_dbm: 37.0}
+
 spice:
   models:
     J1: {kind: open, reason: "connector"}

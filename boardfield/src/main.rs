@@ -12,7 +12,8 @@ mod solve;
 
 use model::{run, Backend, Outcome, Problem};
 
-fn heat_png(path: &str, o: &Outcome) -> Result<(), String> {
+/// The hottest layer at each cell, coolest cell dark and hottest bright. The field is the rise above ambient, and so is the range returned.
+fn heat_png(path: &str, o: &Outcome) -> Result<[f64; 2], String> {
     let [nx, ny, nz] = o.grid;
     let mut hottest = vec![0f32; nx * ny];
     for k in 0..nz {
@@ -20,11 +21,14 @@ fn heat_png(path: &str, o: &Outcome) -> Result<(), String> {
             hottest[c] = hottest[c].max(o.temperature[k * nx * ny + c]);
         }
     }
-    let top = hottest.iter().cloned().fold(0f32, f32::max).max(1e-6);
+    // From the coolest cell to the hottest, not from 0 C: a board at 25 to 57 C otherwise uses only the top of the ramp.
+    let top = hottest.iter().cloned().fold(f32::MIN, f32::max);
+    let low = hottest.iter().cloned().fold(f32::MAX, f32::min);
+    let span = (top - low).max(1e-6);
     let mut rgb = Vec::with_capacity(nx * ny * 3);
     for v in &hottest {
         // A dark-to-hot ramp, in equal steps of temperature.
-        let t = (*v / top).clamp(0.0, 1.0);
+        let t = ((*v - low) / span).clamp(0.0, 1.0);
         let r = (t * 2.2).min(1.0);
         let g = ((t - 0.4) * 2.0).clamp(0.0, 1.0);
         let b = ((t - 0.75) * 4.0).clamp(0.0, 1.0);
@@ -34,7 +38,8 @@ fn heat_png(path: &str, o: &Outcome) -> Result<(), String> {
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), nx as u32, ny as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().and_then(|mut w| w.write_image_data(&rgb)).map_err(|e| e.to_string())
+    enc.write_header().and_then(|mut w| w.write_image_data(&rgb)).map_err(|e| e.to_string())?;
+    Ok([low as f64, top as f64])
 }
 
 fn main() {
@@ -77,9 +82,10 @@ fn main() {
         }
     }
     let converged = results.iter().all(|r| r.converged);
-    if let (Some(path), Some(last)) = (opt("--png"), results.last()) {
-        if let Err(e) = heat_png(&path, last) {
-            eprintln!("boardfield: png: {e}");
+    if let (Some(path), Some(last)) = (opt("--png"), results.last_mut()) {
+        match heat_png(&path, last) {
+            Ok(range) => last.png_rise_range_c = Some(range),
+            Err(e) => eprintln!("boardfield: png: {e}"),
         }
     }
     let json = serde_json::to_string_pretty(&results).expect("results serialise");

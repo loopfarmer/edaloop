@@ -119,7 +119,7 @@ def main(argv=None):
 
             from . import testbench
             with tempfile.TemporaryDirectory() as tmp:
-                data = [testbench.run(f, Path(tmp)) for f in (args.files or testbench.available())]
+                data = [testbench.run(testbench.find(str(f)), Path(tmp)) for f in (args.files or testbench.available())]
             rows = [{"bench": b["bench"], **r} for b in data for r in b["checks"]]
             _out(data, args.json, lambda _: _table(rows, ["bench", "check", "status", "detail"]))
             return 0 if data and all(b["ok"] for b in data) else 1

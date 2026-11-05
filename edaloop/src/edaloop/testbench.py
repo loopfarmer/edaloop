@@ -23,6 +23,18 @@ def available() -> list[Path]:
     return sorted(BENCHES.glob("*.yaml"))
 
 
+def find(name: str) -> Path:
+    """A bench by path, or by name from the shipped ones: `four_channel_demo` or `four_channel_demo.yaml`."""
+    from .project import ProjectError
+    path = Path(name)
+    if path.is_file():
+        return path
+    shipped = BENCHES / (path.name if path.suffix == ".yaml" else f"{path.name}.yaml")
+    if shipped.is_file():
+        return shipped
+    raise ProjectError(f"no bench {name!r}. Shipped benches: {', '.join(p.stem for p in available())}")
+
+
 def _row(check: str, problems: list[str], detail: str) -> dict:
     return {"check": check, "status": "fail" if problems else "pass",
             "detail": "; ".join(problems[:6]) if problems else detail}
