@@ -2792,6 +2792,20 @@ def test_no_via_is_placed_on_a_footprints_own_ground_hole():
     assert ground.Field({"pads": [smd], "outline": [0, 0, 20, 20]}, [], [], []).clear(10.0 + 0.5, 10.0)
 
 
+def test_no_via_is_placed_inside_a_pads_own_clearance():
+    # KiCad's TT1224 PL-258 land pattern asks for 0.94 mm round its RF pads. ground used the 0.2 mm net class, so a via landed
+    # 0.56 mm from lband_element's limiter output.
+    from edaloop import ground
+    rf = {"ref": "U1", "pad": "4", "net": "LIM", "x": 10.0, "y": 10.0, "w": 0.6, "h": 0.6, "rot": 0, "drill": 0, "clearance": 0.9398}
+    field = ground.Field({"pads": [rf], "outline": [0, 0, 20, 20]}, [], [], [])
+    at = 10.0 + 0.3 + ground.RADIUS
+    assert not field.clear(at + 0.5, 10.0)
+    assert field.clear(at + 0.9398 + 0.01, 10.0)
+    # With no override, the net class still rules.
+    plain = ground.Field({"pads": [{**rf, "clearance": None}], "outline": [0, 0, 20, 20]}, [], [], [])
+    assert plain.clear(at + ground.CLEAR + 0.01, 10.0)
+
+
 def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatch):
     from edaloop import boardgen
     monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "py"),

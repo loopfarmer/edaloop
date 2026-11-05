@@ -632,6 +632,17 @@ def build_board(seed, spec_path, dst):
                                                               f.GetOrientationDegrees()] for r, f in fps.items()}}))
 
 
+def _local_clearance(pad, fp):
+    """A pad's own clearance override in mm, or its footprint's, or None when the net class rules. Land patterns set these:
+    KiCad's TT1224 PL-258 asks for 0.94 mm round its RF pads."""
+    for owner in (pad, fp):
+        get = getattr(owner, "GetLocalClearance", None)
+        value = get() if get else None
+        if value:
+            return pcbnew.ToMM(value)
+    return None
+
+
 def board_facts(src, out):
     """True pad shapes, angles and courtyards, which the file reader only approximates at odd rotations."""
     board = pcbnew.LoadBoard(src)
@@ -646,7 +657,7 @@ def board_facts(src, out):
             pads.append({"ref": fp.GetReference(), "pad": pad.GetNumber(), "net": pad.GetNetname(),
                          "x": pcbnew.ToMM(p.x), "y": pcbnew.ToMM(p.y), "w": pcbnew.ToMM(size.x), "h": pcbnew.ToMM(size.y),
                          "rot": pad.GetOrientationDegrees(), "back": pad.IsOnLayer(pcbnew.B_Cu), "drill": pcbnew.ToMM(pad.GetDrillSizeX()),
-                         "front": pad.IsOnLayer(pcbnew.F_Cu)})
+                         "front": pad.IsOnLayer(pcbnew.F_Cu), "clearance": _local_clearance(pad, fp)})
     # Rule areas that forbid vias, the board's own and each footprint's (KiCad's U.FL has one between its ground
     # pads). A via goes through every layer, so a keepout on any layer rules a site out.
     keepouts = []
