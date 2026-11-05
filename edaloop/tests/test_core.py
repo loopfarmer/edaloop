@@ -3166,3 +3166,24 @@ def test_an_eagle_wire_lying_on_the_outline_is_dropped():
     assert "(start 0 -27.7)" in fixed and "(start 0 -10)" in fixed      # the edge it lay on, and silk, stay
     assert "(start 0 -2)" in fixed                                      # a wire beyond the edge's end isn't on it
     assert fixed.count("(gr_line") == 4 and parse_sexpr(fixed)
+
+
+def test_shipped_testbenches_find_their_land_patterns_with_nothing_fetched():
+    # lband_element and cband_element name RFLib_FP and CBandLib_FP. The bundled stand-ins cover every one, and say where they came from.
+    import re
+
+    import yaml
+
+    from edaloop import boardgen
+    for bench in ("lband_element", "cband_element"):
+        spec = yaml.safe_load((Path(__file__).parents[1] / "testbenches" / f"{bench}.yaml").read_text())
+        for ref, fp in spec["layout"]["footprints"].items():
+            lib, name = fp.split(":")
+            if lib in ("RFLib_FP", "CBandLib_FP"):
+                f = boardgen.BUNDLED_FOOTPRINTS / f"{lib}.pretty" / f"{name}.kicad_mod"
+                assert f.is_file(), f"{bench} {ref}: no bundled {fp}"
+                text = f.read_text()
+                assert text.startswith(f'(footprint "{name}"') and "From KiCad" in text
+    # The FV1206's plated ground holes keep a 0.178 mm ring on their 0.61 mm pads.
+    fv = (boardgen.BUNDLED_FOOTPRINTS / "RFLib_FP.pretty" / "LFCN_FV1206.kicad_mod").read_text()
+    assert re.findall(r"\(drill ([0-9.]+)\)", fv) == ["0.254", "0.254"]

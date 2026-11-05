@@ -22,6 +22,9 @@ from .project import ProjectError
 
 OPS = Path(__file__).with_name("kicad_ops.py")
 STANDARD_LIBS = ["/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints", "/usr/share/kicad/footprints"]
+# Stand-ins for the shipped testbenches' own land patterns, so they build with nothing fetched. Searched after any folder the
+# caller names, so a real library of the same name wins. data/footprints/README.md says what each one is and what it assumes.
+BUNDLED_FOOTPRINTS = Path(__file__).with_name("data") / "footprints"
 NS = uuid.UUID("6f2a6c1e-0b5e-4d0a-9f55-0d3b7d1f7a10")
 
 RULES = {"min_clearance": 0.0, "min_connection": 0.0, "min_copper_edge_clearance": 0.5, "min_hole_clearance": 0.25,
@@ -224,6 +227,7 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise BuildError(f"{out} isn't empty. Build into a new folder, so that no routed board is overwritten")
+    footprint_dirs = [*footprint_dirs, BUNDLED_FOOTPRINTS]
     libs = {f.split(":")[0] for f in bench["layout"]["footprints"].values()}
     table = []
     copied = set()

@@ -26,7 +26,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/edaloop"]
-artifacts = ["src/edaloop/agent/*", "src/edaloop/spice_models/*", "src/edaloop/data/*"]
+artifacts = ["src/edaloop/agent/*", "src/edaloop/spice_models/*", "src/edaloop/data/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
