@@ -70,6 +70,8 @@ A later run built circuitRF 1.7.0 with EMerge 3.0.0 and openEMS 0.37.0, and KiCa
 
 The output hops read lower than the rest because each one carries the bias choke's pad on the line, the low-impedance section `impedance` reports. All four channels read alike.
 
+A later gain_block_demo run put each choke's land beside the line instead, 0.1 mm from its edge on a stub (`rf_layout.tap_stub_mm: 0.1`). `impedance` then passed, but `em_hops` read the three choke hops at 24.9 to 25.0 dB, 3.7 dB worse, with 0.149 dB summed insertion loss, and `rf_path` failed at 7.46% over its floor. DRC still passed, with 36 ground vias after `ground` and 102 on the finished board. So the default stays with the pad on the line, and a rerun with it repeated the table above exactly: 105 ground vias on the finished board. The reasons are in [Taps beside the line](rf-layout-rules.md#taps-beside-the-line). four_channel_demo wasn't rerun.
+
 The cross-check result is the openEMS bias described in [openems-coupon-bias.md](openems-coupon-bias.md): the 2D reference backs EMerge, but two solvers can't outvote each other, so the check fails rather than pick one. A third solver, normally Palace, is what settles it. Before this run the check spent a full EMerge solve before failing on Palace's absence. It now refuses at once, naming the missing solver and how to install it.
 
 ## Not run, and why

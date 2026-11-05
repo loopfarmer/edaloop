@@ -58,6 +58,12 @@ def pad_gap(pad: dict, x: float, y: float) -> float:
     return math.hypot(du, dv)
 
 
+def _nearest_on_seg(p: tuple, a: tuple, b: tuple) -> tuple[float, float]:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / max(dx * dx + dy * dy, 1e-12)))
+    return a[0] + t * dx, a[1] + t * dy
+
+
 def _seg_gap(p: tuple, a: tuple, b: tuple) -> float:
     ax, ay, bx, by = *a, *b
     dx, dy = bx - ax, by - ay
@@ -125,7 +131,8 @@ def _planned_lines(bench: dict, facts: dict) -> list[tuple]:
         lines.append((a, b, hw))
         for pin in bench["nets"][net]:
             if pin not in (entry, leave):
-                lines.append((at[pin], a, hw) if math.dist(at[pin], a) < math.dist(at[pin], b) else (at[pin], b, hw))
+                # A tap beside the line joins it square on, as `route_classes.plan_tap` lays it, at the nearest point of the run.
+                lines.append((at[pin], _nearest_on_seg(at[pin], a, b), hw))
     return lines
 
 

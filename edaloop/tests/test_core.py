@@ -969,6 +969,28 @@ def test_demo_board_builds_from_standard_footprints_with_rf_pads_on_the_line(tmp
         assert at[pin]["y"] == pytest.approx(12.0, abs=0.002), pin
 
 
+def test_demo_board_puts_its_chokes_beside_the_line_when_asked(tmp_path):
+    import yaml
+
+    from edaloop import boardgen, ground, testbench
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    bench["project"]["rf_layout"] = {"tap_stub_mm": 0.1}
+    described = tmp_path / "gain_block_demo.yaml"
+    described.write_text(yaml.safe_dump(bench, sort_keys=False))
+    boardgen.build(described, tmp_path / "board", [])
+    at = {f"{p['ref']}.{p['pad']}": p for p in ground._facts(tmp_path / "board" / "gain_block_demo.kicad_pcb", tmp_path)["pads"]}
+    for pin in ("U1.1", "C2.1", "U2.1", "C3.1", "J2.1"):
+        assert at[pin]["y"] == pytest.approx(12.0, abs=0.002), pin
+    # Each bias choke rises from the line, its RF pad's edge 0.1 mm off the 0.36 mm line's edge.
+    for pin in ("L1.1", "L2.1", "L3.1"):
+        pad = at[pin]
+        edge = pad["y"] + (pad["h"] if pad["rot"] % 180 == 0 else pad["w"]) / 2
+        assert 12.0 - 0.18 - edge == pytest.approx(0.1, abs=0.002), pin
+    assert yaml.safe_load((tmp_path / "board" / "edaloop.yaml").read_text())["rf_layout"] == {"tap_stub_mm": 0.1}
+
+
 def test_placer_finds_the_diagonal_parts_angles(tmp_path):
     # The custom land patterns aren't in the repo. Name the folder holding them to run this.
     pretty = Path(os.environ.get("EDALOOP_FOOTPRINTS", "/nonexistent"))
@@ -2547,6 +2569,155 @@ def test_a_chips_rf_pad_faces_along_the_line_from_its_own_side(monkeypatch):
     # A two-pad part is still aimed pad to pad, and on its centre line.
     assert ops._rot_for(resistor, "1", "2", (1.0, 0.0)) == pytest.approx(31.0, abs=0.1)
     assert ops._rot_for(resistor, None, "2", (1.0, 0.0)) == pytest.approx(31.0, abs=0.1)
+
+
+class _FakeBox:
+    def __init__(self, x1, y1, x2, y2):
+        self.box = [round(v * 1e6) for v in (x1, y1, x2, y2)]
+
+    def GetLeft(self):
+        return self.box[0]
+
+    def GetTop(self):
+        return self.box[1]
+
+    def GetRight(self):
+        return self.box[2]
+
+    def GetBottom(self):
+        return self.box[3]
+
+
+class _FakePart:
+    """A footprint in its own millimetres: pads as (x, y, w, h). Turned as KiCad turns one, counterclockwise on a screen whose y runs down."""
+
+    def __init__(self, ref, pads):
+        self.ref, self.local, self.rot, self.at = ref, pads, 0.0, (0.0, 0.0)
+
+    def turned(self, x, y):
+        r = math.radians(self.rot)
+        return self.at[0] + x * math.cos(r) + y * math.sin(r), self.at[1] - x * math.sin(r) + y * math.cos(r)
+
+    def GetReference(self):
+        return self.ref
+
+    def GetOrientationDegrees(self):
+        return self.rot
+
+    def SetOrientationDegrees(self, rot):
+        self.rot = rot
+
+    def Pads(self):
+        part = self
+
+        class Pad:
+            def __init__(self, number):
+                self.number = number
+
+            def GetNumber(self):
+                return self.number
+
+            def GetBoundingBox(self):
+                x, y, w, h = part.local[self.number]
+                corners = [part.turned(x + u, y + v) for u in (-w / 2, w / 2) for v in (-h / 2, h / 2)]
+                return _FakeBox(min(c[0] for c in corners), min(c[1] for c in corners), max(c[0] for c in corners), max(c[1] for c in corners))
+        return [Pad(n) for n in self.local]
+
+
+def _fake_placement(monkeypatch):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+
+    def pose(fp, x, y, rot):
+        fp.rot, fp.at = rot, (x, y)
+    monkeypatch.setattr(ops, "_pose", pose)
+    monkeypatch.setattr(ops, "_pad_xy", lambda fp, n: fp.turned(*fp.local[n][:2]))
+    monkeypatch.setattr(ops, "_reach", lambda fp, rot, pad, direction: 0.5)
+    monkeypatch.setattr(ops, "_hit", lambda fp, others, gap: None)
+    return ops
+
+
+def _tap_spec(axis, stub):
+    # An 0603 land, 0.8 mm across the line by 0.95 mm along it once it stands up off the line. Pads 1.55 mm apart.
+    chip = {"1": (-0.775, 0.0, 0.8, 0.95), "2": (0.775, 0.0, 0.8, 0.95)}
+    parts = {r: _FakePart(r, dict(chip)) for r in ("U1", "U2", "L1", "L2", "C1")}
+    pins = {"U1": {"1": "IN", "2": "A"}, "U2": {"1": "A", "2": "OUT"}, "L1": {"1": "A", "2": "BIAS"}, "L2": {"1": "A", "2": "GND"},
+            "C1": {"1": "BIAS", "2": "GND"}}
+    nets = {"A": ["U1.2", "L1.1", "L2.1", "U2.1"], "BIAS": ["L1.2", "C1.1"], "IN": ["U1.1"], "OUT": ["U2.2"], "GND": ["L2.2", "C1.2"]}
+    spec = {"layout": {"axis": axis, "line": 10.0, "start": 2.0}, "pins": pins, "nets": nets, "chain": [["A", "U1.2", "U2.1"]],
+            "parts": {r: {"value": "100nF" if r == "C1" else ""} for r in parts}, "outline": None, "rf_line_width_mm": 0.36,
+            "rf_layout": {"tap_stub_mm": stub}}
+    return parts, spec
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_a_shunt_taps_pad_sits_beside_the_line_a_stub_from_its_edge(monkeypatch, axis):
+    ops = _fake_placement(monkeypatch)
+    fps, spec = _tap_spec(axis, 0.1)
+    rows, attach = ops._derive_layout(fps, spec)
+    walk = rows[0]
+    assert [w[0] for w in walk] == ["U1", "L1", "L2", "U2"]
+    ops._solve_row(fps, {**spec["layout"], "walk": walk, "attach": attach})
+    across = 1 if axis == "x" else 0
+    up = -1 if axis == "x" else 1                 # as _derive_layout has it: -y for a line along x, +x for one along y
+    for ref, side in (("L1", up), ("L2", -up)):   # a rail's choke rises, and a choke to ground hangs below
+        x1, y1, x2, y2 = (v / 1e6 for v in next(p for p in fps[ref].Pads() if p.GetNumber() == "1").GetBoundingBox().box)
+        near, far = ((y1, y2) if axis == "x" else (x1, x2))[::side]
+        # The pad's edge facing the line is the stub's length from the line's edge, and the whole land is clear of the line.
+        assert abs(near - 10.0) - 0.18 == pytest.approx(0.1, abs=1e-6), ref
+        assert (fps[ref].turned(*fps[ref].local["1"][:2])[across] - 10.0) * side > 0
+        assert abs(far - 10.0) > abs(near - 10.0)
+    # The bias capacitor still stacks from the choke's far pad, away from the line.
+    assert attach["L1"][0]["ref"] == "C1" and attach["L1"][0]["to"] == "L1.2"
+
+
+def test_a_tap_stub_of_none_puts_the_pad_back_on_the_line(monkeypatch):
+    ops = _fake_placement(monkeypatch)
+    fps, spec = _tap_spec("x", None)
+    rows, attach = ops._derive_layout(fps, spec)
+    ops._solve_row(fps, {**spec["layout"], "walk": rows[0], "attach": attach})
+    assert fps["L1"].turned(*fps["L1"].local["1"][:2])[1] == pytest.approx(10.0)
+    assert ops.tap_offset(0.18, None, 0.4) == 0.0 and ops.tap_offset(0.18, 0.1, 0.4) == pytest.approx(0.68)
+
+
+def test_the_project_states_the_tap_rule_only_when_the_description_sets_it():
+    import yaml
+
+    from edaloop import boardgen, rf_rules
+
+    assert rf_rules.DEFAULTS["tap_stub_mm"] is None       # off: measured worse on gain_block_demo, see docs/rf-layout-rules.md
+    bench = yaml.safe_load((Path(checks.__file__).parents[2] / "testbenches" / "gain_block_demo.yaml").read_text())
+    assert "rf_layout" not in boardgen.project_yaml(bench, "demo", "chains.yaml")
+    bench["project"]["rf_layout"] = {"tap_stub_mm": 0.2}
+    assert boardgen.project_yaml(bench, "demo", "chains.yaml")["rf_layout"] == {"tap_stub_mm": 0.2}
+
+
+def test_a_line_through_a_taps_land_is_measured_and_reported_only_when_the_rule_asks_for_it_beside():
+    from edaloop import rf_rules
+
+    def board(choke_y, tracks, cfg=None):
+        pads = [_pad("J1", "1", "A", 0.0, 0.0), _pad("J2", "1", "A", 10.0, 0.0),
+                _pad("L1", "1", "A", 5.0, choke_y, 0.95, 0.8), _pad("L1", "2", "BIAS", 5.0, choke_y - 1.55, 0.95, 0.8)]
+        return rf_rules.audit(tracks, {"pads": pads}, [("A", "J1.1", "J2.1")], [], {}, (1.0, 2.0), "In1.Cu", {}, 4, cfg)
+    line = _track("A", (0.0, 0.0), (10.0, 0.0), 0.36)
+    on, found = board(0.0, [line])
+    # By default the pad belongs on the line, so it's a measurement and not a finding.
+    assert on["taps_through_land"] == ["L1.1"] and not any("tap_land" in f[0] for f in found)
+    on, found = board(0.0, [line], {"tap_stub_mm": 0.1})
+    assert any(f[0] == "rf_layout:tap_land:L1.1" for f in found)
+    # Split at the pad's centre, the line still enters and leaves the land.
+    on, _ = board(0.0, [_track("A", (0.0, 0.0), (5.0, 0.0), 0.36), _track("A", (5.0, 0.0), (10.0, 0.0), 0.36)])
+    assert on["taps_through_land"] == ["L1.1"]
+    beside, found = board(-0.68, [line, _track("A", (5.0, -0.68), (5.0, 0.0), 0.36)], {"tap_stub_mm": 0.1})
+    assert beside["taps_through_land"] == [] and not any("tap_land" in f[0] for f in found)
+
+
+def test_the_planned_stub_of_a_tap_beside_the_line_meets_it_square_on():
+    from edaloop import ground
+
+    pads = [{"ref": r, "pad": n, "x": x, "y": y} for r, n, x, y in (("U1", "2", 0.0, 0.0), ("U2", "1", 10.0, 0.0), ("L1", "1", 3.0, -0.68))]
+    bench = {"rf_line_width_mm": 0.36, "chain": [["A", "U1.2", "U2.1"]], "nets": {"A": ["U1.2", "L1.1", "U2.1"]}}
+    lines = ground._planned_lines(bench, {"pads": pads})
+    assert lines[1][0] == (3.0, -0.68) and lines[1][1] == pytest.approx((3.0, 0.0))
 
 
 @pytest.mark.parametrize("value, farads", [("100n", 100e-9), ("100nF", 100e-9), ("100n 50V", 100e-9), ("4u7", 4.7e-6),

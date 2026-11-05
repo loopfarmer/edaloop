@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 
-from shapely.geometry import LineString, MultiPoint
+from shapely.geometry import LineString, MultiPoint, Polygon
 
 FENCE_PITCH_MM = 1.778      # 70 mil centre to centre, which is under a twentieth of a guided wavelength through C-band
 C_M_S = 299_792_458.0
@@ -35,7 +35,12 @@ VIA_L_NH = 0.25             # a bypass's via to the plane
 DEFAULTS = {"fence_factor": 1.25, "fence_reach_mm": 1.3, "coverage_warn": 1.0, "coverage_error": 0.9, "parallel_gap_mm": 1.0, "parallel_max_mm": 3.0,
             "top_run_max_mm": 5.0, "tap_max_mm": 3.0, "bypass_max_mm": 3.0, "series_rl_min_db": 20.0, "bypass_max_ohm": 25.0,
             # An RF connector's ground pads: "fill" places as many vias as fit, or give a number. Fewer than the minimum is reported.
-            "connector_ground_vias": "fill", "connector_ground_min_vias": 2}
+            "connector_ground_vias": "fill", "connector_ground_min_vias": 2,
+            # A number puts a shunt tap's RF pad beside the line, this far from the line's edge to the pad's edge, on a stub of the line.
+            # 0.1 mm is a common fabricator's minimum solder-mask web, which keeps the land's opening off the line: an assumption, so check
+            # yours. Off by default: on gain_block_demo it lowered the choke hops' return loss from 28.7 to 25.0 dB in em_hops, since the
+            # whole land then loads the line, where on it the line's own copper is part of the land. See docs/rf-layout-rules.md.
+            "tap_stub_mm": None}
 
 
 def is_rf_connector(part: dict | None) -> bool:
@@ -96,6 +101,31 @@ def _pad_edge_distance(pad: dict, x: float, y: float) -> float:
     dx, dy = x - pad["x"], y - pad["y"]
     u, v = dx * math.cos(t) + dy * math.sin(t), -dx * math.sin(t) + dy * math.cos(t)
     return math.hypot(max(abs(u) - pad["w"] / 2, 0.0), max(abs(v) - pad["h"] / 2, 0.0))
+
+
+def pad_outline(pad: dict) -> Polygon:
+    """A pad's rectangle in board millimetres, at its own angle."""
+    t = math.radians(-pad.get("rot", 0.0))
+    w, h = pad["w"] / 2, pad["h"] / 2
+    return Polygon([(pad["x"] + u * math.cos(t) - v * math.sin(t), pad["y"] + u * math.sin(t) + v * math.cos(t))
+                    for u, v in ((w, h), (-w, h), (-w, -h), (w, -h))])
+
+
+def line_through_land(pad: dict, tracks: list, layer: str) -> bool:
+    """Whether a net's own track runs through a pad: its centrelines cross the pad's edge twice or more, entering and leaving. A stub
+    that ends on or in the pad crosses once."""
+    edge = pad_outline(pad).exterior
+    crossings = 0
+    for t in tracks:
+        if t.kind == "via" or t.net != pad["net"] or t.layer != layer or math.dist(t.start, t.end) < 1e-6:
+            continue
+        hit = LineString([t.start, t.end]).intersection(edge)
+        if hit.is_empty:
+            continue
+        points = {(round(g.x, 4), round(g.y, 4)) for g in getattr(hit, "geoms", [hit]) if g.geom_type == "Point"}
+        # An end that stops on the edge doesn't cross it.
+        crossings += sum(1 for q in points if min(math.dist(q, t.start), math.dist(q, t.end)) > 1e-3)
+    return crossings >= 2
 
 
 def parallel_runs(tracks: list, rf_nets: set, gap_mm: float, angle_deg: float = 10.0) -> dict:
@@ -256,7 +286,7 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
     metrics["supply_on_top"] = top
 
     # Taps and bias
-    taps, bypasses = {}, {}
+    taps, bypasses, through_land = {}, {}, []
     for row in chains:
         net, entry, leave = row[0], str(row[1]), str(row[2])
         if entry not in by_name or leave not in by_name:
@@ -270,6 +300,13 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
             taps[name] = round(stub, 2)
             if stub > float(c["tap_max_mm"]):
                 findings.append((f"rf_layout:tap:{name}", f"{name} sits {stub:.1f} mm off {net}, a stub that loads the line. Put the part at the junction, with its pad in the trace if it fits", "warning"))
+            shunt = len(by_ref[p["ref"]]) == 2 and all(q["net"] != net for q in by_ref[p["ref"]] if q is not p)
+            if shunt and line_through_land(p, tracks, "F.Cu" if p.get("front", True) else "B.Cu"):
+                through_land.append(name)
+                # A measurement either way. Only a board that was asked for taps beside the line and didn't get one is reported.
+                if c["tap_stub_mm"] is not None:
+                    findings.append((f"rf_layout:tap_land:{name}", f"{net} runs through the land of {name}, though rf_layout.tap_stub_mm asks for "
+                                     f"the pad beside the line, {c['tap_stub_mm']} mm from its edge", "warning"))
             if p["ref"].startswith("L") and len(by_ref[p["ref"]]) == 2:
                 cold = next(q for q in by_ref[p["ref"]] if q is not p)
                 caps = []
@@ -293,7 +330,7 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
                         findings.append((f"rf_layout:bypass_far:{p['ref']}", f"{smallest[2]} is {smallest[1]:.1f} mm from {p['ref']}'s cold pad", "warning"))
                     if worst > float(c["bypass_max_ohm"]):
                         findings.append((f"rf_layout:bypass_z:{p['ref']}", f"{smallest[2]} ({value_of(smallest[2])}) estimates {worst:.0f} ohm to ground at a band edge with its via. Check its measured S-parameters", "warning"))
-    metrics["taps_mm"], metrics["bypass"] = taps, bypasses
+    metrics["taps_mm"], metrics["bypass"], metrics["taps_through_land"] = taps, bypasses, through_land
 
     # Series capacitors, from a chip's typical inductance. Its measured S-parameters decide.
     blocks = {}

@@ -192,11 +192,29 @@ def _reach(fp, rot, pad, direction):
     return max((x - px) * direction[0] + (y - py) * direction[1] for x, y in corners)
 
 
+def _pad_reach(fp, rot, pad, direction):
+    """How far a pad's copper extends from its centre, in a direction, at this rotation."""
+    _pose(fp, 0, 0, rot)
+    px, py = _pad_xy(fp, pad)
+    box = next(q for q in fp.Pads() if q.GetNumber() == pad).GetBoundingBox()
+    corners = [(pcbnew.ToMM(x), pcbnew.ToMM(y)) for x in (box.GetLeft(), box.GetRight()) for y in (box.GetTop(), box.GetBottom())]
+    return max((x - px) * direction[0] + (y - py) * direction[1] for x, y in corners)
+
+
+def tap_offset(half_line, stub, pad_reach):
+    """How far a tap's RF pad centre sits off the line's centre: the line's half width, the stub from its edge, then the pad's own reach
+    back toward the line. None leaves the pad on the line."""
+    if stub is None:
+        return 0.0
+    return half_line + float(stub) + pad_reach
+
+
 def _derive_layout(fps, spec):
     """Rotations and bias positions from the netlist, so that a new board needs only its parts and nets.
 
-    The row: each part's input and output pads on the line, facing along it. A two-pin part with one pin on an RF net is a tap, its
-    RF pad on the line, reaching up if its other end is a rail and down if that's ground. Rails rise from each tap in one column: the
+    The row: each part's input and output pads on the line, facing along it. A two-pin part with one pin on an RF net is a tap, reaching
+    up if its other end is a rail and down if that's ground. Its RF pad is on the line, unless `rf_layout.tap_stub_mm` is set: then it sits
+    beside the line, that far from the line's edge, on a stub. Rails rise from each tap in one column: the
     smallest capacitor nearest the choke, then the bulk, then any link onward. Capacitors go in pairs, the first pair at the rail's
     feed, where the cable's RF arrives, and the next at the load.
     """
@@ -206,6 +224,9 @@ def _derive_layout(fps, spec):
     travel = (0.0, 1.0) if axis == "y" else (1.0, 0.0)
     up = (1.0, 0.0) if axis == "y" else (0.0, -1.0)
     down = (-up[0], -up[1])
+    rules = spec.get("rf_layout") or {}
+    stub = rules.get("tap_stub_mm")
+    widths = spec.get("net_width") or {}
     chain_nets = {c[0] for c in chain}
     on_row = {x.split(".")[0] for c in chain for x in c[1:]}
     taps = {}
@@ -309,15 +330,19 @@ def _derive_layout(fps, spec):
                 continue
             far = next((p for p in pins[ref] if p != pin), None)
             grounded = far is None or pins[ref].get(far) in ("GND", None)
-            rot = _rot_for(fps[ref], pin, far, down if grounded else up) if far else 0.0
-            walk.append([ref, rot, pin, pin])
+            side = down if grounded else up
+            rot = _rot_for(fps[ref], pin, far, side) if far else 0.0
+            half_line = float(widths.get(net, spec.get("rf_line_width_mm") or 0.0)) / 2
+            off = tap_offset(half_line, stub, _pad_reach(fps[ref], rot, pin, (-side[0], -side[1]))) if far else 0.0
+            walk.append([ref, rot, pin, pin, [round(side[0] * off, 4), round(side[1] * off, 4)]])
             if far and not grounded:
                 fps[ref].SetOrientationDegrees(rot)
                 group = []
                 _pose(fps[ref], 0, 0, rot)
                 px, py = _pad_xy(fps[ref], pin)
                 fx, fy = _pad_xy(fps[ref], far)
-                rise(group, ref + "." + far, up, [abs((fx - px) * up[0] + (fy - py) * up[1])])
+                # The stack climbs from the line, so it starts the tap's offset higher.
+                rise(group, ref + "." + far, up, [abs((fx - px) * up[0] + (fy - py) * up[1]) + off])
                 attach[ref] = group
         ref, pin = leave.split(".")
         following = next((c for c in chain if c[1].split(".")[0] == ref), None)
@@ -340,7 +365,9 @@ def _solve_row(fps, layout):
         return (line, s) if axis else (s, line)
 
     for row in layout["walk"]:
-        ref, rot, entry, leave = row
+        ref, rot, entry, leave = row[:4]
+        # A tap's pad sits off the line, beside it, by this much.
+        ox, oy = row[4] if len(row) > 4 else (0.0, 0.0)
         entry, leave = (str(entry) if entry is not None else None), (str(leave) if leave is not None else None)
         fp = fps[ref]
         if previous is None:
@@ -355,7 +382,8 @@ def _solve_row(fps, layout):
         else:
             s = previous + 0.3
             while True:
-                _at_pad(fp, rot, entry, *point(s))
+                at = point(s)
+                _at_pad(fp, rot, entry, at[0] + ox, at[1] + oy)
                 group = [_attach(fps, item) for item in groups.get(ref, [])]
                 clash = _hit(fp, inline, gap) or _hit(fp, [x for x in placed if x not in inline], 0.1)
                 clash = clash or next((h for h in (_hit(g, placed + [fp] + [o for o in group if o is not g], 0.1)

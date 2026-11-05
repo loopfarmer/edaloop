@@ -16,8 +16,8 @@ from pathlib import Path
 
 import yaml
 
+from . import rf_rules, toolchain
 from . import schematic as drawing
-from . import toolchain
 from .project import ProjectError
 
 OPS = Path(__file__).with_name("kicad_ops.py")
@@ -158,6 +158,8 @@ def project_yaml(bench: dict, name: str, chains: str) -> dict:
                              {"id": "R6", "text": "Field solvers agree to 2%", "metric": "em_crosscheck.spread_pct", "max": 2},
                              {"id": "R7", "text": "Each RF hop's copper returns at least 15 dB in band", "metric": "em_hops.worst_rl_db",
                               "min": 15}],
+            # The RF layout rules' limits, which placement builds to and the rf_layout check measures. Only what the description sets.
+            **({"rf_layout": dict(cfg["rf_layout"])} if cfg.get("rf_layout") else {}),
             "gate": gate, "waivers": []}
 
 
@@ -251,6 +253,8 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     spec = out / ".build_spec.json"
     spec.write_text(json.dumps({
         "parts": bench["parts"], "chain": [*bench["chain"]], "nets": bench["nets"], "pins": drawing.pin_map(bench), "open_pins": bench.get("open_pins") or [], "layout": bench["layout"],
+        "rf_line_width_mm": bench["rf_line_width_mm"], "net_width": bench["layout"].get("net_width") or {},
+        "rf_layout": {**rf_rules.DEFAULTS, **((bench.get("project") or {}).get("rf_layout") or {})},
         "outline": bench.get("outline_mm"), "lib_dirs": [str(out), *[str(x) for x in footprint_dirs], *STANDARD_LIBS],
         "uuids": sheets["uuids"], "sheet_of": sheets["placed"], "root": _uid(name, "root"),
         "sheet": "Root"}))
