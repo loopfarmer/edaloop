@@ -26,8 +26,8 @@ jobs:
       run:
         working-directory: edaloop
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: edaloop/uv.lock
@@ -49,7 +49,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # Pinned, so that a new release's clippy lints arrive as a deliberate bump, not a red build.
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -75,7 +75,7 @@ jobs:
       run:
         working-directory: ${{ matrix.crate }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # The oldest Rust each Cargo.toml claims with rust-version. Raise both together.
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -107,8 +107,8 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential libxml2-utils ngspice
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: edaloop/uv.lock
@@ -161,7 +161,7 @@ jobs:
         working-directory: edaloop
         run: uv run edaloop -C "$DEMO" export
       # The folder holds only the generated example board.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: gain-block-demo
