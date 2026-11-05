@@ -489,7 +489,8 @@ impl Gpu {
             rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("GPU read failed: {e}"))?;
             SWEEP_NANOS.fetch_add(tick.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             {
-                let view = slice.get_mapped_range();
+                // wgpu 30 reports a mapping it can't give as an error. That stops the solve rather than reading garbage.
+                let view = slice.get_mapped_range().map_err(|e| format!("GPU read failed: {e}"))?;
                 correction.copy_from_slice(bytemuck::cast_slice(&view));
             }
             staging.unmap();
