@@ -177,8 +177,8 @@ def drc(p: Project) -> Outcome:
             d = this                # the worst run is the evidence
     findings = []
     for v in d["violations"]:
-        # Name every item: a clearance fault is between two things, and the second can be what explains it, as copper on no net.
-        where = " and ".join(i.get("description", "") for i in v.get("items", []))
+        # Every item, not just the first: which side is on no net, or is a hole, decides what the violation means.
+        where = " and ".join(i.get("description", "")[:70] for i in v.get("items", []))
         sev = "error" if v["severity"] == "error" else "warning"
         findings.append(Finding(f"drc:{v['type']}", f"{v['description']} - {where}"[:240], sev))
     open_nets = collections.Counter()
@@ -193,9 +193,18 @@ def drc(p: Project) -> Outcome:
     if len(set(counts_seen)) > 1:
         findings.append(Finding("drc:not_repeatable", f"identical input gave {counts_seen} violations; the worst is reported", "warning"))
     counts = collections.Counter(v["type"] for v in d["violations"])
+    # KiCad won't fill a zone on a board whose outline doesn't close, so a refill empties every pour and its nets read as open.
+    # Those opens are about the outline, not the copper, and saying so keeps them from being chased as routing faults.
+    refill_blocked = "--refill-zones" in cmd and counts.get("invalid_outline", 0) > 0
+    if refill_blocked:
+        findings.insert(0, Finding("drc:refill_blocked", f"the board outline isn't a closed shape ({counts['invalid_outline']} invalid_outline), so KiCad "
+                                   f"couldn't refill the zones. The {len(d['unconnected_items'])} unconnected item(s) may only be pours left empty: "
+                                   "close the outline first"))
     metrics = {"runs": counts_seen, "violations": len(d["violations"]), "unconnected": len(d["unconnected_items"]),
-               "parity": len(d["schematic_parity"]), "by_type": dict(counts), "open_nets": dict(open_nets.most_common())}
-    return Outcome({**_files(p, p.board, p.project_file, p.schematic), "drc_config": _config(p, "drc_config")}, metrics, findings,
+               "parity": len(d["schematic_parity"]), "by_type": dict(counts), "open_nets": dict(open_nets.most_common()), "refill_blocked": refill_blocked}
+    # kicad-cli also reads the board's custom rules file when there is one, so its bytes, or that there's none, are part of the evidence.
+    rules_file = p.board.with_suffix(".kicad_dru")
+    return Outcome({**_files(p, p.board, p.project_file, rules_file, p.schematic), "drc_config": _config(p, "drc_config")}, metrics, findings,
                    {"kicad-cli": d.get("kicad_version", "")}, [str(out.relative_to(p.root))])
 
 
@@ -549,8 +558,10 @@ def power_rails(p: Project) -> Outcome:
         net = rail["net"]
         tracks = [t for t in board.tracks if t.net == net]
         pads = board.net_pads(net)
+        # Each pad's real layers: a through-hole pad joins every copper layer, and a top pad doesn't touch the bottom.
+        layer_map = power.pad_layers([x for x in board.all_pads() if x["net"] == net], list(thickness))
         r = power.solve_rail(net, tracks, pads, rail["source"], {k: float(v) for k, v in rail["loads"].items()},
-                             thickness_um=thickness, board_height_mm=board.board_height_mm())
+                             thickness_um=thickness, board_height_mm=board.board_height_mm(), pad_layer_map=layer_map)
         rows[net] = {k: getattr(r, k) for k in ("connected", "drops_mv", "worst_drop_mv", "worst_rise_c", "worst_segment",
                                                 "min_width_mm", "total_a", "segments", "vias")}
         pours = board.zones_on_net(net)
@@ -715,16 +726,30 @@ def em_hops(p: Project) -> Outcome:
     channels = [g for g in ([n for n in group if n in results] for group in series_groups(every)) if g]
     metrics = {"hops": results, "channels": channels, "unsolved": sorted(unsolved), "unsolved_why": unsolved, "worst_rl_db": min(rls),
                "total_il_max_db": round(max(sum(results[n]["il_max_db"] for n in g) for g in channels), 3)}
-    return Outcome({**_files(p, p.board), **_chain_files(p), "em_hops_config": _config(p, "em_hops_config"), "rf_config": _config(p, "rf_config")}, metrics, findings, {"solver": solver["solver"]})
+    # Each hop's Touchstone file, kept by net name where a person can find it, and a plot of them all.
+    kept, out = {}, p.work / "em_hops"
+    out.mkdir(parents=True, exist_ok=True)
+    for net, m in results.items():
+        src = m.pop("s2p", None)
+        if src and Path(src).exists():
+            kept[net] = shutil.copy(src, out / f"{net}.s2p")
+    artifacts = [str(Path(x).relative_to(p.root)) for x in kept.values()]
+    if kept:
+        plot = hops.sparams_svg({n: Path(x) for n, x in kept.items()}, cfg["band_ghz"][0] * 1e9, cfg["band_ghz"][1] * 1e9,
+                                out / "sparams.svg", f"{p.name}: S-parameters of each RF hop ({solver['solver']}, {solver.get('quality', '')})")
+        artifacts.append(str(plot.relative_to(p.root)))
+    return Outcome({**_files(p, p.board), **_chain_files(p), "em_hops_config": _config(p, "em_hops_config"), "rf_config": _config(p, "rf_config")}, metrics, findings,
+                   {"solver": solver["solver"]}, artifacts)
 
 
 def _rule_profile(p: Project) -> tuple[Path, dict]:
     cfg = p.section("rules")
     pack = Path(cfg.get("pack") or toolchain.paths()["rule_pack"]).expanduser()
     profile = pack / cfg.get("profile", "manufacture/summit_standard.yaml")
-    if not profile.is_file():
-        raise toolchain.ToolMissing(f"no fabricator profile at {profile}, so the fabricator limits can't be read. The rule pack is optional: set `rule_pack` "
-                           "in the toolchain file or `rules.pack` and `rules.profile` in edaloop.yaml, or leave `rules` out of the gate")
+    if not profile.exists():
+        # Said plainly, since a bare FileNotFoundError reads like a fault in the board rather than a missing install.
+        raise toolchain.ToolMissing(f"no fabricator rule profile at {profile}. Install the rule pack. Set rule_pack in the toolchain config, "
+                                    "or rules.pack and rules.profile in edaloop.yaml. `edaloop doctor` says what it found")
     return pack, yaml.safe_load(profile.read_text())
 
 
@@ -904,7 +929,10 @@ def _em_run(p: Project, cfg: dict, ws: Path, label: str, layout: str, s: dict) -
     (ws / f"{label}.log").write_text(r.stdout + r.stderr)
     s2p = result()
     if s2p is None:
-        raise RuntimeError(f"{label}: solver produced no result: {(r.stdout + r.stderr).strip()[-800:]}")
+        text = r.stdout + r.stderr
+        # Said first, since the tail of the log is mid-solve and doesn't say why it stopped. Code 137 is SIGKILL, most often the kernel out of memory.
+        why = "the solver was killed by the system (code 137), most likely out of memory. " if r.returncode == 137 or "exited with code 137" in text else ""
+        raise RuntimeError(f"{label}: solver produced no result: {why}{text.strip()[-800:]}")
     return s2p, round(time.time() - t0, 1)
 
 

@@ -29,6 +29,7 @@ UM = 1000       # clay's database units per micron
 MESH_FAULTS = ("volume is 0", "MeshError")
 WINDOW_RETRIES_MM = (0.37, 0.71)   # not round numbers, so the new edge doesn't land on the same copper
 DEFAULT_WORKERS = 3      # each solver uses several threads itself, so more than this mostly contends
+KILLED = "killed by the system"     # what _em_run says when the solver died to SIGKILL, which is most often the kernel out of memory
 
 
 def _layer(n: int) -> dict:
@@ -62,27 +63,57 @@ def _snapped(points) -> list[tuple[float, float]]:
     return [(round(p[0], 2), round(p[1], 2)) for p in points]
 
 
-def land_edge(pad: dict, into: tuple[float, float]) -> tuple[float, float]:
-    """Where the track leaves a land, heading along the line, stepped just onto the track so that a solver reads it as on the metal."""
+def land_edge(pad: dict, into: tuple[float, float], tracks: list = ()) -> tuple[float, float]:
+    """Where the track leaves a land, heading along the line, stepped just onto the track so that a solver reads it as on the metal.
+
+    The line through the land's centre is used when the track is on it. A track can leave from off centre, as one drawn from a corner of a
+    wide connector land does, and then the port goes where that track crosses the land's edge, since anywhere else it's on no metal."""
+    land = pad_polygon(pad)
     reach = pad["w"] + pad["h"]
     ray = LineString([(pad["x"], pad["y"]), (pad["x"] + into[0] * reach, pad["y"] + into[1] * reach)])
-    hit = ray.intersection(pad_polygon(pad).exterior)
+    hit = ray.intersection(land.exterior)
     point = hit if hit.geom_type == "Point" else min(hit.geoms, key=lambda g: g.distance(Point(pad["x"], pad["y"])))
     step = 0.005
-    return point.x + into[0] * step, point.y + into[1] * step
+    at = (point.x + into[0] * step, point.y + into[1] * step)
+    if tracks and not any(LineString([t.start, t.end]).distance(Point(at)) < t.width / 2 for t in tracks):
+        crossing = _track_leaves(land, tracks, into)
+        if crossing is not None:
+            at = (crossing[0] + into[0] * step, crossing[1] + into[1] * step)
+    return at
+
+
+def _track_leaves(land: Polygon, tracks: list, into: tuple[float, float]) -> tuple[float, float] | None:
+    """Where a track heading `into` crosses out of the land, or None if no track does."""
+    for t in tracks:
+        for near, far in ((t.start, t.end), (t.end, t.start)):
+            span = math.dist(near, far)
+            if span < 1e-9 or land.distance(Point(near)) >= 1e-3 or land.contains(Point(far)):
+                continue
+            if ((far[0] - near[0]) * into[0] + (far[1] - near[1]) * into[1]) / span < 0.9998:
+                continue
+            hit = LineString([near, far]).intersection(land.exterior)
+            points = [hit] if hit.geom_type == "Point" else [g for g in getattr(hit, "geoms", []) if g.geom_type == "Point"]
+            if points:
+                p = max(points, key=lambda g: g.distance(Point(near)))
+                return p.x, p.y
+    return None
 
 
 def leaving_direction(pad: dict, tracks: list, chord: tuple[float, float]) -> tuple[float, float]:
     """Which way the track leaves a land. On a hop that bends, the straight line to the far end misses the copper, and so would a port put on it."""
     land = pad_polygon(pad)
+    leaving = []
     for t in tracks:
         for near, far in ((t.start, t.end), (t.end, t.start)):
             if land.distance(Point(near)) < 1e-3 and not land.contains(Point(far)):
                 span = math.dist(near, far)
-                d = ((far[0] - near[0]) / span, (far[1] - near[1]) / span)
-                # Keep the straight line when the track agrees with it, so that a straight hop's port doesn't move.
-                return chord if d[0] * chord[0] + d[1] * chord[1] > 0.9998 else d
-    return chord
+                leaving.append(((far[0] - near[0]) / span, (far[1] - near[1]) / span))
+    if not leaving:
+        return chord
+    # A land with a tap on it has more than one track leaving. The hop runs along the one heading most towards its other end.
+    d = max(leaving, key=lambda v: v[0] * chord[0] + v[1] * chord[1])
+    # Keep the straight line when the track agrees with it, so that a straight hop's port doesn't move.
+    return chord if d[0] * chord[0] + d[1] * chord[1] > 0.9998 else d
 
 
 def direction_label(d: tuple[float, float]) -> str:
@@ -151,10 +182,65 @@ def cut_shapes(net: str, tracks: list, pads: list, pours: list[Polygon], vias: l
     d = ((leave["x"] - entry["x"]) / span, (leave["y"] - entry["y"]) / span)
     for text, pad, chord in (("1", entry, d), ("2", leave, (-d[0], -d[1]))):
         into = leaving_direction(pad, tracks, chord)
-        at = _snapped([land_edge(pad, into)])[0]
+        at = _snapped([land_edge(pad, into, tracks)])[0]
+        # Snapping can pull a port that sat a few microns past the edge back onto the land, which is cut out of the model. Step it on again.
+        for _ in range(3):
+            if pad_polygon(pad).distance(Point(at)) > 1e-3:
+                break
+            at = _snapped([(at[0] + into[0] * 0.01, at[1] + into[1] * 0.01)])[0]
         shapes.append({"$type": "Label", "Layer": _layer(signal), "X": int(round(at[0] * 1000 * UM)), "Y": int(round(-at[1] * 1000 * UM)),
                        "Text": text, "Height": 400000, "IsPort": True, "PortDirection": direction_label(into)})
     return shapes
+
+
+_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
+
+
+def sparams_svg(hops: dict[str, Path], low_hz: float, high_hz: float, out: Path, title: str) -> Path:
+    """Each hop's |S11| and |S21| in dB against frequency, the band shaded. Solver results for the copper alone, without the parts."""
+    import html
+    nets = list(hops)
+    data = {net: skrf.Network(str(path)) for net, path in hops.items()}
+    f_lo = min(float(n.f.min()) for n in data.values()) / 1e9
+    f_hi = max(float(n.f.max()) for n in data.values()) / 1e9
+    w, h, left, top, gap = 640, 220, 60, 56, 60
+    panels = [("|S11|, dB (return loss)", lambda n: 20 * np.log10(np.maximum(np.abs(n.s[:, 0, 0]), 1e-6))),
+              ("|S21|, dB (insertion loss)", lambda n: 20 * np.log10(np.maximum(np.abs(n.s[:, 1, 0]), 1e-6)))]
+    body = [f'<rect width="{w + left + 170}" height="{top + 2 * h + gap + 50}" fill="#fff"/>',
+            f'<text x="{left}" y="24" font-size="15" font-weight="600">{html.escape(title)}</text>']
+    for k, (label, fn) in enumerate(panels):
+        y0 = top + k * (h + gap)
+        curves = {net: (data[net].f / 1e9, fn(data[net])) for net in nets}
+        lo = min(float(c[1].min()) for c in curves.values())
+        hi = max(float(c[1].max()) for c in curves.values())
+        # A little room round the curves, and at least 0.2 dB of span, so a near-lossless line isn't drawn as flat noise.
+        pad = max(0.05 * (hi - lo), (0.2 - (hi - lo)) / 2, 0.0)
+        lo, hi = lo - pad, hi + pad
+        def x(f):
+            return left + (f - f_lo) / max(f_hi - f_lo, 1e-9) * w
+
+        def y(v, y0=y0, lo=lo, hi=hi):
+            return y0 + (hi - v) / (hi - lo) * h
+        body.append(f'<rect x="{x(low_hz / 1e9):.1f}" y="{y0}" width="{x(high_hz / 1e9) - x(low_hz / 1e9):.1f}" height="{h}" fill="#000" fill-opacity="0.05"/>')
+        body.append(f'<rect x="{left}" y="{y0}" width="{w}" height="{h}" fill="none" stroke="#222"/>')
+        body.append(f'<text x="{left}" y="{y0 - 6}" font-size="12">{label}</text>')
+        for t in range(5):
+            v = lo + (hi - lo) * t / 4
+            places = 2 if hi - lo < 1 else 1 if hi - lo < 10 else 0
+            body.append(f'<text x="{left - 6}" y="{y(v) + 4:.1f}" font-size="10" text-anchor="end">{round(v, places) + 0.0:.{places}f}</text>')
+            body.append(f'<line x1="{left}" x2="{left + w}" y1="{y(v):.1f}" y2="{y(v):.1f}" stroke="#ddd"/>')
+        for t in range(5):
+            f = f_lo + (f_hi - f_lo) * t / 4
+            body.append(f'<text x="{x(f):.1f}" y="{y0 + h + 14}" font-size="10" text-anchor="middle">{f:.2f}</text>')
+        for i, (fs, vs) in enumerate(curves.values()):
+            pts = " ".join(f"{x(float(a)):.1f},{y(float(b)):.1f}" for a, b in zip(fs, vs))
+            body.append(f'<polyline points="{pts}" fill="none" stroke="{_PALETTE[i % len(_PALETTE)]}" stroke-width="1.6"/>')
+    for i, net in enumerate(nets):
+        body.append(f'<line x1="{left + w + 16}" x2="{left + w + 36}" y1="{top + 10 + 18 * i}" y2="{top + 10 + 18 * i}" stroke="{_PALETTE[i % len(_PALETTE)]}" stroke-width="2"/>')
+        body.append(f'<text x="{left + w + 42}" y="{top + 14 + 18 * i}" font-size="11">{html.escape(net)}</text>')
+    body.append(f'<text x="{left}" y="{top + 2 * h + gap + 34}" font-size="11" fill="#444">GHz. Shaded: the band. Each hop solved alone, copper without its parts: a solver result, not a measurement</text>')
+    out.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{w + left + 170}" height="{top + 2 * h + gap + 50}" font-family="sans-serif">{"".join(body)}</svg>\n')
+    return out
 
 
 def hop_metrics(s2p: Path, low_hz: float, high_hz: float) -> dict:
@@ -249,7 +335,12 @@ def solve_unique(jobs: dict[str, Path], solve, workers: int) -> dict:
         except RuntimeError as e:
             return str(e)[:900]
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
-        return dict(zip(jobs, pool.map(one, jobs.values())))
+        out = dict(zip(jobs, pool.map(one, jobs.values())))
+    # A solver the system killed most likely ran out of memory beside the others. Alone it may fit, so each gets one more go, one at a time.
+    for key in [k for k, v in out.items() if isinstance(v, str) and KILLED in v]:
+        again = one(jobs[key])
+        out[key] = again if not isinstance(again, str) else f"{again[:820]} (also when run alone)"
+    return out
 
 
 def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_solver) -> dict:
@@ -312,7 +403,8 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
             s2p, seconds = result
             kept_log = ws / f"{solver_label}.log"
             narrowed = kept_log.exists() and "curved edge" in kept_log.read_text()
-            found[net] = {**hop_metrics(s2p, low, high), "seconds": seconds, "port_narrowed": narrowed, "window_mm": list(size), "vias": via_count, "digest": digest, **layers}
+            found[net] = {**hop_metrics(s2p, low, high), "seconds": seconds, "port_narrowed": narrowed, "window_mm": list(size), "vias": via_count, "digest": digest,
+                          **layers, "s2p": str(s2p)}
         return found
 
     out = solve_all(chains, margin)

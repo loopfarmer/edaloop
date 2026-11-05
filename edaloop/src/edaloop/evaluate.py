@@ -6,10 +6,12 @@ board or can't handle it) or `info` (a reading with nothing known to hold it aga
 """
 from __future__ import annotations
 
+import collections
 import json
 import re
 import shutil
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -63,6 +65,10 @@ def fetch(sample: dict) -> Path:
     _download(sample, sample["file"], out)
     if sample.get("project"):
         _download(sample, sample["project"], out.with_suffix(".kicad_pro"))
+        # A project's custom rules sit beside it under the same name, and KiCad's DRC reads them. Without them the board is judged by
+        # its net classes alone, which a custom rule may relax on purpose. Most projects have none, and that's recorded so it isn't asked again.
+        rules = str(Path(sample["project"]).with_suffix(".kicad_dru"))
+        _download(sample, rules, out.with_suffix(".kicad_dru"), optional=True)
     return out
 
 
@@ -71,13 +77,21 @@ def _cache_key(sample: dict) -> str:
     return "" if sample["file"].endswith(".brd") else Path(sample["file"]).stem
 
 
-def _download(sample: dict, file: str, out: Path) -> None:
-    if out.exists():
+def _download(sample: dict, file: str, out: Path, optional: bool = False) -> None:
+    """Fetch one file at the pinned commit. An optional file that the commit doesn't have leaves a marker saying so, and no file."""
+    absent = out.with_name(out.name + ".absent")
+    if out.exists() or (optional and absent.exists()):
         return
     out.parent.mkdir(parents=True, exist_ok=True)
     url = RAW.format(owner=sample.get("owner", "adafruit"), repo=sample["repo"], commit=sample["commit"], file=urllib.parse.quote(file))
-    with urllib.request.urlopen(url, timeout=120) as r:
-        data = r.read()
+    try:
+        with urllib.request.urlopen(url, timeout=120) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        if optional and e.code == 404:
+            absent.write_text(f"{file} isn't in {sample['repo']} at {sample['commit']}\n")
+            return
+        raise
     temporary = out.with_name(out.name + ".tmp")
     temporary.write_bytes(data)
     temporary.rename(out)
@@ -120,8 +134,8 @@ def _kicad_rules(tree: list) -> dict:
     return {"clearance": min(clearances) if clearances else None, "width": min(widths) if widths else None, "edge": number(setup, "edge_clearance")}
 
 
-# Faults in text, silk or mask aren't copper faults. Castellated and edge-launch pads meet the edge on purpose, and Eagle's keepouts import as rule areas that pads legitimately sit in.
-_SEVERITIES = dict(text_height="ignore", text_thickness="ignore", silk_edge_clearance="ignore", unresolved_variable="ignore", malformed_courtyard="ignore", courtyards_overlap="warning",
+# Faults in text, silk or mask aren't copper faults, and nor is a courtyard that overlaps another or holds a stitching via. Castellated and edge-launch pads meet the edge on purpose, and Eagle's keepouts import as rule areas that pads legitimately sit in.
+_SEVERITIES = dict(text_height="ignore", text_thickness="ignore", silk_edge_clearance="ignore", unresolved_variable="ignore", malformed_courtyard="ignore", courtyards_overlap="warning", pth_inside_courtyard="warning",
                    copper_edge_clearance="warning", solder_mask_bridge="warning", items_not_allowed="warning")
 # A footprint's library attributes and a fiducial's padstack aren't copper faults either, and KiCad only started checking them after these files were drawn.
 _KICAD_SEVERITIES = {**_SEVERITIES, "footprint_type_mismatch": "warning", "padstack": "warning", "drill_out_of_range": "warning", "starved_thermal": "warning"}
@@ -144,8 +158,9 @@ def copy_kicad_board(sample: dict, source: Path, facts: dict, out: Path, name: s
     out.mkdir(parents=True, exist_ok=True)
     board = out / f"{name}.kicad_pcb"
     shutil.copy(source, board)
-    if source.with_suffix(".kicad_pro").exists():
-        shutil.copy(source.with_suffix(".kicad_pro"), board.with_suffix(".kicad_pro"))
+    for ext in (".kicad_pro", ".kicad_dru"):
+        if source.with_suffix(ext).exists():
+            shutil.copy(source.with_suffix(ext), board.with_suffix(ext))
     r = toolchain.run([toolchain.paths()["kicad_cli"], "pcb", "upgrade", "--force", board], timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"kicad-cli couldn't upgrade it: {(r.stdout + r.stderr).strip()[-300:]}")
@@ -179,7 +194,9 @@ def read_eagle(path: Path) -> dict:
                 used.add(int(wire.get("layer")))
         vias += len(signal.findall("via"))
     params = {p.get("name"): p.get("value") for p in root.iter("param")}
-    return {"groups": groups, "tracks": tracks, "vias": vias, "copper_layers": len(used) or 2, "rules": params, "elements": elements}
+    # DRC errors the designer approved in Eagle. Each carries only a hash, with no name or reason and no way to match it to KiCad's findings, so it's reported and never waives anything.
+    approved = sum(1 for _ in root.iter("approved"))
+    return {"groups": groups, "tracks": tracks, "vias": vias, "copper_layers": len(used) or 2, "rules": params, "elements": elements, "approved": approved}
 
 
 def to_mm(value: str | None, default: float) -> float:
@@ -201,12 +218,12 @@ def repair(text: str, stackup: dict | None) -> str:
     return text
 
 
-def eagle_holes(text: str) -> str:
+def eagle_holes(text: str) -> tuple[str, int]:
     """An Eagle `<hole>` is a bare drill with no copper. KiCad's importer makes it an NPTH pad the drill's size, then widens every round drilled pad,
     holes included, to the drill plus twice `rlMinPadTop` (`adjustFootprintForDesignRules` in pcb_io_eagle.cpp). That ring is copper the board
     doesn't have, so DRC reads tracks Eagle passed beside the hole as touching it. Eagle pads are always plated, so every NPTH pad in an Eagle
     import is a hole, and each goes back to its drill. Only for Eagle imports: a native KiCad NPTH pad can carry a copper ring on purpose."""
-    out, at = [], 0
+    out, at, count = [], 0, 0
     for m in re.finditer(r'\(pad\s+"[^"]*"\s+np_thru_hole\s+circle\b', text):
         if m.start() < at:
             continue
@@ -218,10 +235,12 @@ def eagle_holes(text: str) -> str:
         block = text[m.start():end + 1]
         drill = re.search(r"\(drill\s+([\d.]+)\s*\)", block)
         if drill:
-            block = re.sub(r"\(size\s+[\d.]+\s+[\d.]+\)", f"(size {drill[1]} {drill[1]})", block, count=1)
+            shrunk = re.sub(r"\(size\s+[\d.]+\s+[\d.]+\)", f"(size {drill[1]} {drill[1]})", block, count=1)
+            count += shrunk != block
+            block = shrunk
         out += [text[at:m.start()], block]
         at = end + 1
-    return "".join(out) + text[at:]
+    return "".join(out) + text[at:], count
 
 
 def stack_for(sample: dict, copper_layers: int) -> tuple[dict, list[str]]:
@@ -251,7 +270,8 @@ def import_board(sample: dict, brd: Path, eagle: dict, out: Path, name: str) -> 
         raise RuntimeError(f"kicad-cli couldn't import it: {(r.stdout + r.stderr).strip()[-300:]}")
     stack, _ = stack_for(sample, eagle["copper_layers"])
     board = out / f"{name}.kicad_pcb"
-    board.write_text(eagle_holes(repair(raw.read_text(), stack)))
+    text, _ = eagle_holes(raw.read_text())
+    board.write_text(repair(text, stack))
     raw.unlink()
     (out / "imported_raw.kicad_prl").unlink(missing_ok=True)
     # The released file's own clearances, so that DRC judges the board by the rules it was made to.
@@ -325,30 +345,66 @@ def project_for(sample: dict, out: Path, name: str, chain: list | None, width: f
     (out / "edaloop.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 
 
-def drc_rows(ev) -> list[dict]:
+_PAD = re.compile(r"\bpad (\S+) \[([^\]]*)\] of (\S+)", re.IGNORECASE)
+_NO_NET_COPPER = re.compile(r"\b(?!pad\b)\w+ \[<no net>\] of (\S+)", re.IGNORECASE)
+
+
+def _pads(message: str) -> set[str]:
+    """The pads a KiCad DRC item list names, as REF.PAD."""
+    return {f"{m[3]}.{m[1]}" for m in _PAD.finditer(message)}
+
+
+def _pads_in_footprint_copper(message: str) -> set[str]:
+    """Pads on a net that a violation finds touching no-net copper drawn in the same footprint."""
+    owners = set(_NO_NET_COPPER.findall(message))
+    return {f"{m[3]}.{m[1]}" for m in _PAD.finditer(message) if m[2] != "<no net>" and m[3] in owners}
+
+
+def drc_rows(ev, approved: int = 0) -> list[dict]:
     """Opens and rule errors on a board that works. Copper drawn inside an Eagle footprint arrives with no net, so it reads as touching what it was
     made to touch, and is counted apart. A finding names every item it involves, so a fault against such copper counts there whichever item is first."""
+    rows = []
     m = ev.metrics or {}
     if not m:
-        return [_row("known.drc", False, f"the check itself failed: {ev.summary}")]
-    by = dict(sorted((m.get("by_type") or {}).items(), key=lambda kv: -kv[1])[:4])
-    errs, no_net = _drc_errors(ev)
-    return [_row("known.opens", m["unconnected"] == 0, f"{m['unconnected']} open connections on a board that works"),
-            _row("known.drc", errs == 0, f"{errs} rule errors against the file's own clearances, and {no_net} more from footprint copper the import leaves on no net. Warnings: {by}")]
+        rows.append(_row("known.drc", False, f"the check itself failed: {ev.summary}"))
+    else:
+        # `by_type` counts errors too, so the warnings are counted from the findings.
+        by = dict(collections.Counter(f["id"].removeprefix("drc:") for f in ev.findings if f.get("severity") != "error").most_common(4))
+        # The note on blocked refills is about opens, read below, not a rule error.
+        hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") not in ("drc:unconnected", "drc:refill_blocked")]
+        # Copper drawn inside an Eagle footprint arrives with no net, so it reads as touching what it was made to touch.
+        no_net = [f for f in hard if "[<no net>]" in f["message"] or "<no net>" in f["message"]]
+        errs = len(hard) - len(no_net)
+        # That copper also keeps a zone off the pad it covers, as with a split exposed pad, so the pad reads as open. Only a pad KiCad itself
+        # reports touching no-net copper of its own footprint is set apart, and it's named. Any other open counts.
+        covered = {pad for f in no_net for pad in _pads_in_footprint_copper(f["message"])}
+        opens = [f for f in ev.findings if f.get("id") == "drc:unconnected"]
+        held = [f for f in opens if any(pad in covered for pad in _pads(f["message"]))]
+        free = m["unconnected"] - len(held)
+        if m.get("refill_blocked") and m["unconnected"]:
+            # The pours couldn't be refilled, so an open here may be an empty pour. That's the outline's finding, in known.drc, and not one about the copper.
+            rows.append(_row("known.opens", None, f"{m['unconnected']} open connections, unjudged: the outline isn't closed, so KiCad couldn't refill the pours"))
+        else:
+            rows.append(_row("known.opens", free == 0, f"{free} open connections on a board that works" +
+                             (f", and {len(held)} more at pads under footprint copper the import leaves on no net: {sorted({p for f in held for p in _pads(f['message']) if p in covered})}" if held else "")))
+        types = dict(collections.Counter(f["id"].removeprefix("drc:") for f in hard if f not in no_net).most_common(4))
+        note = f" The released file approves {approved} DRC errors in Eagle, with no name or reason, so they aren't matched or waived." if approved else ""
+        rows.append(_row("known.drc", errs == 0, f"{errs} rule errors against the file's own clearances {types}, and {len(no_net)} more from footprint copper the import leaves on no net.{note} Warnings: {by}"))
+    return rows
 
 
 def _drc_errors(ev) -> tuple[int, int]:
-    """Rule errors, and those of them that involve copper on no net."""
-    hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") != "drc:unconnected"]
+    """Rule errors, and those of them that involve copper on no net. The note on a blocked refill is about opens, not a rule error."""
+    hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") not in ("drc:unconnected", "drc:refill_blocked")]
     no_net = sum("<no net>" in f["message"] for f in hard)
     return len(hard) - no_net, no_net
 
 
-def checks_score(sample: dict, out: Path, chain: list | None) -> list[dict]:
+def checks_score(sample: dict, out: Path, chain: list | None, approved: int = 0) -> list[dict]:
     from .project import Project
     p = Project(out)
     rows = []
-    rows += drc_rows(checks.run_check(p, "drc"))
+    rows += drc_rows(checks.run_check(p, "drc"), approved)
     ev = checks.run_check(p, "rules")
     fab = [f["message"] for f in ev.findings if f.get("severity") == "error"]
     rows.append(_row("known.fabricator", None if ev.status == "error" else not fab, ev.summary if ev.status == "error" else ("; ".join(fab)[:200] or "within the fabricator limits")))
@@ -359,7 +415,7 @@ def checks_score(sample: dict, out: Path, chain: list | None) -> list[dict]:
         rows.append(_row("rf.impedance", None if ev.status != "error" else False, (f"Z0 average {ev.metrics.get('z_avg_min')} to {ev.metrics.get('z_avg_max')} ohm on an assumed stackup" if ev.metrics.get("rows") else "too short for circuitRF. In 2D: " + ", ".join(f"{r['net']} {r['z0_ohm']} ohm" for r in ev.metrics.get("read_in_2d") or [])) if ev.metrics else ev.summary))
         ev = checks.run_check(p, "em_hops")
         hops = (ev.metrics or {}).get("hops") or {}
-        skipped = {k: v["unsolved"][:90] for k, v in ((ev.metrics or {}).get("unsolved_why") or {}).items()}
+        skipped = {k: v["unsolved"][:160] for k, v in ((ev.metrics or {}).get("unsolved_why") or {}).items()}
         rows.append(_row("rf.hops", False if skipped or ev.status == "error" else None, (", ".join(f"{k}: {v['rl_db']} dB return loss, {v['il_max_db']} dB loss" + (f" on {v['signal_layer']} over an assumed {v['reference_layer']}" if v.get("reference_assumed") else "")
                        for k, v in hops.items()) + (f". Couldn't model: {skipped}" if skipped else "")) if hops or skipped else ev.summary))
     if p.section("power").get("rails"):
@@ -432,7 +488,7 @@ def evaluate_one(key: str, sample: dict, work: Path, level: str) -> dict:
             known = sample.get("known") or {}
             chain = d["chain"] if d and (known.get("rf_path") or known.get("try_rf")) else None
             project_for(sample, out, name, chain, d["rf_line_width_mm"] if d else 0.2)
-            result["rows"] += checks_score(sample, out, chain)
+            result["rows"] += checks_score(sample, out, chain, eagle.get("approved", 0))
         if level == "regenerate":
             result["rows"] += regenerate(sample, board, d, eagle, out, name)
     except Exception as e:  # noqa: BLE001 - a sample that breaks edaloop is exactly what this is for, and mustn't stop the others
