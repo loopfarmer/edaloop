@@ -169,6 +169,25 @@ def test_em_refuses_draft_and_single_solver(tmp_path):
     assert "two different" in checks.run_check(q, "em_crosscheck").summary
 
 
+def test_em_crosscheck_refuses_a_missing_solver_before_solving(tmp_path, monkeypatch):
+    import subprocess
+    p = make(tmp_path, "em: {solvers: [{solver: emerge, quality: Accurate}, {solver: palace, quality: Standard}]}\n")
+    calls = []
+    exe = tmp_path / "circuitrf"
+    exe.write_text("")
+
+    def fake_run(cmd, **kw):
+        calls.append([str(c) for c in cmd])
+        return subprocess.CompletedProcess(cmd, 0, "EMerge: installed, validated\nPalace: not installed\n", "")
+    real = {**toolchain.paths(), "circuitrf": str(exe)}
+    monkeypatch.setattr(checks.toolchain, "paths", lambda: real)
+    monkeypatch.setattr(checks.toolchain, "run", fake_run)
+    ev = checks.run_check(p, "em_crosscheck")
+    assert ev.status == "error" and "palace" in ev.summary and "circuitrf solver install palace" in ev.summary
+    # Only the solver list was asked for: nothing was solved.
+    assert calls == [[str(exe), "solver", "list"]]
+
+
 def test_friis_matches_hand_calculation():
     stages = [{"loss_db": [[1, 1.0]]},
               {"gain_db": [[1, 20.0]], "nf_db": [[1, 1.0]], "oip3_dbm": [[1, 30.0]]},
