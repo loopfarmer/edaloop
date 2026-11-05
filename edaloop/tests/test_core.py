@@ -1486,6 +1486,20 @@ def test_drc_names_both_items_so_copper_on_no_net_counts_apart(tmp_path, monkeyp
     assert rows["known.drc"]["result"] == "gap" and rows["known.drc"]["text"].startswith("1 rule errors") and "and 1 more from footprint copper" in rows["known.drc"]["text"]
 
 
+def test_a_rebuilt_board_is_judged_on_its_finished_drc():
+    from edaloop import evaluate
+
+    no_net = {"id": "drc:shorting_items", "message": "Items shorting two nets - Polygon [<no net>] of X1 on F.Cu and Pad 1 [GND] of X1", "severity": "error"}
+    ev = Evidence("drc", "fail", "", {}, {"unconnected": 0}, [no_net])
+    row = evaluate.regen_connects(ev, True)
+    assert row["result"] == "pass" and row["text"].startswith("0 opens, 0 errors and 1 more")
+    ev.findings.append({"id": "drc:clearance", "message": "Clearance violation - Track [A] and Track [B]", "severity": "error"})
+    assert evaluate.regen_connects(ev, True)["result"] == "gap"
+    # No evidence, or a check that crashed, is never read as a whole board.
+    assert evaluate.regen_connects(None, True)["result"] == "gap"
+    assert evaluate.regen_connects(Evidence("drc", "error", "RuntimeError: x", {}), True)["result"] == "gap"
+
+
 def test_a_missing_rule_pack_says_where_to_set_it(tmp_path):
     p = make(tmp_path, f"rules: {{pack: {tmp_path / 'gone'}}}\n")
     ev = checks.run_check(p, "rules")
@@ -2190,6 +2204,28 @@ def test_kicad6_schematic_moves_instances_and_speaks_only_6_0(tmp_path):
         assert "hide" in [str(x) for x in k6.kid(props[name], "effects")]
         assert k6.kid(props[name], "hide") is None
     assert "(fields_autoplaced)" in text and "(fields_autoplaced yes)" not in text
+
+
+def test_a_chips_rf_pad_faces_along_the_line_from_its_own_side(monkeypatch):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+
+    class Part:
+        def __init__(self, pads):
+            self.pads = pads
+
+        def Pads(self):
+            return list(self.pads)
+    # A QFN's second pin, on its left side and well off the middle of it: the centre-to-pad line is 33.5 degrees off the side.
+    qfn = Part({str(i): (0.0, 0.0) for i in range(1, 49)} | {"2": (-3.4, -2.25)})
+    resistor = Part({"1": (-0.5, -0.3), "2": (0.5, 0.3)})
+    monkeypatch.setattr(ops, "_pose", lambda *a: None)
+    monkeypatch.setattr(ops, "_pad_xy", lambda fp, pad: fp.pads[pad])
+    # The last part in a chain faces upstream, along -x, so its left side needs no turn.
+    assert ops._rot_for(qfn, None, "2", (-1.0, 0.0)) == 0.0
+    assert ops._rot_for(qfn, None, "2", (0.0, 1.0)) == 90.0
+    # A two-pad part is still aimed pad to pad, and on its centre line.
+    assert ops._rot_for(resistor, "1", "2", (1.0, 0.0)) == pytest.approx(31.0, abs=0.1)
+    assert ops._rot_for(resistor, None, "2", (1.0, 0.0)) == pytest.approx(31.0, abs=0.1)
 
 
 @pytest.mark.parametrize("value, farads", [("100n", 100e-9), ("100nF", 100e-9), ("100n 50V", 100e-9), ("4u7", 4.7e-6),

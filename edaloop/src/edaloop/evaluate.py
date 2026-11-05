@@ -332,11 +332,16 @@ def drc_rows(ev) -> list[dict]:
     if not m:
         return [_row("known.drc", False, f"the check itself failed: {ev.summary}")]
     by = dict(sorted((m.get("by_type") or {}).items(), key=lambda kv: -kv[1])[:4])
-    hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") != "drc:unconnected"]
-    no_net = [f for f in hard if "<no net>" in f["message"]]
-    errs = len(hard) - len(no_net)
+    errs, no_net = _drc_errors(ev)
     return [_row("known.opens", m["unconnected"] == 0, f"{m['unconnected']} open connections on a board that works"),
-            _row("known.drc", errs == 0, f"{errs} rule errors against the file's own clearances, and {len(no_net)} more from footprint copper the import leaves on no net. Warnings: {by}")]
+            _row("known.drc", errs == 0, f"{errs} rule errors against the file's own clearances, and {no_net} more from footprint copper the import leaves on no net. Warnings: {by}")]
+
+
+def _drc_errors(ev) -> tuple[int, int]:
+    """Rule errors, and those of them that involve copper on no net."""
+    hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") != "drc:unconnected"]
+    no_net = sum("<no net>" in f["message"] for f in hard)
+    return len(hard) - no_net, no_net
 
 
 def checks_score(sample: dict, out: Path, chain: list | None) -> list[dict]:
@@ -371,6 +376,7 @@ def checks_score(sample: dict, out: Path, chain: list | None) -> list[dict]:
 def regenerate(sample: dict, board: Path, d: dict | None, eagle: dict, out: Path, name: str) -> list[dict]:
     """Rebuild the board from its netlist alone and hold the result against the released layout."""
     from . import compare as comparing
+    from .project import Project
     if not d or not d.get("chain"):
         return [_row("regen.layout", False, "the placer only handles RF rows, and this board has none")]
     lib = out / "imported.pretty"
@@ -383,16 +389,27 @@ def regenerate(sample: dict, board: Path, d: dict | None, eagle: dict, out: Path
     spec.write_text(yaml.safe_dump(bench, sort_keys=False))
     made = boardgen.make(spec, out / "generated", [out], True)
     if not made.get("made"):
-        return [_row("regen.layout", False, f"stopped at {made.get('stopped_at')}: {str(made.get('refused') or made.get('steps', {}).get('route'))[:300]}")]
+        route = made.get("steps", {}).get("route") or {}
+        why = made.get("refused") or made.get("missing") or route.get("stopped_because") or route
+        return [_row("regen.layout", False, f"stopped at {made.get('stopped_at')}: {str(why)[:400]}")]
     new = out / "generated" / f"{name}.kicad_pcb"
     c = comparing.compare(new, board, [row[0] for row in d["chain"]])
-    drc = made["steps"]["route"].get("final_drc") or {}
     a, b = c["first_board"], c["second_board"]
-    return [_row("regen.connects", drc.get("opens") == 0 and drc.get("errors") == 0 and c["same_connections"],
-                 f"{drc.get('opens')} opens, {drc.get('errors')} errors, and {'the same' if c['same_connections'] else 'different'} connections as the released board"),
+    return [regen_connects(Project(out / "generated").ledger.latest().get("drc"), c["same_connections"]),
             _row("regen.size", None, f"{a['size_mm']} mm, released {b['size_mm']} mm"),
             _row("regen.rf", None, f"RF {sum(a['rf_mm'].values()):.2f} mm with {a['rf_vias']} vias, released {sum(b['rf_mm'].values()):.2f} mm with {b['rf_vias']} vias"),
             _row("regen.copper", None, f"{a['copper_mm']} mm of copper and {a['vias']} vias, released {b['copper_mm']} mm and {b['vias']}")]
+
+
+def regen_connects(ev, same: bool) -> dict:
+    """Whether the rebuilt board is whole. Judged on the drc evidence of the finished board, after `finish` replaces the by-class route and
+    adds the stitching, not on the router's own count from before. Copper on no net comes from the released footprints and is counted apart."""
+    if ev is None or not ev.metrics:
+        return _row("regen.connects", False, f"the finished board's DRC didn't run: {ev.summary if ev else 'no drc evidence'}")
+    errs, no_net = _drc_errors(ev)
+    opens = ev.metrics["unconnected"]
+    return _row("regen.connects", opens == 0 and errs == 0 and same,
+                f"{opens} opens, {errs} errors and {no_net} more from footprint copper on no net, and {'the same' if same else 'different'} connections as the released board")
 
 
 def evaluate_one(key: str, sample: dict, work: Path, level: str) -> dict:

@@ -198,6 +198,10 @@ def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = 
                                  layer_costs=cfg.get("layer_costs"))
     (out / "route.log").write_text(json.dumps(routed, indent=1))
     steps["route"] = {"final_drc": routed.get("final_drc"), "rf_width": routed["rf_width_loop"][-1], "stopped_at": routed.get("stopped_at")}
+    if routed.get("stopped_at") and routed.get("steps"):
+        # Why it stopped, from the class it stopped at, so that the caller doesn't have to open route.log.
+        last = routed["steps"][-1]
+        steps["route"]["stopped_because"] = {"class": last.get("class"), "drc": last.get("drc"), "unreached": last.get("unreached")}
     if routed.get("stopped_at"):
         return {"made": False, "stopped_at": "route", "steps": steps}
     say("finish")

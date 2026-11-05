@@ -160,13 +160,19 @@ def _farads(value):
 
 
 def _rot_for(fp, a, b, direction):
-    """The rotation that points the vector from pad a to pad b, or from the origin to pad b, along a direction on the board."""
+    """The rotation that points the vector from pad a to pad b, or from the origin to pad b, along a direction on the board.
+
+    A pad on a part with more than two faces the way its side of the package does, not the way it lies from the centre. On a QFN, the
+    second pin sits well off the middle of its side, and pointing the centre-to-pad line along the board turned the part 33.8 degrees, so
+    that the line ran in across the corner of the pad beside it."""
     _pose(fp, 0, 0, 0)
     bx, by = _pad_xy(fp, b)
     ax, ay = _pad_xy(fp, a) if a is not None else (0.0, 0.0)
-    v = math.atan2(by - ay, bx - ax)
-    d = math.atan2(direction[1], direction[0])
-    return round(math.degrees(v - d) % 360, 1)
+    v = math.degrees(math.atan2(by - ay, bx - ax))
+    if a is None and len(list(fp.Pads())) > 2:
+        v = round(v / 90.0) * 90.0
+    d = math.degrees(math.atan2(direction[1], direction[0]))
+    return round((v - d) % 360, 1)
 
 
 def _pad_span(fp, rot, a, b, direction):
