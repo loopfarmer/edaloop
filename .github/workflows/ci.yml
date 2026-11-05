@@ -85,3 +85,98 @@ jobs:
           workspaces: ${{ matrix.crate }}
           key: msrv
       - run: cargo check --locked --all-targets
+
+  kicad:
+    name: KiCad 10 tools
+    runs-on: ubuntu-latest
+    # KiCad's own image, Debian with kicad-cli, its pcbnew Python, the standard footprints and ngspice.
+    # Pinned by tag and digest, so a rebuilt image arrives as a deliberate bump. Root, because the
+    # runner's workspace isn't owned by the image's kicad user.
+    container:
+      image: kicad/kicad:10.0.8@sha256:3f4a01786dfbe803a65f345c3342b765db9add913f5e9448f8356793714ddc34
+      options: --user root
+    env:
+      CARGO_TERM_COLOR: always
+      BOARDHAND_TEST_KICAD_CLI: /usr/bin/kicad-cli
+      BOARDHAND_TEST_KICAD_PY: /usr/bin/python3
+    steps:
+      # xmllint for the EAGLE DTD check (docs/exports.md). ngspice is in the image already; listed so a
+      # slimmer image fails here, not in a skipped test. A C toolchain and curl for boardhand's build.
+      - name: Install system packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential libxml2-utils ngspice
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: edaloop/uv.lock
+      # edaloop finds its tools through this file only. The image's python3 is KiCad's, with pcbnew.
+      - name: Point edaloop at the image's KiCad
+        run: |
+          mkdir -p "$HOME/.config/edaloop"
+          cat > "$HOME/.config/edaloop/toolchain.yaml" <<'EOF'
+          kicad_cli: /usr/bin/kicad-cli
+          kicad_python: /usr/bin/python3
+          ngspice: /usr/bin/ngspice
+          EOF
+      - name: Sync edaloop
+        working-directory: edaloop
+        run: uv sync --extra dev --locked --python 3.13
+      # doctor always exits 0 and lists every optional tool, so check the ones this job is for.
+      - name: edaloop doctor
+        working-directory: edaloop
+        run: |
+          uv run edaloop doctor
+          uv run edaloop --json doctor > "$RUNNER_TEMP/doctor.json"
+          python3 - "$RUNNER_TEMP/doctor.json" <<'EOF'
+          import json, sys
+          probes = {p["name"]: p for p in json.load(open(sys.argv[1]))}
+          missing = [n for n in ("kicad-cli", "pcbnew", "ngspice") if not probes.get(n, {}).get("ok")]
+          if missing:
+              sys.exit(f"doctor can't run: {', '.join(missing)}")
+          EOF
+      # Two skips remain, both for inputs that aren't freely available:
+      #  - "no pcbparts database": a local copy of the pcbparts parts catalogue, not redistributable here.
+      #  - "set EDALOOP_FOOTPRINTS": custom RF land patterns (RFLib_FP.pretty) that aren't in this repository.
+      - name: pytest with KiCad
+        working-directory: edaloop
+        run: uv run pytest -rs
+      # The KiCad-only half of the flow on the example board: build and place it, run the checks that need
+      # only KiCad, and export it, reading each format back. `edaloop make` also routes, which needs circuitRF
+      # and KiCadRoutingTools; this job doesn't install them yet, so it stops short of make.
+      # In a container job, runner.temp names the host's path; the shell's RUNNER_TEMP is the container's.
+      - name: Build gain_block_demo
+        working-directory: edaloop
+        run: |
+          echo "DEMO=$RUNNER_TEMP/demo" >> "$GITHUB_ENV"
+          uv run edaloop build testbenches/gain_block_demo.yaml -o "$RUNNER_TEMP/demo"
+      - name: KiCad checks on gain_block_demo
+        working-directory: edaloop
+        run: |
+          uv run edaloop -C "$DEMO" run project_files
+          uv run edaloop -C "$DEMO" run erc
+      - name: Export gain_block_demo
+        working-directory: edaloop
+        run: uv run edaloop -C "$DEMO" export
+      # The folder holds only the generated example board.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gain-block-demo
+          path: ${{ env.DEMO }}
+          include-hidden-files: true   # the .edaloop ledger, with each check's evidence
+          if-no-files-found: warn
+      # boardhand's tests check what it writes with real kicad-cli and pcbnew when they find them.
+      # The fixture boards are private, so those tests still print a skip notice.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: boardhand
+          key: kicad
+      - name: boardhand tests with KiCad
+        working-directory: boardhand
+        run: cargo test --locked -- --nocapture

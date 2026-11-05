@@ -218,7 +218,7 @@ fn lock_then_unlock_is_byte_identical_and_locked_footprints_refuse_to_move() {
                 json!({"board": board, "expected_revision": sha(&board), "reference": "R1", "position": {"x": 1, "y": 1}}),
             );
             assert_eq!(r["reason"], "item_locked");
-            assert!(kicad_loads(&board).is_some() || !Path::new(KICAD_CLI).exists());
+            assert!(kicad_loads(&board).is_some() || !Path::new(kicad_cli()).exists());
         }
         // Setting the same state again writes nothing.
         let before = sha(&board);
@@ -330,7 +330,7 @@ fn footprint_move_agrees_with_kicad() {
 fn footprint_zone_moves_with_its_footprint() {
     let dir = work("t5_zone");
     let Some(board) = copy_fixture(small(), &dir) else { return };
-    if !Path::new(KICAD_PY).exists() {
+    if !Path::new(kicad_py()).exists() {
         println!("NOTICE: KiCad's Python is absent, skipping");
         return;
     }

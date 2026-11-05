@@ -213,7 +213,9 @@ cd boardhand && cargo test
 uv run python benchmarks/thermal_validate.py /tmp/field-check
 ```
 
-`boardhand`'s fixture tests skip unless `BOARDHAND_FIXTURE_SMALL` and `BOARDHAND_FIXTURE_LARGE` name KiCad boards.
+`boardhand`'s fixture tests skip unless `BOARDHAND_FIXTURE_SMALL` and `BOARDHAND_FIXTURE_LARGE` name KiCad boards. Its tests check what it writes with KiCad when they find it, at macOS paths by default; set `BOARDHAND_TEST_KICAD_CLI` and `BOARDHAND_TEST_KICAD_PY` to use another install.
+
+CI's `kicad` job runs the parts that need KiCad 10, in KiCad's own Docker image: `edaloop doctor`, the Python tests, a build and export of `gain_block_demo`, and `boardhand`'s tests against real `kicad-cli` and `pcbnew`.
 
 ## Acknowledgements
 

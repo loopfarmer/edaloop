@@ -133,7 +133,7 @@ fn t8_session_preserving_protected_items_applies_and_kicad_loads_it() {
     assert!(text.contains("(at 10 22)\n\t\t(size 0.6)\n\t\t(drill 0.3)"));
     // Everything that isn't copper is unchanged.
     assert!(text.ends_with("(embedded_fonts no)\n)\n"));
-    assert!(kicad_loads(&out).is_some() || !Path::new(KICAD_CLI).exists());
+    assert!(kicad_loads(&out).is_some() || !Path::new(kicad_cli()).exists());
     let py = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nv=[t for t in b.GetTracks() if t.GetClass()=='PCB_VIA']\nprint(len(b.GetTracks()),len(v),sorted((t.GetPosition().x,t.GetPosition().y,t.GetNetname(),t.GetDrill()) for t in v))";
     if let Some(o) = pcbnew(py, &[&out]) {
         println!("t8 pcbnew: {o}");
@@ -233,7 +233,7 @@ fn t8_retain_protected_reinstates_what_the_session_omits() {
     assert_eq!(a["result"]["reinstated_protected"], 2);
     let t = fs::read_to_string(&out).unwrap();
     assert!(t.contains("20000000-0000-4000-8000-000000000001") && t.contains("20000000-0000-4000-8000-000000000003"));
-    assert!(kicad_loads(&out).is_some() || !Path::new(KICAD_CLI).exists());
+    assert!(kicad_loads(&out).is_some() || !Path::new(kicad_cli()).exists());
 }
 
 #[test]
@@ -340,14 +340,14 @@ fn route_run_with_a_fake_java() {
 #[test]
 fn real_round_trip_with_kicad_and_freerouting() {
     let jar = Path::new(&std::env::var("HOME").unwrap_or_default()).join(".kicad-mcp/freerouting.jar");
-    if !jar.exists() || !Path::new(KICAD_PY).exists() {
+    if !jar.exists() || !Path::new(kicad_py()).exists() {
         println!("NOTICE: the Freerouting jar or KiCad's Python is absent, skipping");
         return;
     }
     let dir = work("t8_real");
     let Some(board) = copy_fixture(small(), &dir) else { return };
     let exp = dir.join("exporter");
-    script(&exp, &format!("exec '{KICAD_PY}' -I -c \"import pcbnew,sys; sys.exit(0 if pcbnew.ExportSpecctraDSN(pcbnew.LoadBoard(sys.argv[1]),sys.argv[2]) else 1)\" \"$1\" \"$2\""));
+    script(&exp, &format!("exec '{}' -I -c \"import pcbnew,sys; sys.exit(0 if pcbnew.ExportSpecctraDSN(pcbnew.LoadBoard(sys.argv[1]),sys.argv[2]) else 1)\" \"$1\" \"$2\"", kicad_py()));
     let rev = sha(&board);
     // Java needs a writable home for its own log files. Keep it under target/.
     let home = dir.join("home");

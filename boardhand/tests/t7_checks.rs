@@ -40,12 +40,12 @@ fn drc_with_fake(name: &str, body: &str, extra: Value) -> (Value, Vec<String>, P
 fn t7_real_drc_on_small_copy() {
     let dir = work("t7_real");
     let Some(board) = copy_fixture(small(), &dir) else { return };
-    if !Path::new(KICAD_CLI).exists() {
+    if !Path::new(kicad_cli()).exists() {
         println!("NOTICE: kicad-cli is absent, skipping");
         return;
     }
     assert!(board.with_extension("kicad_pro").exists());
-    let mut m = Mcp::start(&dir, &[("BOARDHAND_KICAD_CLI", KICAD_CLI)]);
+    let mut m = Mcp::start(&dir, &[("BOARDHAND_KICAD_CLI", kicad_cli())]);
     m.initialize();
     m.load(json!("checks"));
     let rev = sha(&board);
@@ -72,7 +72,7 @@ fn t7_real_drc_on_small_copy() {
 fn t7_real_erc() {
     let dir = work("t7_erc");
     let src = Path::new(small()).parent().unwrap();
-    if !src.join("chain.kicad_sch").exists() || !Path::new(KICAD_CLI).exists() {
+    if !src.join("chain.kicad_sch").exists() || !Path::new(kicad_cli()).exists() {
         println!("NOTICE: schematic or kicad-cli absent, skipping");
         return;
     }
@@ -81,7 +81,7 @@ fn t7_real_erc() {
     fs::copy(src.join(format!("{stem}.kicad_sch")), &sch).unwrap();
     fs::copy(src.join("chain.kicad_sch"), dir.join("chain.kicad_sch")).unwrap();
     fs::copy(src.join(format!("{stem}.kicad_pro")), dir.join(format!("{stem}.kicad_pro"))).unwrap();
-    let mut m = Mcp::start(&dir, &[("BOARDHAND_KICAD_CLI", KICAD_CLI)]);
+    let mut m = Mcp::start(&dir, &[("BOARDHAND_KICAD_CLI", kicad_cli())]);
     m.initialize();
     m.load(json!("checks"));
     let (r, is_err) = m.call_full("erc_run", json!({"schematic": sch}));
