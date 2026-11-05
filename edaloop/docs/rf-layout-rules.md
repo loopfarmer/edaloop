@@ -21,6 +21,40 @@ A clean DRC says nothing about any of this. These rules come from RF design revi
 | Don't tie filters at a plain node | A lossless node reflects what each filter rejects, so loss swings with phase | Your decision | `tee` |
 | State the stackup and CPWG callout to the fabricator | A width only means 50 ohm on the stackup it was solved for | `review_pack` writes `fab_notes.txt` | Review |
 
+## Why a choke's pad stays on the line
+
+On every routed demo board, `impedance` reports a 28.9 ohm section on each bias choke's 0603 land, where the 0.36 mm line runs through it. `em_hops` reads those hops at about 28.7 dB return loss, against 48 dB for the rest.
+
+### The experiment
+
+Moving the land beside the line was tried on gain_block_demo, as an experiment that wasn't kept:
+- each land sat 0.72 mm off the line, joined by a 0.36 mm stub, with its edge 0.1 mm from the line's;
+- the routed line was otherwise the same;
+- it ran through the full `edaloop make`.
+
+These are EMerge readings of copper alone, with no parts, in band (0.9 to 1.5 GHz):
+
+| | Pad on the line (as built) | Pad beside the line |
+|---|---|---|
+| `em_hops` LNA1OUT, LNA2OUT, COAX | 28.7, 28.6, 28.7 dB | 25.0, 24.9, 25.0 dB |
+| `em_hops` IN, LNA1IN, LNA2IN | 48.2, 47.9, 48.4 dB | 48.2, 48.3, 48.4 dB |
+| Worst-case insertion loss, summed along the chain | 0.112 dB | 0.149 dB |
+| `impedance` | warn, on each choke's land | pass |
+| `rf_path` | pass, 0.01% over its floor | fail, 7.46% over |
+
+### Why it was worse
+
+Beside the line it's worse by about 3.7 dB:
+- **What loads the line is the land's area over In1.Cu,** 0.21 mm below.
+- **On the line,** about 0.34 mm² of the land's 0.83 mm² is the line's own copper, so the land adds about 0.49 mm².
+- **Beside the line,** the whole land and the stub are added, about 0.87 mm². That's a rough area count, not a solve, but it points the same way as the solve.
+- **The stub is far too short to isolate the land.** At 0.1 mm, it does nothing at 1.5 GHz.
+- **`impedance` misleads here.** It passes only because a cross-section of the line no longer crosses the land.
+
+### What might help
+
+To lower a choke's load, the copper under it has to change: a smaller land, or `layout.tap_plane_void_mm`, which clears the plane under it and so is your call. Neither has been measured.
+
 ## What `em_hops` solves for each hop
 
 `em_hops` cuts a window round each RF hop from the routed board and solves it as a 2-port in EMerge through circuitRF. It holds the hop's tracks, the tap pads on the line, the ground fill and ground pads on each signal layer, the ground vias in the window, and each signal layer's reference plane. The parts aren't in it, and neither are their own lands: the track is cut where it enters each end land, and a port is a lumped sheet there. Read the result as what the routing adds to the parts' datasheet figures.
