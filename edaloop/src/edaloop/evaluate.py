@@ -133,8 +133,8 @@ def _kicad_rules(tree: list) -> dict:
     return {"clearance": min(clearances) if clearances else None, "width": min(widths) if widths else None, "edge": number(setup, "edge_clearance")}
 
 
-# Faults in text, silk or mask aren't copper faults. Castellated and edge-launch pads meet the edge on purpose, and Eagle's keepouts import as rule areas that pads legitimately sit in.
-_SEVERITIES = dict(text_height="ignore", text_thickness="ignore", silk_edge_clearance="ignore", unresolved_variable="ignore", malformed_courtyard="ignore", courtyards_overlap="warning",
+# Faults in text, silk or mask aren't copper faults, and nor is a courtyard that overlaps another or holds a stitching via. Castellated and edge-launch pads meet the edge on purpose, and Eagle's keepouts import as rule areas that pads legitimately sit in.
+_SEVERITIES = dict(text_height="ignore", text_thickness="ignore", silk_edge_clearance="ignore", unresolved_variable="ignore", malformed_courtyard="ignore", courtyards_overlap="warning", pth_inside_courtyard="warning",
                    copper_edge_clearance="warning", solder_mask_bridge="warning", items_not_allowed="warning")
 # A footprint's library attributes and a fiducial's padstack aren't copper faults either, and KiCad only started checking them after these files were drawn.
 _KICAD_SEVERITIES = {**_SEVERITIES, "footprint_type_mismatch": "warning", "padstack": "warning", "drill_out_of_range": "warning", "starved_thermal": "warning"}
