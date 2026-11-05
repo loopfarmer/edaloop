@@ -8,8 +8,8 @@ description = "Board current and temperature fields from a board's own copper"
 publish = false
 
 [dependencies]
-wgpu = "27"
-pollster = "0.4"
+wgpu = "30"
+pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
