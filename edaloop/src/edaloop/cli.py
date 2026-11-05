@@ -193,7 +193,7 @@ def main(argv=None):
                 data = controller.run_all(p)
                 _out(data, args.json, lambda x: _table(x, ["check", "status", "seconds", "summary"]))
             else:
-                ev =checks.run_check(p, args.check)
+                ev = checks.run_check(p, args.check)
                 _out(ev.__dict__, args.json, lambda e: f"{e['check']}: {e['status']} - {e['summary']}" + "".join(
                     f"\n  {'waived ' if f['waived_by'] else ''}{f['severity']}: {f['message']}" for f in e['findings'][:25]))
                 return 0 if ev.status in ("pass", "warn") else 1
