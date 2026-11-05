@@ -23,8 +23,22 @@ pub fn small() -> &'static str {
 pub fn large() -> &'static str {
     fixture_path(LARGE_VAR)
 }
-pub const KICAD_CLI: &str = "/opt/homebrew/bin/kicad-cli";
-pub const KICAD_PY: &str = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3.9";
+pub const KICAD_CLI_VAR: &str = "BOARDHAND_TEST_KICAD_CLI";
+pub const KICAD_PY_VAR: &str = "BOARDHAND_TEST_KICAD_PY";
+
+fn tool_path(var: &str, default: &str) -> &'static str {
+    Box::leak(std::env::var(var).unwrap_or_else(|_| default.to_string()).into_boxed_str())
+}
+
+/// KiCad's own tools, which the tests use to check boardhand's output. A test skips its KiCad step without them.
+/// The defaults are a macOS install; set the variables to use another one, as CI does.
+pub fn kicad_cli() -> &'static str {
+    tool_path(KICAD_CLI_VAR, "/opt/homebrew/bin/kicad-cli")
+}
+
+pub fn kicad_py() -> &'static str {
+    tool_path(KICAD_PY_VAR, "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3.9")
+}
 
 pub fn work(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/fixtures").join(name);
@@ -181,11 +195,11 @@ pub fn script(path: &Path, body: &str) {
 
 /// Run a Python snippet with KiCad's own pcbnew, if it's installed.
 pub fn pcbnew(snippet: &str, args: &[&Path]) -> Option<String> {
-    if !Path::new(KICAD_PY).exists() {
+    if !Path::new(kicad_py()).exists() {
         println!("NOTICE: KiCad's Python is absent, skipping the pcbnew check");
         return None;
     }
-    let out = Command::new(KICAD_PY).arg("-I").arg("-c").arg(snippet).args(args).output().unwrap();
+    let out = Command::new(kicad_py()).arg("-I").arg("-c").arg(snippet).args(args).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "pcbnew failed: {}\n{stdout}", String::from_utf8_lossy(&out.stderr));
     Some(stdout)
@@ -193,12 +207,12 @@ pub fn pcbnew(snippet: &str, args: &[&Path]) -> Option<String> {
 
 /// KiCad itself loads this board and writes a DRC report for it. Returns the report.
 pub fn kicad_loads(board: &Path) -> Option<Value> {
-    if !Path::new(KICAD_CLI).exists() {
+    if !Path::new(kicad_cli()).exists() {
         println!("NOTICE: kicad-cli is absent, skipping the load check");
         return None;
     }
     let report = board.with_extension("drc.json");
-    let out = Command::new(KICAD_CLI)
+    let out = Command::new(kicad_cli())
         .args(["pcb", "drc", "--format", "json", "--severity-all", "--output"])
         .arg(&report)
         .arg(board)
