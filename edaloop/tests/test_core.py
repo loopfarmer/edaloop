@@ -2069,6 +2069,23 @@ def test_makers_ground_patterns_and_fence_pitch():
     assert rf_rules.fence_pitch(10.0) < 1.0                            # and a higher band tightens it
 
 
+def test_a_footprints_own_plated_ground_holes_count_as_ground_vias():
+    # KiCad's TT1224 PL-258 footprint carries the maker's vias under the body as GND pads with a drill. Once ground stopped
+    # stacking its own vias on them, the audit read the rows as empty.
+    from edaloop import rf_rules
+    pads = [_pad("U1", "1", "IN", 0.0, 0.0), _pad("U1", "6", "GND", 0.0, 2.0), _pad("U1", "3", "OUT", 2.0, 0.0), _pad("U1", "4", "GND", 2.0, 2.0)]
+    parts = {"U1": {"mpn": "RLM-63-2W+"}}
+    metrics, _ = rf_rules.audit([], {"pads": pads}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
+    assert any("between pads 1 and 6" in s for s in metrics["ground_pattern_short"])
+    holes = [{**_pad("U1", "2", "GND", 0.0, 1.0), "drill": 0.3}, {**_pad("U1", "2", "GND", 2.0, 1.0), "drill": 0.3}]
+    metrics, _ = rf_rules.audit([], {"pads": pads + holes}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
+    assert not any("row under the body" in s for s in metrics["ground_pattern_short"])
+    # An unplated hole has no net and reaches nothing.
+    npth = [{**h, "net": ""} for h in holes]
+    metrics, _ = rf_rules.audit([], {"pads": pads + npth}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
+    assert any("between pads 1 and 6" in s for s in metrics["ground_pattern_short"])
+
+
 def test_a_real_capacitor_has_inductance():
     from edaloop import rf_rules
 
