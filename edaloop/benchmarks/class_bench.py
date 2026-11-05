@@ -11,8 +11,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from edaloop import power, route_classes, toolchain                    # noqa: E402
-from edaloop.pcbfile import Board                                      # noqa: E402
+from edaloop import power, route_classes, toolchain
+from edaloop.pcbfile import Board
 
 RF_DRIVER = """
 import json, sys

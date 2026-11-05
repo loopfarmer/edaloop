@@ -48,7 +48,8 @@ def box(x, y, w, h, title, lines=(), fill=TINT, edge=LINE, title_fill=INK):
 
 def arrow(points, label=None, at=None, dash=False, anchor="middle"):
     d = "M" + " L".join(f"{x} {y}" for x, y in points)
-    out = f"<path d='{d}' fill='none' stroke='{MUTED}' stroke-width='1.5' marker-end='url(#a)'{' stroke-dasharray=\"5 4\"' if dash else ''}/>"
+    dashes = ' stroke-dasharray="5 4"' if dash else ""
+    out = f"<path d='{d}' fill='none' stroke='{MUTED}' stroke-width='1.5' marker-end='url(#a)'{dashes}/>"
     if label:
         out += text(at[0], at[1], label, 12, MUTED, anchor)
     return out

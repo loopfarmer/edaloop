@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from edaloop import route_classes, toolchain     # noqa: E402
-from edaloop.pcbfile import Board, compare_copper  # noqa: E402
+from edaloop import route_classes, toolchain
+from edaloop.pcbfile import Board, compare_copper
 
 OPS = Path(toolchain.__file__).with_name("kicad_ops.py")
 KRT_PY = Path.home() / ".cache/edaloop/krt-venv/bin/python"
