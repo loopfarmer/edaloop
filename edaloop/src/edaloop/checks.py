@@ -726,7 +726,20 @@ def em_hops(p: Project) -> Outcome:
     channels = [g for g in ([n for n in group if n in results] for group in series_groups(every)) if g]
     metrics = {"hops": results, "channels": channels, "unsolved": sorted(unsolved), "unsolved_why": unsolved, "worst_rl_db": min(rls),
                "total_il_max_db": round(max(sum(results[n]["il_max_db"] for n in g) for g in channels), 3)}
-    return Outcome({**_files(p, p.board), **_chain_files(p), "em_hops_config": _config(p, "em_hops_config"), "rf_config": _config(p, "rf_config")}, metrics, findings, {"solver": solver["solver"]})
+    # Each hop's Touchstone file, kept by net name where a person can find it, and a plot of them all.
+    kept, out = {}, p.work / "em_hops"
+    out.mkdir(parents=True, exist_ok=True)
+    for net, m in results.items():
+        src = m.pop("s2p", None)
+        if src and Path(src).exists():
+            kept[net] = shutil.copy(src, out / f"{net}.s2p")
+    artifacts = [str(Path(x).relative_to(p.root)) for x in kept.values()]
+    if kept:
+        plot = hops.sparams_svg({n: Path(x) for n, x in kept.items()}, cfg["band_ghz"][0] * 1e9, cfg["band_ghz"][1] * 1e9,
+                                out / "sparams.svg", f"{p.name}: S-parameters of each RF hop ({solver['solver']}, {solver.get('quality', '')})")
+        artifacts.append(str(plot.relative_to(p.root)))
+    return Outcome({**_files(p, p.board), **_chain_files(p), "em_hops_config": _config(p, "em_hops_config"), "rf_config": _config(p, "rf_config")}, metrics, findings,
+                   {"solver": solver["solver"]}, artifacts)
 
 
 def _rule_profile(p: Project) -> tuple[Path, dict]:
