@@ -561,7 +561,8 @@ def build_board(seed, spec_path, dst):
     for ref, part in spec["parts"].items():
         fp = _load_footprint(layout["footprints"][ref], spec["lib_dirs"])
         fp.SetReference(ref)
-        fp.SetValue(str(part.get("value", "")))
+        # As schematic.shown_value: KiCad reads a symbol's empty Value as its reference, so the footprint says the same, or parity fails.
+        fp.SetValue(str(part.get("value") or ref))
         fp.SetPath(pcbnew.KIID_PATH("/" + spec["uuids"][ref]))
         on_sheet = (spec.get("sheet_of") or {}).get(ref)
         fp.SetSheetname(on_sheet["name"] if on_sheet else "/")
