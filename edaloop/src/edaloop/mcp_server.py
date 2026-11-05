@@ -25,7 +25,20 @@ _PRIVATE = (".edaloop",)
 
 
 def _project(project_dir: str | None) -> Project:
-    return Project(Path(project_dir or os.environ.get("EDALOOP_PROJECT", ".")))
+    """The project a tool acts on: the server's own, or a board built inside it. Never a folder elsewhere.
+
+    Tools such as adopt_route, release and review_pack write into the project, so a project_dir that
+    resolves outside the write root (after symlinks and `..`) is refused rather than acted on.
+    """
+    root = _write_root()
+    if not project_dir:
+        return Project(root)
+    raw = Path(project_dir).expanduser()
+    target = (raw if raw.is_absolute() else root / raw).resolve()
+    if target != root and root not in target.parents:
+        raise ToolError(f"refused: project_dir {project_dir!r} resolves to {target}, outside {root}. "
+                        f"This server acts only on the project it was started for, and boards built inside it")
+    return Project(target)
 
 
 def _write_root() -> Path:

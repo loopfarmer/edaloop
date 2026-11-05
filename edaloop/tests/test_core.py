@@ -228,6 +228,27 @@ def _mcp(name, args=None):
     return json.loads(result.content[0].text)
 
 
+@pytest.fixture(autouse=True)
+def _mcp_root(tmp_path, monkeypatch):
+    """The MCP server acts only inside its project, which edaloop init passes as EDALOOP_PROJECT. Here that's the test's folder."""
+    monkeypatch.setenv("EDALOOP_PROJECT", str(tmp_path))
+
+
+def test_mcp_refuses_a_project_outside_its_own(tmp_path, monkeypatch):
+    inside, outside = tmp_path / "proj", tmp_path / "elsewhere"
+    for d in (inside, outside, inside / "built"):
+        d.mkdir()
+        make(d)
+    monkeypatch.setenv("EDALOOP_PROJECT", str(inside))
+    assert _mcp("gate_status", {"project_dir": str(inside / "built")})["gate"]       # a board built inside it is fine
+    assert _mcp("gate_status", {})["gate"]                                           # and so is the project itself
+    (inside / "link").symlink_to(outside)
+    for bad in (str(outside), str(inside / ".." / "elsewhere"), str(inside / "link"), "../elsewhere"):
+        for tool in ("gate_status", "release", "review_pack"):
+            assert "outside" in _mcp_refused(tool, {"project_dir": bad})
+    assert not (outside / "release").exists() and not (outside / "review").exists()
+
+
 def _mcp_refused(name, args):
     """Call a tool that must refuse: a deliberate ToolError, not a crash, with the message returned."""
     import asyncio
