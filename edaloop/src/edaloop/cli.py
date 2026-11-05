@@ -237,7 +237,7 @@ def main(argv=None):
             out = write_report(p, p.root / args.output)
             print(out)
         return 0
-    except (ProjectError, ChainSpecError, FileExistsError) as e:
+    except (ProjectError, ChainSpecError, FileExistsError, toolchain.ToolMissing) as e:
         print(f"edaloop: {e}", file=sys.stderr)
         return 2
 

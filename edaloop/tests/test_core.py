@@ -228,6 +228,27 @@ def _mcp(name, args=None):
     return json.loads(result.content[0].text)
 
 
+@pytest.fixture(autouse=True)
+def _mcp_root(tmp_path, monkeypatch):
+    """The MCP server acts only inside its project, which edaloop init passes as EDALOOP_PROJECT. Here that's the test's folder."""
+    monkeypatch.setenv("EDALOOP_PROJECT", str(tmp_path))
+
+
+def test_mcp_refuses_a_project_outside_its_own(tmp_path, monkeypatch):
+    inside, outside = tmp_path / "proj", tmp_path / "elsewhere"
+    for d in (inside, outside, inside / "built"):
+        d.mkdir()
+        make(d)
+    monkeypatch.setenv("EDALOOP_PROJECT", str(inside))
+    assert _mcp("gate_status", {"project_dir": str(inside / "built")})["gate"]       # a board built inside it is fine
+    assert _mcp("gate_status", {})["gate"]                                           # and so is the project itself
+    (inside / "link").symlink_to(outside)
+    for bad in (str(outside), str(inside / ".." / "elsewhere"), str(inside / "link"), "../elsewhere"):
+        for tool in ("gate_status", "release", "review_pack"):
+            assert "outside" in _mcp_refused(tool, {"project_dir": bad})
+    assert not (outside / "release").exists() and not (outside / "review").exists()
+
+
 def _mcp_refused(name, args):
     """Call a tool that must refuse: a deliberate ToolError, not a crash, with the message returned."""
     import asyncio
@@ -2176,3 +2197,17 @@ def test_convert_chains_reads_back_the_same_and_never_overwrites(tmp_path):
 def test_init_points_at_a_python_chain_spec_it_cannot_use(tmp_path):
     (tmp_path / "chains.py").write_text("CHAINS = []\n")
     assert init(tmp_path)["convert"] == ["edaloop convert-chains chains.py"]
+
+
+def test_a_missing_tool_is_named_not_a_raw_traceback(monkeypatch, tmp_path):
+    monkeypatch.setattr(toolchain, "paths", lambda: {"circuitrf": str(tmp_path / "nope" / "CircuitRF.Cli")})
+    with pytest.raises(toolchain.ToolMissing, match="circuitrf isn't installed.*edaloop doctor"):
+        toolchain.run([str(tmp_path / "nope" / "CircuitRF.Cli"), "--version"])
+    # Still a FileNotFoundError, so handlers written for that keep working.
+    assert issubclass(toolchain.ToolMissing, FileNotFoundError)
+    # Inside a check it's an error with the message, never a pass.
+    monkeypatch.setitem(checks.REGISTRY["project_files"], "fn",
+                        lambda p: toolchain.run([str(tmp_path / "nope" / "CircuitRF.Cli")]))
+    p = make(tmp_path)
+    ev = checks.run_check(p, "project_files")
+    assert ev.status == "error" and "circuitrf isn't installed" in ev.summary

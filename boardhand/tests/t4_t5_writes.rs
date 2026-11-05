@@ -78,6 +78,13 @@ fn t4_add_then_delete_large() {
 fn t4_kicad_loads_a_board_with_added_items() {
     let dir = work("t4_kicad");
     let Some(board) = copy_fixture(small(), &dir) else { return };
+    // Track and via counts as pcbnew reads them, before the edit and after.
+    let py = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nprint(len([t for t in b.GetTracks() if t.GetClass()=='PCB_VIA']), len(b.GetTracks()))";
+    let counts = |out: &str| -> (usize, usize) {
+        let n: Vec<usize> = out.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        (n[0], n[1])
+    };
+    let before = pcbnew(py, &[&board]).map(|o| counts(&o));
     let mut m = Mcp::start(&dir, &[]);
     m.initialize();
     m.load(json!("board_edit"));
@@ -87,9 +94,13 @@ fn t4_kicad_loads_a_board_with_added_items() {
     assert_eq!(v["outcome"], "complete", "{v}");
     assert_eq!(v["result"]["item"]["layers"], json!(["F.Cu", "B.Cu"]));
     assert!(kicad_loads(&board).is_some());
-    let py = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nprint(len([t for t in b.GetTracks() if t.GetClass()=='PCB_VIA']), len(b.GetTracks()))";
-    if let Some(out) = pcbnew(py, &[&board]) {
-        assert!(out.contains("122 142"), "{out}");
+    if let (Some(out), Some((vias, tracks))) = (pcbnew(py, &[&board]), before) {
+        // Any board: KiCad sees exactly the one via and the one track added, as well as what was there.
+        assert_eq!(counts(&out), (vias + 1, tracks + 2), "pcbnew read {out}, before the edit {vias} vias in {tracks} tracks");
+        // The original fixture's own counts, which another board can't be held to.
+        if std::env::var("BOARDHAND_FIXTURE_SMALL_IS_ORIGINAL").is_ok() {
+            assert!(out.contains("122 142"), "{out}");
+        }
     }
 }
 
@@ -130,13 +141,23 @@ fn t5_refusals_leave_the_file_unchanged() {
     // Locked items. Pick them from the reply, not from a guess.
     let t = m.call("board_tracks", json!({"board": board, "limit": 1000}));
     let items = t["result"]["items"].as_array().unwrap();
-    let locked_seg = items.iter().find(|i| i["locked"] == true && i["kind"] == "segment").expect("a locked segment");
-    let locked_via = items.iter().find(|i| i["locked"] == true && i["kind"] == "via").expect("a locked via");
-    for item in [locked_seg, locked_via] {
-        let (r, err) = m.call_full("item_delete", json!({"board": board, "expected_revision": rev, "uuid": item["uuid"]}));
-        assert!(err);
-        assert_eq!(r["reason"], "item_locked", "{r}");
-        same("item_locked");
+    let locked_seg = items.iter().find(|i| i["locked"] == true && i["kind"] == "segment");
+    let locked_via = items.iter().find(|i| i["locked"] == true && i["kind"] == "via");
+    match (locked_seg, locked_via) {
+        (Some(seg), Some(via)) => {
+            for item in [seg, via] {
+                let (r, err) = m.call_full("item_delete", json!({"board": board, "expected_revision": rev, "uuid": item["uuid"]}));
+                assert!(err);
+                assert_eq!(r["reason"], "item_locked", "{r}");
+                same("item_locked");
+            }
+        }
+        // The original fixture has both, so missing them there is a failure, not a skip.
+        _ if std::env::var("BOARDHAND_FIXTURE_SMALL_IS_ORIGINAL").is_ok() => {
+            panic!("the original fixture has a locked segment and a locked via")
+        }
+        // lock_then_unlock_is_byte_identical_and_locked_footprints_refuse_to_move covers item_locked on its own board.
+        _ => println!("NOTICE: this fixture has no locked segment and via, so item_locked isn't checked on it here"),
     }
 
     // The other named refusals.

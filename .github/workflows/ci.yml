@@ -169,7 +169,8 @@ jobs:
           include-hidden-files: true   # the .edaloop ledger, with each check's evidence
           if-no-files-found: warn
       # boardhand's tests check what it writes with real kicad-cli and pcbnew when they find them.
-      # The fixture boards are private, so those tests still print a skip notice.
+      # The small-board tests run on the gain_block_demo board built above. The original fixtures
+      # are private, so the checks of their exact contents and the large-board tests skip with a notice.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
@@ -179,4 +180,8 @@ jobs:
           key: kicad
       - name: boardhand tests with KiCad
         working-directory: boardhand
-        run: cargo test --locked -- --nocapture
+        run: |
+          BOARDHAND_FIXTURE_SMALL="$(ls "$DEMO"/*.kicad_pcb | head -n 1)"
+          test -f "$BOARDHAND_FIXTURE_SMALL"
+          export BOARDHAND_FIXTURE_SMALL
+          cargo test --locked -- --nocapture

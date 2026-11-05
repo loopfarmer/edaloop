@@ -50,10 +50,22 @@ def paths() -> dict[str, str]:
     return merged
 
 
+class ToolMissing(FileNotFoundError):
+    """An external tool that isn't where edaloop looks for it. A FileNotFoundError, so existing handlers still catch it."""
+
+
 def run(cmd, cwd=None, env=None, timeout=None) -> subprocess.CompletedProcess:
     full_env = {**os.environ, **(env or {})}
-    return subprocess.run([str(c) for c in cmd], cwd=cwd, env=full_env, timeout=timeout,
-                          capture_output=True, text=True, errors="replace")
+    try:
+        return subprocess.run([str(c) for c in cmd], cwd=cwd, env=full_env, timeout=timeout,
+                              capture_output=True, text=True, errors="replace")
+    except FileNotFoundError as e:
+        exe = str(cmd[0])
+        if cwd is not None and not Path(cwd).is_dir():
+            raise                       # the folder is what's missing, not the tool
+        name = next((k for k, v in paths().items() if str(v) == exe), Path(exe).name)
+        raise ToolMissing(f"{name} isn't installed where edaloop looks for it ({exe}). Run `edaloop doctor` "
+                          f"for how to set it up, or set {name} in ~/.config/edaloop/toolchain.yaml") from e
 
 
 def circuitrf_env() -> dict[str, str]:
