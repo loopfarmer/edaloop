@@ -111,9 +111,9 @@ def test_waived_finding_passes_but_stays_on_record(tmp_path):
 
 def test_tool_crash_is_an_error_never_a_pass(tmp_path):
     p = make(tmp_path)
-    ev = checks.run_check(p, "cascade")          # no cascade section, so it raises
-    assert ev.status == "error"
-    assert not controller.status(p)["ready_to_release"] or "cascade" not in p.gate()
+    ev = checks.run_check(p, "capture")          # no capture.kind, so it raises
+    assert ev.status == "error" and "RuntimeError" in ev.summary
+    assert not controller.status(p)["ready_to_release"] or "capture" not in p.gate()
 
 
 def test_em_refuses_draft_and_single_solver(tmp_path):
@@ -2237,3 +2237,9 @@ def test_heat_svg_carries_a_scale_in_absolute_temperature_and_the_parts(tmp_path
     assert ">U1<" in svg and "data:image/png;base64," in svg and "not a measurement" in svg
     del result["png_rise_range_c"]
     assert "no scale" in thermal.heat_svg(png, result, [-5, -5, 5, 5], board, tmp_path / "h2.svg", "demo").read_text()
+
+
+def test_cascade_with_no_stage_table_says_so_rather_than_crash(tmp_path):
+    p = make(tmp_path, "cascade: {freq_mhz: [], stages: []}\n")
+    ev = checks.run_check(p, "cascade")
+    assert ev.status == "fail" and ev.findings[0]["id"] == "cascade:no_stages" and "stages and freq_mhz" in ev.findings[0]["message"]

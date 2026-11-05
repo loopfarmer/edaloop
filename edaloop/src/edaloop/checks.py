@@ -1056,7 +1056,12 @@ def _nearest_loss(by_ghz: dict, f: float) -> float:
 def cascade(p: Project) -> Outcome:
     """Friis cascade over the band from the stage table, with the measured RF copper added as a stage."""
     cfg = p.section("cascade")
-    stages = list(cfg["stages"])
+    stages = list(cfg.get("stages") or [])
+    if not stages or not cfg.get("freq_mhz"):
+        # No table, nothing cascaded. That's a gap to fill, never a clean chain.
+        missing = " and ".join(x for x, ok in (("stages", stages), ("freq_mhz", cfg.get("freq_mhz"))) if not ok)
+        return Outcome({"stages": _config(p, "stages")}, {}, [Finding("cascade:no_stages",
+                       f"cascade has no {missing} in edaloop.yaml, so there is nothing to cascade. Add the stage table from the parts' datasheets")])
     rf = p.ledger.latest().get("rf_path")
     routed = None
     db_per_mm = cfg.get("line_loss_db_per_mm")
