@@ -190,6 +190,56 @@ def cut_shapes(net: str, tracks: list, pads: list, pours: list[Polygon], vias: l
     return shapes
 
 
+_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
+
+
+def sparams_svg(hops: dict[str, Path], low_hz: float, high_hz: float, out: Path, title: str) -> Path:
+    """Each hop's |S11| and |S21| in dB against frequency, the band shaded. Solver results for the copper alone, without the parts."""
+    import html
+    nets = list(hops)
+    data = {net: skrf.Network(str(path)) for net, path in hops.items()}
+    f_lo = min(float(n.f.min()) for n in data.values()) / 1e9
+    f_hi = max(float(n.f.max()) for n in data.values()) / 1e9
+    w, h, left, top, gap = 640, 220, 60, 56, 60
+    panels = [("|S11|, dB (return loss)", lambda n: 20 * np.log10(np.maximum(np.abs(n.s[:, 0, 0]), 1e-6))),
+              ("|S21|, dB (insertion loss)", lambda n: 20 * np.log10(np.maximum(np.abs(n.s[:, 1, 0]), 1e-6)))]
+    body = [f'<rect width="{w + left + 170}" height="{top + 2 * h + gap + 50}" fill="#fff"/>',
+            f'<text x="{left}" y="24" font-size="15" font-weight="600">{html.escape(title)}</text>']
+    for k, (label, fn) in enumerate(panels):
+        y0 = top + k * (h + gap)
+        curves = {net: (data[net].f / 1e9, fn(data[net])) for net in nets}
+        lo = min(float(c[1].min()) for c in curves.values())
+        hi = max(float(c[1].max()) for c in curves.values())
+        # A little room round the curves, and at least 0.2 dB of span, so a near-lossless line isn't drawn as flat noise.
+        pad = max(0.05 * (hi - lo), (0.2 - (hi - lo)) / 2, 0.0)
+        lo, hi = lo - pad, hi + pad
+        def x(f):
+            return left + (f - f_lo) / max(f_hi - f_lo, 1e-9) * w
+
+        def y(v, y0=y0, lo=lo, hi=hi):
+            return y0 + (hi - v) / (hi - lo) * h
+        body.append(f'<rect x="{x(low_hz / 1e9):.1f}" y="{y0}" width="{x(high_hz / 1e9) - x(low_hz / 1e9):.1f}" height="{h}" fill="#000" fill-opacity="0.05"/>')
+        body.append(f'<rect x="{left}" y="{y0}" width="{w}" height="{h}" fill="none" stroke="#222"/>')
+        body.append(f'<text x="{left}" y="{y0 - 6}" font-size="12">{label}</text>')
+        for t in range(5):
+            v = lo + (hi - lo) * t / 4
+            places = 2 if hi - lo < 1 else 1 if hi - lo < 10 else 0
+            body.append(f'<text x="{left - 6}" y="{y(v) + 4:.1f}" font-size="10" text-anchor="end">{round(v, places) + 0.0:.{places}f}</text>')
+            body.append(f'<line x1="{left}" x2="{left + w}" y1="{y(v):.1f}" y2="{y(v):.1f}" stroke="#ddd"/>')
+        for t in range(5):
+            f = f_lo + (f_hi - f_lo) * t / 4
+            body.append(f'<text x="{x(f):.1f}" y="{y0 + h + 14}" font-size="10" text-anchor="middle">{f:.2f}</text>')
+        for i, (fs, vs) in enumerate(curves.values()):
+            pts = " ".join(f"{x(float(a)):.1f},{y(float(b)):.1f}" for a, b in zip(fs, vs))
+            body.append(f'<polyline points="{pts}" fill="none" stroke="{_PALETTE[i % len(_PALETTE)]}" stroke-width="1.6"/>')
+    for i, net in enumerate(nets):
+        body.append(f'<line x1="{left + w + 16}" x2="{left + w + 36}" y1="{top + 10 + 18 * i}" y2="{top + 10 + 18 * i}" stroke="{_PALETTE[i % len(_PALETTE)]}" stroke-width="2"/>')
+        body.append(f'<text x="{left + w + 42}" y="{top + 14 + 18 * i}" font-size="11">{html.escape(net)}</text>')
+    body.append(f'<text x="{left}" y="{top + 2 * h + gap + 34}" font-size="11" fill="#444">GHz. Shaded: the band. Each hop solved alone, copper without its parts: a solver result, not a measurement</text>')
+    out.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{w + left + 170}" height="{top + 2 * h + gap + 50}" font-family="sans-serif">{"".join(body)}</svg>\n')
+    return out
+
+
 def hop_metrics(s2p: Path, low_hz: float, high_hz: float) -> dict:
     n = skrf.Network(str(s2p))
     use = (n.f >= low_hz * 0.999) & (n.f <= high_hz * 1.001)
@@ -313,7 +363,8 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
             s2p, seconds = result
             kept_log = ws / f"{solver_label}.log"
             narrowed = kept_log.exists() and "curved edge" in kept_log.read_text()
-            found[net] = {**hop_metrics(s2p, low, high), "seconds": seconds, "port_narrowed": narrowed, "window_mm": list(size), "vias": via_count, "digest": digest}
+            found[net] = {**hop_metrics(s2p, low, high), "seconds": seconds, "port_narrowed": narrowed, "window_mm": list(size), "vias": via_count, "digest": digest,
+                          "s2p": str(s2p)}
         return found
 
     out = solve_all(chains, margin)

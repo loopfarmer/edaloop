@@ -2585,3 +2585,21 @@ def test_a_missing_rule_pack_says_where_to_point(tmp_path, monkeypatch):
     ev = checks.run_check(p, "rules")
     assert ev.status == "error" and "summit_standard.yaml" in ev.summary
     assert "Set rule_pack in the toolchain config" in ev.summary      # where to point edaloop, not a bare FileNotFoundError
+
+
+def test_em_hops_plots_each_hops_sparameters(tmp_path):
+    import numpy as np
+    import skrf
+
+    from edaloop import em_hops
+    freq = skrf.Frequency(0.9, 1.6, 8, "GHz")
+    paths = {}
+    for net, gamma in (("IN", 0.004), ("OUT", 0.035)):
+        s = np.zeros((8, 2, 2), complex)
+        s[:, 0, 0] = s[:, 1, 1] = gamma
+        s[:, 0, 1] = s[:, 1, 0] = 0.998
+        paths[net] = tmp_path / f"{net}.s2p"
+        skrf.Network(frequency=freq, s=s).write_touchstone(str(paths[net].with_suffix("")))
+    svg = em_hops.sparams_svg(paths, 1.0e9, 1.5e9, tmp_path / "s.svg", "demo").read_text()
+    assert svg.count("<polyline") == 4 and ">IN<" in svg and ">OUT<" in svg     # S11 and S21 for each hop
+    assert not re.search(r">-0\.0+<", svg) and "not a measurement" in svg     # no negative zero on a tick
