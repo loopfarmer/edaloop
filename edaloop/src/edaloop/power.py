@@ -62,6 +62,18 @@ class RailResult:
     vias: int
 
 
+def pad_layers(all_pads: list[dict], copper_layers: list[str]) -> dict[str, tuple]:
+    """Each pad's copper layers, as solve_rail needs them. `*.Cu` is every copper layer: a through-hole pad joins copper on
+    each one, so a supply that leaves its connector on an inner layer still reaches it."""
+    out = {}
+    for p in all_pads:
+        layers = set()
+        for lyr in p.get("layers") or []:
+            layers |= set(copper_layers) if lyr == "*.Cu" else {lyr}
+        out[p["name"]] = tuple(sorted(layers))
+    return out
+
+
 def solve_rail(net: str, tracks: list, pads: dict, source: str, loads: dict, *, thickness_um: dict,
                board_height_mm: float, outer_layers=("F.Cu", "B.Cu"), pad_layer_map: dict | None = None) -> RailResult:
     """Solve one rail. pads: "REF.PIN" -> (x, y, half_w, half_h). loads: "REF.PIN" -> amps."""
