@@ -238,3 +238,66 @@ def run_field(problem: dict, work: Path, backend: str = "cpu", png: Path | None 
     if r.returncode not in (0, 1) or not out.exists():
         raise RuntimeError(f"boardfield failed with exit {r.returncode}: {r.stderr.strip()[-300:]}")
     return json.loads(out.read_text())[-1]
+
+
+def _ramp(t: float) -> str:
+    """boardfield's dark-to-hot ramp, so the scale matches the picture."""
+    r, g, b = min(t * 2.2, 1.0), min(max((t - 0.4) * 2.0, 0.0), 1.0), min(max((t - 0.75) * 4.0, 0.0), 1.0)
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(20 + b * 235):02x}"
+
+
+def heat_svg(png: Path, result: dict, bbox: list[float], board_path: Path, out: Path, title: str) -> Path:
+    """The heat map with what makes it readable: the board edge, each part and its reference, the hotspot, and a scale in C.
+
+    The colours are boardfield's own picture. The scale runs from the coolest cell to the hottest, as the picture does,
+    so it reads only when boardfield reported that range.
+    """
+    import base64
+    import html
+    lo, hi = result.get("png_rise_range_c") or (None, None)
+    ambient = float(result.get("hotspot", {}).get("temp_c", 0) - result.get("hotspot", {}).get("rise_c", 0))
+    x1, y1, x2, y2 = bbox
+    scale = 640 / max(x2 - x1, 1e-6)                     # px per mm
+    w, h = (x2 - x1) * scale, (y2 - y1) * scale
+    pad, bar = 40, 90
+    width, height = w + 2 * pad + bar, h + 2 * pad + 30
+    def at(x, y):
+        return pad + (x - x1) * scale, pad + 30 + (y - y1) * scale
+    image = base64.b64encode(Path(png).read_bytes()).decode()
+    parts: dict[str, list] = {}
+    for p in Board(board_path).all_pads():
+        parts.setdefault(p["name"].split(".")[0], []).append(p)
+    body = [f'<rect width="{width:.0f}" height="{height:.0f}" fill="#ffffff"/>',
+            f'<text x="{pad}" y="24" font-size="15" font-weight="600">{html.escape(title)}</text>',
+            f'<image x="{pad}" y="{pad + 30}" width="{w:.1f}" height="{h:.1f}" preserveAspectRatio="none" style="image-rendering:pixelated" '
+            f'href="data:image/png;base64,{image}"/>',
+            f'<rect x="{pad}" y="{pad + 30}" width="{w:.1f}" height="{h:.1f}" fill="none" stroke="#222" stroke-width="1.5"/>']
+    for ref, pads in sorted(parts.items()):
+        xs = [q["x"] - q["hw"] for q in pads] + [q["x"] + q["hw"] for q in pads]
+        ys = [q["y"] - q["hh"] for q in pads] + [q["y"] + q["hh"] for q in pads]
+        (ax, ay), (bx, by) = at(min(xs), min(ys)), at(max(xs), max(ys))
+        body.append(f'<rect x="{ax:.1f}" y="{ay:.1f}" width="{bx - ax:.1f}" height="{by - ay:.1f}" fill="none" stroke="#fff" stroke-opacity="0.8" stroke-width="1"/>')
+        body.append(f'<text x="{(ax + bx) / 2:.1f}" y="{ay - 3:.1f}" font-size="10" text-anchor="middle" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke">{html.escape(ref)}</text>')
+    spot = result.get("hotspot") or {}
+    if spot:
+        sx, sy = at(spot["x"], spot["y"])
+        body.append(f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="6" fill="none" stroke="#00e0ff" stroke-width="2"/>')
+        body.append(f'<text x="{sx + 9:.1f}" y="{sy + 4:.1f}" font-size="11" fill="#00e0ff" stroke="#000" stroke-width="2.5" paint-order="stroke">'
+                    f'{spot["temp_c"]:.1f} C, rise {spot["rise_c"]:.1f} C</text>')
+    bx0, by0 = pad + w + 20, pad + 30
+    stops = "".join(f'<stop offset="{k / 10:.1f}" stop-color="{_ramp(1 - k / 10)}"/>' for k in range(11))
+    body.append(f'<defs><linearGradient id="ramp" x1="0" y1="0" x2="0" y2="1">{stops}</linearGradient></defs>')
+    body.append(f'<rect x="{bx0}" y="{by0}" width="18" height="{h:.1f}" fill="url(#ramp)" stroke="#222"/>')
+    if lo is not None:
+        for k in range(5):
+            t = k / 4
+            y = by0 + h * (1 - t)
+            rise = lo + (hi - lo) * t
+            body.append(f'<text x="{bx0 + 24}" y="{y + 4:.1f}" font-size="11">{ambient + rise:.1f} C</text>')
+            body.append(f'<text x="{bx0 + 24}" y="{y + 16:.1f}" font-size="9" fill="#666">rise {rise:.1f}</text>')
+    else:
+        body.append(f'<text x="{bx0 + 24}" y="{by0 + 12}" font-size="11">no scale: boardfield gave no range</text>')
+    body.append(f'<text x="{pad}" y="{height - 10:.0f}" font-size="11" fill="#444">{x2 - x1:.1f} x {y2 - y1:.1f} mm, {ambient:.0f} C ambient. '
+                f'Hottest layer at each point. A solver estimate, not a measurement</text>')
+    out.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0f}" height="{height:.0f}" font-family="sans-serif">{"".join(body)}</svg>\n')
+    return out

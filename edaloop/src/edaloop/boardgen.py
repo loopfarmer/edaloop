@@ -202,11 +202,17 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
         raise BuildError(f"{out} isn't empty. Build into a new folder, so that no routed board is overwritten")
     libs = {f.split(":")[0] for f in bench["layout"]["footprints"].values()}
     table = []
+    copied = set()
     for root in footprint_dirs:
-        for lib in sorted(libs):
+        for lib in sorted(libs - copied):
             if (Path(root) / f"{lib}.pretty").is_dir():
                 shutil.copytree(Path(root) / f"{lib}.pretty", out / f"{lib}.pretty")
                 table.append(f'  (lib (name "{lib}")(type "KiCad")(uri "${{KIPRJMOD}}/{lib}.pretty")(options "")(descr ""))')
+                copied.add(lib)
+    # KiCad's own libraries are listed through its path variable, not copied. Without them the project names
+    # footprints it can't find, and ERC reports every one, though the board was placed from them.
+    for lib in sorted(libs - copied):
+        table.append(f'  (lib (name "{lib}")(type "KiCad")(uri "${{KICAD10_FOOTPRINT_DIR}}/{lib}.pretty")(options "")(descr "KiCad standard library"))')
     (out / "fp-lib-table").write_text("(fp_lib_table\n  (version 7)\n" + "\n".join(table) + "\n)\n")
     sheets = drawing.project_sheets(bench, name)
     for filename, text in sheets["files"].items():

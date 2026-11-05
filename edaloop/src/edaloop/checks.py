@@ -209,7 +209,7 @@ def rf_reference(p: Project) -> Outcome:
     nets = set(_chain_nets(p))
     rf = [t for t in board.tracks if t.net in nets and t.kind != "via"]
     intruders = [t for t in board.tracks if t.layer in ref_layers and t.kind != "via" and t.net not in ground]
-    findings = []
+    findings = _no_rf_copper("rf_reference", nets, rf)
     for t in intruders:
         for line in rf:
             if _segments_within(t, line, margin + t.width / 2 + line.width / 2):
@@ -247,6 +247,8 @@ def rf_layout(p: Project) -> Outcome:
     band = tuple(hops) if hops else (float((p.section("rf").get("impedance") or {}).get("max_freq_ghz", 3.0)),) * 2
     metrics, found = rf_rules.audit(board.tracks, facts, chains, p.section("power").get("rails") or [], parts, band, reference,
                                     json.loads(covered.read_text()), len(board.copper_thickness_um()) or 2, cfg)
+    rf_nets = {row[0] for row in chains}
+    found = [(f.id, f.message, f.severity) for f in _no_rf_copper("rf_layout", rf_nets, [t for t in board.tracks if t.net in rf_nets and t.kind != "via"])] + list(found)
     return Outcome({**_files(p, p.board, src, described), "rf_layout_config": _config(p, "rf_layout_config"),
                     "rf_config": _config(p, "rf_config"), "power_config": _config(p, "power_config"),
                     "em_hops_config": _config(p, "em_hops_config"), "route_config": _config(p, "route_config")},
@@ -282,6 +284,15 @@ import rf_path
 chains, _, _ = rf_path.load_chains(sys.argv[3])
 print(json.dumps(rf_path.measure(rf_path.Board(sys.argv[2]), chains), default=str))
 """
+
+
+def _no_rf_copper(check: str, nets, rf_tracks) -> list[Finding]:
+    """An RF check with no RF copper to read has measured nothing, and must say so rather than pass."""
+    unrouted = sorted(set(nets) - {t.net for t in rf_tracks})
+    if not unrouted:
+        return []
+    return [Finding(f"{check}:unrouted", f"no copper on {len(unrouted)} RF net(s), so nothing was measured there: "
+                    + ", ".join(unrouted[:8]) + (" and more" if len(unrouted) > 8 else "") + ". Route the board first")]
 
 
 def _segments_within(a, b, limit: float) -> bool:
@@ -581,6 +592,8 @@ def thermal_field(p: Project) -> Outcome:
     problem = thermal.export_problem(filled, rails, cfg.get("parts"), settings)
     png = p.work / "thermal_field.png"
     o = thermal.run_field(problem, p.work / "thermal", cfg.get("backend", "cpu"), png)
+    # The picture is a reading's companion, not the reading: a missing PNG leaves the measurement standing, without the plot.
+    svgs = [thermal.heat_svg(png, o, problem["bbox"], filled, p.work / "thermal_field.svg", f"{p.name}: rail current only")] if png.exists() else []
     findings = []
     limit = float(cfg.get("max_rise_c", p.section("power").get("max_rise_c", 10)))
     hot = o["hotspot"]
@@ -618,6 +631,9 @@ def thermal_field(p: Project) -> Outcome:
             heated = {**problem, "parts": [*(problem.get("parts") or []), *thermal.heated_parts(problem["pads"], heat)],
                       "settings": {**problem["settings"], "h_w_m2k": part_h}}
             warm = thermal.run_field(heated, p.work / "thermal_parts", cfg.get("backend", "cpu"), p.work / "thermal_parts.png")
+            if (p.work / "thermal_parts.png").exists():
+                svgs.append(thermal.heat_svg(p.work / "thermal_parts.png", warm, problem["bbox"], filled, p.work / "thermal_parts.svg",
+                                             f"{p.name}: with part heat (upper estimate)"))
             top = warm["hotspot"]
             metrics.update(part_heat=heat, part_watts_total=round(sum(h["watts"] for h in heat.values()), 4), part_rise_c=round(top["rise_c"], 2), part_hotspot=top,
                            part_h_w_m2k=part_h, part_method="stated DC current times supply, all as heat, on the board under the part, in still air with no conduction out through connectors. Junction temperature is higher")
@@ -632,7 +648,7 @@ def thermal_field(p: Project) -> Outcome:
             elif top["rise_c"] > float(part_limit):
                 findings.append(Finding("thermal_field:part_rise", f"{where}, limit {part_limit} C"))
     inputs = {**_files(p, p.board, p.project_file), "thermal_config": _config(p, "thermal_config")}
-    return Outcome(inputs, metrics, findings, {"boardfield": o["device"]}, [str(png.relative_to(p.root))])
+    return Outcome(inputs, metrics, findings, {"boardfield": o["device"]}, [str(x.relative_to(p.root)) for x in (png, *svgs) if x.exists()])
 
 
 @check("em_fast", "route")

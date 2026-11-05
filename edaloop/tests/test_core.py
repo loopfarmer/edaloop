@@ -2211,3 +2211,29 @@ def test_a_missing_tool_is_named_not_a_raw_traceback(monkeypatch, tmp_path):
     p = make(tmp_path)
     ev = checks.run_check(p, "project_files")
     assert ev.status == "error" and "circuitrf isn't installed" in ev.summary
+
+
+def test_rf_checks_with_no_rf_copper_say_so_rather_than_pass(tmp_path):
+    # An RF net in the chain spec with no copper on the board: a placed but unrouted board.
+    (tmp_path / "c.yaml").write_text('chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n  - {net: RF2, entry: J2.2, exit: J3.1}\n')
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
+    ev = checks.run_check(p, "rf_reference")
+    assert ev.status == "fail" and any(f["id"] == "rf_reference:unrouted" and "RF2" in f["message"] for f in ev.findings)
+    assert checks._no_rf_copper("x", {"RF"}, Board(tmp_path / "b.kicad_pcb").tracks) == []
+
+
+def test_heat_svg_carries_a_scale_in_absolute_temperature_and_the_parts(tmp_path):
+    import base64
+
+    from edaloop import thermal
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text(PCB.replace('(footprint "x"', '(footprint "x" (at 0 0) (property "Reference" "U1" (at 0 0 0))').replace(
+        'smd rect (net', 'smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net'))
+    png = tmp_path / "heat.png"     # a 1x1 PNG: the renderer embeds whatever boardfield drew
+    png.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"))
+    result = {"png_rise_range_c": [2.0, 12.0], "hotspot": {"x": 0.0, "y": 0.0, "temp_c": 37.0, "rise_c": 12.0}}
+    svg = thermal.heat_svg(png, result, [-5, -5, 5, 5], board, tmp_path / "heat.svg", "demo").read_text()
+    assert "37.0 C" in svg and "27.0 C" in svg and "rise 2.0" in svg          # ambient 25 C plus the rise, both shown
+    assert ">U1<" in svg and "data:image/png;base64," in svg and "not a measurement" in svg
+    del result["png_rise_range_c"]
+    assert "no scale" in thermal.heat_svg(png, result, [-5, -5, 5, 5], board, tmp_path / "h2.svg", "demo").read_text()
