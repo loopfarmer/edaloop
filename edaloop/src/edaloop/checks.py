@@ -177,7 +177,8 @@ def drc(p: Project) -> Outcome:
             d = this                # the worst run is the evidence
     findings = []
     for v in d["violations"]:
-        where = v["items"][0]["description"] if v.get("items") else ""
+        # Every item, not just the first: which side is on no net, or is a hole, decides what the violation means.
+        where = " and ".join(i.get("description", "")[:70] for i in v.get("items", []))
         sev = "error" if v["severity"] == "error" else "warning"
         findings.append(Finding(f"drc:{v['type']}", f"{v['description']} - {where}"[:240], sev))
     open_nets = collections.Counter()
@@ -722,7 +723,11 @@ def em_hops(p: Project) -> Outcome:
 def _rule_profile(p: Project) -> tuple[Path, dict]:
     cfg = p.section("rules")
     pack = Path(cfg.get("pack") or toolchain.paths()["rule_pack"]).expanduser()
-    return pack, yaml.safe_load((pack / cfg.get("profile", "manufacture/summit_standard.yaml")).read_text())
+    profile = pack / cfg.get("profile", "manufacture/summit_standard.yaml")
+    if not profile.exists():
+        # The pack is optional, so its absence is common. Say which file and where to point edaloop, rather than a bare FileNotFoundError.
+        raise FileNotFoundError(f"no fabricator rule profile at {profile}. Set rule_pack in the toolchain config, or rules.pack and rules.profile in edaloop.yaml")
+    return pack, yaml.safe_load(profile.read_text())
 
 
 @check("rules", "verify")
