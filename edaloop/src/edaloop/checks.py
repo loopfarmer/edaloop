@@ -177,7 +177,8 @@ def drc(p: Project) -> Outcome:
             d = this                # the worst run is the evidence
     findings = []
     for v in d["violations"]:
-        where = v["items"][0]["description"] if v.get("items") else ""
+        # Name every item: a clearance fault is between two things, and the second can be what explains it, as copper on no net.
+        where = " and ".join(i.get("description", "") for i in v.get("items", []))
         sev = "error" if v["severity"] == "error" else "warning"
         findings.append(Finding(f"drc:{v['type']}", f"{v['description']} - {where}"[:240], sev))
     open_nets = collections.Counter()
@@ -699,7 +700,7 @@ def em_hops(p: Project) -> Outcome:
         findings.append(Finding(f"em_hops:{net}:unsolved", f"{net}: the solver gave no result, so this hop is unchecked: {m['unsolved']}"))
     results = {net: m for net, m in results.items() if net not in unsolved}
     if not results:
-        raise RuntimeError(f"no hop solved. First: {next(iter(unsolved.values()))['unsolved'] if unsolved else 'no RF hops found'}")
+        raise RuntimeError("no hop solved. " + ("; ".join(f"{net}: {m['unsolved'][:160]}" for net, m in unsolved.items()) if unsolved else "No RF hops found"))
     for net, m in results.items():
         # All of the signal comes back and none gets through: the copper in the model isn't joined up, whatever the board does.
         if m["rl_db"] < 1.0 and m["il_max_db"] > 20.0:
@@ -720,7 +721,11 @@ def em_hops(p: Project) -> Outcome:
 def _rule_profile(p: Project) -> tuple[Path, dict]:
     cfg = p.section("rules")
     pack = Path(cfg.get("pack") or toolchain.paths()["rule_pack"]).expanduser()
-    return pack, yaml.safe_load((pack / cfg.get("profile", "manufacture/summit_standard.yaml")).read_text())
+    profile = pack / cfg.get("profile", "manufacture/summit_standard.yaml")
+    if not profile.is_file():
+        raise toolchain.ToolMissing(f"no fabricator profile at {profile}, so the fabricator limits can't be read. The rule pack is optional: set `rule_pack` "
+                           "in the toolchain file or `rules.pack` and `rules.profile` in edaloop.yaml, or leave `rules` out of the gate")
+    return pack, yaml.safe_load(profile.read_text())
 
 
 @check("rules", "verify")

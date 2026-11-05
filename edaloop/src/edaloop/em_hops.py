@@ -105,8 +105,11 @@ def plane_voids(board, layer: str) -> list[Polygon]:
 
 
 def cut_shapes(net: str, tracks: list, pads: list, pours: list[Polygon], vias: list[tuple], window, signal: int, reference: int,
-               entry: dict, leave: dict, voids: list[Polygon] | None = None, below: int | None = None) -> list[dict]:
-    """Clay shapes for one hop. Coordinates in, board mm. Coordinates out, clay database units with y flipped."""
+               entry: dict, leave: dict, voids: list[Polygon] | None = None, below: int | None = None, vias_on: int | None = None) -> list[dict]:
+    """Clay shapes for one hop. Coordinates in, board mm. Coordinates out, clay database units with y flipped. `vias_on` is the via drawing
+    layer from `via_layer`, and is needed whenever there are vias."""
+    if vias and vias_on is None:
+        raise ValueError("ground vias need the stackup's via layer, or the solver reads them as inert")
     def xy(points) -> list[int]:
         return [int(round(v)) for p in points for v in (p[0] * 1000 * UM, -p[1] * 1000 * UM)]
 
@@ -143,7 +146,7 @@ def cut_shapes(net: str, tracks: list, pads: list, pours: list[Polygon], vias: l
         shapes.append(polygon(window, reference, "GND"))
     for x, y in vias:
         shapes.append({"$type": "Via", "X": int(round(x * 1000 * UM)), "Y": int(round(-y * 1000 * UM)), "PadSize": int(ground.VIA * 1000 * UM),
-                       "DrillSize": int(ground.DRILL * 1000 * UM), "LandingLayer": _layer(signal), "Layer": _layer(-11), "Net": "GND"})
+                       "DrillSize": int(ground.DRILL * 1000 * UM), "LandingLayer": _layer(signal), "Layer": _layer(vias_on), "Net": "GND"})
     span = math.dist((entry["x"], entry["y"]), (leave["x"], leave["y"])) or 1.0
     d = ((leave["x"] - entry["x"]) / span, (leave["y"] - entry["y"]) / span)
     for text, pad, chord in (("1", entry, d), ("2", leave, (-d[0], -d[1]))):
@@ -167,8 +170,8 @@ def hop_metrics(s2p: Path, low_hz: float, high_hz: float) -> dict:
             "il_by_ghz": {f"{f / 1e9:.3f}": round(float(v), 3) for f, v in zip(n.f[use], il)}}
 
 
-def _pours_and_vias(p) -> tuple[list[Polygon], list[tuple], dict]:
-    """Fills, vias and technology as circuitRF imports them, which is the same reading every EM check uses."""
+def _pours_and_vias(p) -> tuple[dict[int, list[Polygon]], list[tuple], dict]:
+    """Ground fills by clay layer, vias and technology as circuitRF imports them, which is the same reading every EM check uses."""
     tp = toolchain.paths()
     cells = p.work / "hop_cells"
     shutil.rmtree(cells, ignore_errors=True)
@@ -179,15 +182,13 @@ def _pours_and_vias(p) -> tuple[list[Polygon], list[tuple], dict]:
         raise RuntimeError("circuitRF couldn't import the board")
     data = json.loads(clay.read_text())
     tech = json.loads(tech_file.read_text())
-    signal = None
-    pours, vias = [], []
+    pours, vias = {}, []
     keys = {x["Name"]: x["DrawingLayers"][0]["Layer"] for x in tech["Stackup"]["Layers"] if x.get("Kind") == "Conductor"}
-    signal = keys["F.Cu"]
     for shape in data["Shapes"]:
-        if shape["$type"] == "Poly" and shape.get("Net") == "GND" and shape["Layer"]["Layer"] == signal:
+        if shape["$type"] == "Poly" and shape.get("Net") == "GND":
             q = shape["Xy"]
             poly = Polygon([(q[i] / UM / 1000, -q[i + 1] / UM / 1000) for i in range(0, len(q), 2)]).buffer(0)
-            pours.append(poly)
+            pours.setdefault(shape["Layer"]["Layer"], []).append(poly)
         elif shape["$type"] == "Via" and shape.get("Net") == "GND":
             vias.append((shape["X"] / UM / 1000, -shape["Y"] / UM / 1000))
     return pours, vias, {"tech": tech, "keys": keys}
@@ -195,6 +196,49 @@ def _pours_and_vias(p) -> tuple[list[Polygon], list[tuple], dict]:
 
 class OffLayer(Exception):
     """A hop this model can't represent."""
+
+
+def via_layer(tech: dict, signal: str, reference: str) -> int:
+    """The drawing layer of a via that joins the signal layer to its reference plane. circuitRF reads a via by its drawing layer, and one drawn
+    on a layer no via entry claims is inert in EM extraction, so a guessed layer number would solve the hop with no ground vias at all."""
+    conductors = [x["Name"] for x in tech["Stackup"]["Layers"] if x.get("Kind") == "Conductor"]
+    want = {conductors.index(signal), conductors.index(reference)}
+    for entry in (x for x in tech["Stackup"]["Layers"] if x.get("Kind") == "Via" and x.get("DrawingLayers")):
+        span = [conductors.index(n) for n in (entry.get("SpanFromLayer"), entry.get("SpanToLayer")) if n in conductors]
+        if len(span) == 2 and min(span) <= min(want) and max(want) <= max(span):
+            return entry["DrawingLayers"][0]["Layer"]
+    raise OffLayer(f"the stackup has no via joining {signal} to {reference}, so its ground vias can't be modelled")
+
+
+def on_layer(pad: dict, layer: str) -> bool:
+    """Whether a pad has copper on an outer layer. A drilled pad has it on both."""
+    return bool(pad.get("drill")) or bool(pad.get("back") if layer == "B.Cu" else pad.get("front", True))
+
+
+def hop_layers(net: str, tracks: list, ends: tuple[dict, dict], names: list[str], cfg: dict) -> tuple[str, str, str | None, bool]:
+    """The hop's signal layer, its reference plane, the plane past that, and whether the reference is assumed rather than configured.
+
+    The model is one outer signal layer over a plane. A hop on F.Cu is referenced to `reference_layer`, In1.Cu by default on a board with
+    inner layers. A hop wholly on B.Cu is the same picture upside down: `bottom_reference_layer` if set, otherwise the mirror of the top's,
+    which is an assumption about the stackup and is marked as one."""
+    layers = {t.layer for t in tracks if t.kind != "via"}
+    if any(t.kind == "via" for t in tracks) or len(layers) > 1:
+        # One signal layer over a plane, so a hop through a via would be drawn as two pieces with an open between them.
+        raise OffLayer(f"it changes layer ({', '.join(sorted(layers))}) through a via, and this model only has one signal layer")
+    if not layers:
+        layers = {"B.Cu"} if all(on_layer(x, "B.Cu") and not on_layer(x, "F.Cu") for x in ends) else {"F.Cu"}
+    signal = next(iter(layers))
+    if names[0] != "F.Cu" or names[-1] != "B.Cu" or signal not in ("F.Cu", "B.Cu"):
+        raise OffLayer(f"it runs on {signal}, and this model only has an outer signal layer over a plane")
+    top = cfg.get("reference_layer") or ("In1.Cu" if "In1.Cu" in names else "B.Cu")
+    if signal == "F.Cu":
+        i = names.index(top)
+        return signal, top, names[i + 1] if i + 1 < len(names) else None, False
+    reference = cfg.get("bottom_reference_layer") or names[len(names) - 1 - names.index(top)]
+    if reference == signal:
+        raise OffLayer(f"its reference plane would be {reference}, the layer it runs on")
+    i = names.index(reference)
+    return signal, reference, names[i - 1] if i > 0 else None, not cfg.get("bottom_reference_layer")
 
 
 def solve_unique(jobs: dict[str, Path], solve, workers: int) -> dict:
@@ -216,27 +260,23 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
     pours, vias, tech = _pours_and_vias(p)
     margin = float(cfg.get("margin_mm", 2.5))
     low, high = float(cfg["band_ghz"][0]) * 1e9, float(cfg["band_ghz"][1]) * 1e9
-    # In1 on a board with inner layers, and the far side on a 2-layer board.
-    reference = cfg.get("reference_layer") or ("In1.Cu" if "In1.Cu" in tech["keys"] else "B.Cu")
-    voids = plane_voids(board, reference)
     names = list(tech["keys"])
-    below = tech["keys"][names[names.index(reference) + 1]] if names.index(reference) + 1 < len(names) else None
+    keys = tech["keys"]
 
     def prepare(net, entry, leave, reach) -> tuple:
         ends = (named[f"{entry[0]}.{entry[1]}"], named[f"{leave[0]}.{leave[1]}"])
         own = [x for x in pads if x["net"] == net]
+        signal, reference, below, assumed = hop_layers(net, [t for t in board.tracks if t.net == net], ends, names, cfg)
         tracks = [t for t in board.tracks if t.net == net and t.kind != "via"]
-        layers = {t.layer for t in tracks}
-        if layers - {"F.Cu"} or any(t.net == net and t.kind == "via" for t in board.tracks):
-            # The model is one signal layer over a plane, so a hop through a via would be drawn as two pieces with an open between them.
-            raise OffLayer(f"it changes layer ({', '.join(sorted(layers))}), and this model only has one signal layer")
         outline = unary_union([pad_polygon(x) for x in own])
         x1, y1, x2, y2 = outline.bounds
         window = box(x1 - reach, y1 - reach, x2 + reach, y2 + reach)
         keep = [v for v in vias if window.contains(Point(v))]
-        near = [x for x in pads if pad_polygon(x).intersects(window)]
-        keys = tech["keys"]
-        shapes = cut_shapes(net, tracks, near, pours, keep, window, keys["F.Cu"], keys[reference], *ends, voids, below)
+        # Only pads with copper on the signal layer: a ground pad on the far side isn't ground beside this track.
+        near = [x for x in pads if on_layer(x, signal) and pad_polygon(x).intersects(window)]
+        shapes = cut_shapes(net, tracks, near, pours.get(keys[signal], []), keep, window, keys[signal], keys[reference], *ends,
+                            plane_voids(board, reference), keys[below] if below else None, via_layer(tech["tech"], signal, reference))
+        layers = {"signal_layer": signal, "reference_layer": reference, **({"reference_assumed": True} if assumed else {})}
         digest = hashlib.sha256(json.dumps([shapes, tech["tech"]["Stackup"], solver, cfg.get("freq_points"), cfg["band_ghz"]], sort_keys=True).encode()).hexdigest()[:14]
         ws = p.work / "hops" / digest
         if not (ws / ".cws").exists():
@@ -253,7 +293,7 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
                 {"FormatVersion": 1, "DbuPerMicron": 1000, "DisplayUnit": "Um", "SnapDbu": 0, "AngleMode": "AnyAngle",
                  "TechRef": "../../tech.ctech", "Shapes": shapes, "Instances": []}))
             (ws / ".cws").write_text(json.dumps({"FormatVersion": 2, "LibraryRefs": [], "KnownFiles": []}))
-        return digest, ws, (round(x2 - x1 + 2 * reach, 2), round(y2 - y1 + 2 * reach, 2)), len(keep)
+        return digest, ws, (round(x2 - x1 + 2 * reach, 2), round(y2 - y1 + 2 * reach, 2)), len(keep), layers
 
     def solve_all(todo: list, reach: float) -> dict:
         rows, found = [], {}
@@ -263,7 +303,7 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
             except OffLayer as e:
                 found[row[0]] = {"unsolved": str(e), "digest": ""}
         solved = solve_unique({r[1]: r[2] for r in rows}, lambda ws: run_solver(ws, "cells/HOP/layout/HOP.clay"), int(cfg.get("parallel", DEFAULT_WORKERS)))
-        for net, digest, ws, size, via_count in rows:
+        for net, digest, ws, size, via_count, layers in rows:
             result = solved[digest]
             if isinstance(result, str):
                 # One unsolvable hop mustn't cost the readings of the others. The check still fails on it.
@@ -272,7 +312,7 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
             s2p, seconds = result
             kept_log = ws / f"{solver_label}.log"
             narrowed = kept_log.exists() and "curved edge" in kept_log.read_text()
-            found[net] = {**hop_metrics(s2p, low, high), "seconds": seconds, "port_narrowed": narrowed, "window_mm": list(size), "vias": via_count, "digest": digest}
+            found[net] = {**hop_metrics(s2p, low, high), "seconds": seconds, "port_narrowed": narrowed, "window_mm": list(size), "vias": via_count, "digest": digest, **layers}
         return found
 
     out = solve_all(chains, margin)

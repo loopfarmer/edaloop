@@ -201,6 +201,29 @@ def repair(text: str, stackup: dict | None) -> str:
     return text
 
 
+def eagle_holes(text: str) -> str:
+    """An Eagle `<hole>` is a bare drill with no copper. KiCad's importer makes it an NPTH pad the drill's size, then widens every round drilled pad,
+    holes included, to the drill plus twice `rlMinPadTop` (`adjustFootprintForDesignRules` in pcb_io_eagle.cpp). That ring is copper the board
+    doesn't have, so DRC reads tracks Eagle passed beside the hole as touching it. Eagle pads are always plated, so every NPTH pad in an Eagle
+    import is a hole, and each goes back to its drill. Only for Eagle imports: a native KiCad NPTH pad can carry a copper ring on purpose."""
+    out, at = [], 0
+    for m in re.finditer(r'\(pad\s+"[^"]*"\s+np_thru_hole\s+circle\b', text):
+        if m.start() < at:
+            continue
+        depth, end = 0, m.start()
+        for end in range(m.start(), len(text)):
+            depth += {"(": 1, ")": -1}.get(text[end], 0)
+            if depth == 0:
+                break
+        block = text[m.start():end + 1]
+        drill = re.search(r"\(drill\s+([\d.]+)\s*\)", block)
+        if drill:
+            block = re.sub(r"\(size\s+[\d.]+\s+[\d.]+\)", f"(size {drill[1]} {drill[1]})", block, count=1)
+        out += [text[at:m.start()], block]
+        at = end + 1
+    return "".join(out) + text[at:]
+
+
 def stack_for(sample: dict, copper_layers: int) -> tuple[dict, list[str]]:
     """The stackup, and which of its values aren't stated by the board's own documents."""
     known, assumed = sample.get("known") or {}, sample.get("assumed") or {}
@@ -228,7 +251,7 @@ def import_board(sample: dict, brd: Path, eagle: dict, out: Path, name: str) -> 
         raise RuntimeError(f"kicad-cli couldn't import it: {(r.stdout + r.stderr).strip()[-300:]}")
     stack, _ = stack_for(sample, eagle["copper_layers"])
     board = out / f"{name}.kicad_pcb"
-    board.write_text(repair(raw.read_text(), stack))
+    board.write_text(eagle_holes(repair(raw.read_text(), stack)))
     raw.unlink()
     (out / "imported_raw.kicad_prl").unlink(missing_ok=True)
     # The released file's own clearances, so that DRC judges the board by the rules it was made to.
@@ -302,22 +325,25 @@ def project_for(sample: dict, out: Path, name: str, chain: list | None, width: f
     (out / "edaloop.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 
 
+def drc_rows(ev) -> list[dict]:
+    """Opens and rule errors on a board that works. Copper drawn inside an Eagle footprint arrives with no net, so it reads as touching what it was
+    made to touch, and is counted apart. A finding names every item it involves, so a fault against such copper counts there whichever item is first."""
+    m = ev.metrics or {}
+    if not m:
+        return [_row("known.drc", False, f"the check itself failed: {ev.summary}")]
+    by = dict(sorted((m.get("by_type") or {}).items(), key=lambda kv: -kv[1])[:4])
+    hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") != "drc:unconnected"]
+    no_net = [f for f in hard if "<no net>" in f["message"]]
+    errs = len(hard) - len(no_net)
+    return [_row("known.opens", m["unconnected"] == 0, f"{m['unconnected']} open connections on a board that works"),
+            _row("known.drc", errs == 0, f"{errs} rule errors against the file's own clearances, and {len(no_net)} more from footprint copper the import leaves on no net. Warnings: {by}")]
+
+
 def checks_score(sample: dict, out: Path, chain: list | None) -> list[dict]:
     from .project import Project
     p = Project(out)
     rows = []
-    ev = checks.run_check(p, "drc")
-    m = ev.metrics or {}
-    if not m:
-        rows.append(_row("known.drc", False, f"the check itself failed: {ev.summary}"))
-    else:
-        by = dict(sorted((m.get("by_type") or {}).items(), key=lambda kv: -kv[1])[:4])
-        rows.append(_row("known.opens", m["unconnected"] == 0, f"{m['unconnected']} open connections on a board that works"))
-        hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") != "drc:unconnected"]
-        # Copper drawn inside an Eagle footprint arrives with no net, so it reads as touching what it was made to touch.
-        no_net = [f for f in hard if "[<no net>]" in f["message"] or "<no net>" in f["message"]]
-        errs = len(hard) - len(no_net)
-        rows.append(_row("known.drc", errs == 0, f"{errs} rule errors against the file's own clearances, and {len(no_net)} more from footprint copper the import leaves on no net. Warnings: {by}"))
+    rows += drc_rows(checks.run_check(p, "drc"))
     ev = checks.run_check(p, "rules")
     fab = [f["message"] for f in ev.findings if f.get("severity") == "error"]
     rows.append(_row("known.fabricator", None if ev.status == "error" else not fab, ev.summary if ev.status == "error" else ("; ".join(fab)[:200] or "within the fabricator limits")))
