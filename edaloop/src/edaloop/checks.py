@@ -548,8 +548,10 @@ def power_rails(p: Project) -> Outcome:
         net = rail["net"]
         tracks = [t for t in board.tracks if t.net == net]
         pads = board.net_pads(net)
+        # Each pad's real layers: a through-hole pad joins every copper layer, and a top pad doesn't touch the bottom.
+        layer_map = power.pad_layers([x for x in board.all_pads() if x["net"] == net], list(thickness))
         r = power.solve_rail(net, tracks, pads, rail["source"], {k: float(v) for k, v in rail["loads"].items()},
-                             thickness_um=thickness, board_height_mm=board.board_height_mm())
+                             thickness_um=thickness, board_height_mm=board.board_height_mm(), pad_layer_map=layer_map)
         rows[net] = {k: getattr(r, k) for k in ("connected", "drops_mv", "worst_drop_mv", "worst_rise_c", "worst_segment",
                                                 "min_width_mm", "total_a", "segments", "vias")}
         pours = board.zones_on_net(net)

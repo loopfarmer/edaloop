@@ -2334,3 +2334,29 @@ def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatc
     assert got["made"] is False and got["stopped_at"] == "preflight"
     assert {m["tool"] for m in got["missing"]} == {"circuitRF", "KiCadRoutingTools"}
     assert not out.exists()                     # nothing placed, nothing written
+
+
+def test_power_reaches_loads_through_a_through_hole_source_on_an_inner_layer():
+    from types import SimpleNamespace
+
+    from edaloop import power
+    seg = lambda a, b, layer: SimpleNamespace(net="VDD", start=a, end=b, width=0.3, layer=layer, kind="segment", drill=0)
+    via = SimpleNamespace(net="VDD", start=(5.0, 0.0), end=(5.0, 0.0), width=0.6, layer="F.Cu", kind="via", drill=0.3)
+    # The supply leaves a through-hole header pin on In2.Cu, then comes up by a via to the load on top.
+    tracks = [seg((0.0, 0.0), (5.0, 0.0), "In2.Cu"), via, seg((5.0, 0.0), (8.0, 0.0), "F.Cu")]
+    pads = {"P1.1": (0.0, 0.0, 0.8, 0.8), "L1.2": (8.0, 0.0, 0.4, 0.4)}
+    layers = power.pad_layers([{"name": "P1.1", "layers": ["*.Cu"]}, {"name": "L1.2", "layers": ["F.Cu"]}],
+                              ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
+    assert layers["P1.1"] == ("B.Cu", "F.Cu", "In1.Cu", "In2.Cu") and layers["L1.2"] == ("F.Cu",)
+    kw = dict(thickness_um={"F.Cu": 35, "In2.Cu": 35, "B.Cu": 35}, board_height_mm=1.6)
+    assert power.solve_rail("VDD", tracks, pads, "P1.1", {"L1.2": 0.2}, pad_layer_map=layers, **kw).connected
+    # Without the pad's real layers, the header pin never meets its own inner track.
+    assert not power.solve_rail("VDD", tracks, pads, "P1.1", {"L1.2": 0.2}, **kw).connected
+
+
+def test_power_is_sized_wider_when_it_may_run_on_an_inner_layer():
+    from edaloop.route_classes import power_widths
+    rails = [{"net": "VDD", "loads": {"L1.2": 2.0}}]      # enough current that neither width sits on the 0.2 mm floor
+    outer = power_widths(rails, 35.0, 10.0)["VDD"]
+    inner = power_widths(rails, 35.0, 10.0, outer=False)["VDD"]
+    assert inner > outer * 2       # IPC-2221's inner constant is half the outer one, and width goes roughly as its square

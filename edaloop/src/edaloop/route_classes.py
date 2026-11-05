@@ -504,12 +504,13 @@ def failed_nets(summary: Path) -> list[str]:
     return sorted({n for n in names if n})
 
 
-def power_widths(rails: list[dict], thickness_um: float, max_rise_c: float) -> dict[str, float]:
-    """Track width per rail, from its total current, on an outer layer's figures. The sensor checks what was drawn."""
+def power_widths(rails: list[dict], thickness_um: float, max_rise_c: float, outer: bool = True) -> dict[str, float]:
+    """Track width per rail, from its total current. `outer` is False when the router may lay power on an inner layer:
+    IPC-2221 lets an inner track shed only about half the heat, so it must be wider. The sensor checks what was drawn."""
     widths = {}
     for rail in rails:
         amps = sum(float(v) for v in rail["loads"].values())
-        need = power.ipc2221_min_width_mm(amps, float(rail.get("max_rise_c", max_rise_c)), thickness_um, outer=True)
+        need = power.ipc2221_min_width_mm(amps, float(rail.get("max_rise_c", max_rise_c)), thickness_um, outer=outer)
         widths[rail["net"]] = round(max(need, MIN_POWER_WIDTH_MM), 3)
     return widths
 
@@ -685,7 +686,9 @@ def route(project_board: Path, chains_file: Path, rails: list[dict], work: Path,
     # Power
     thickness = Board(current).copper_thickness_um()
     inner = min(thickness.values(), default=35.0)
-    widths = power_widths(rails, inner, max_rise_c)
+    # Sized for the worst layer power may take: inner, unless only the outer layers are open to it.
+    power_may_use = list(power_layers) if power_layers else allowed
+    widths = power_widths(rails, inner, max_rise_c, outer=all(lyr in ("F.Cu", "B.Cu") for lyr in power_may_use))
     for ext in (".kicad_pro", ".kicad_prl", ".kicad_dru"):
         if (work / f"{stem}{ext}").exists():
             shutil.copy(work / f"{stem}{ext}", work / f"2_power{ext}")
