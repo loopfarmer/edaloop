@@ -135,62 +135,82 @@ def plane_voids(board, layer: str) -> list[Polygon]:
     return out
 
 
-def cut_shapes(net: str, tracks: list, pads: list, pours: list[Polygon], vias: list[tuple], window, signal: int, reference: int,
-               entry: dict, leave: dict, voids: list[Polygon] | None = None, below: int | None = None, vias_on: int | None = None) -> list[dict]:
-    """Clay shapes for one hop. Coordinates in, board mm. Coordinates out, clay database units with y flipped. `vias_on` is the via drawing
-    layer from `via_layer`, and is needed whenever there are vias."""
-    if vias and vias_on is None:
-        raise ValueError("ground vias need the stackup's via layer, or the solver reads them as inert")
-    def xy(points) -> list[int]:
-        return [int(round(v)) for p in points for v in (p[0] * 1000 * UM, -p[1] * 1000 * UM)]
+def _xy(points) -> list[int]:
+    return [int(round(v)) for p in points for v in (p[0] * 1000 * UM, -p[1] * 1000 * UM)]
 
-    def polygon(p, layer, name) -> dict:
-        return {"$type": "Poly", "Xy": xy(list(p.exterior.coords)[:-1]), "Layer": _layer(layer), "Net": name}
+
+def _poly(p, layer: int, name: str) -> dict:
+    return {"$type": "Poly", "Xy": _xy(list(p.exterior.coords)[:-1]), "Layer": _layer(layer), "Net": name}
+
+
+def _track_paths(net: str, tracks: list, lands, layer: int) -> list[dict]:
+    """A part's own lands are left out: its datasheet was measured on them, so counting them here counts them twice.
+    The track is cut where it enters each land."""
     shapes = []
-    # A part's own lands are left out: its datasheet was measured on them, so counting them here counts them twice.
-    # The track is cut where it enters each land, and tap pads stay, since the routing put them on the line.
-    lands = unary_union([pad_polygon(entry), pad_polygon(leave)])
     for t in tracks:
-        kept = LineString([t.start, t.end]).difference(lands)
+        kept = LineString([t.start, t.end]).difference(lands) if not lands.is_empty else LineString([t.start, t.end])
         for piece in ([kept] if kept.geom_type == "LineString" else list(getattr(kept, "geoms", []))):
             if piece.length > 1e-3:
-                shapes.append({"$type": "Path", "Xy": xy(_snapped(piece.coords)), "Width": int(round(t.width * 1000 * UM)), "End": "Flush",
-                               "Layer": _layer(signal), "Net": net})
-    for pad in pads:
-        if pad["net"] == net and pad is not entry and pad is not leave:
-            shapes.append(polygon(pad_polygon(pad), signal, net))
-    # Ground copper on the signal layer: the fill, plus ground pads in the window, which the fill may only touch.
+                shapes.append({"$type": "Path", "Xy": _xy(_snapped(piece.coords)), "Width": int(round(t.width * 1000 * UM)), "End": "Flush",
+                               "Layer": _layer(layer), "Net": net})
+    return shapes
+
+
+def _ground_copper(pads: list, pours: list[Polygon], window, vias: list[tuple], layer: int) -> list[dict]:
+    """Ground copper on a layer: the fill, plus ground pads in the window, which the fill may only touch."""
     grounds = [pad_polygon(x) for x in pads if x["net"] == "GND" and pad_polygon(x).intersects(window)]
     merged = unary_union([*[p.intersection(window) for p in pours], *[g.intersection(window) for g in grounds]])
     # The window can cut a patch off from its vias. Left in, it floats and resonates, which the real board doesn't do.
-    for piece in _no_holes(merged):
-        if any(piece.distance(Point(v)) < ground.RADIUS for v in vias):
-            shapes.append(polygon(piece, signal, "GND"))
-    holes = [v for v in voids or [] if v.intersects(window)]
-    if holes:
-        for piece in _no_holes(window.difference(unary_union(holes))):
-            shapes.append(polygon(piece, reference, "GND"))
-        # Through a void the pad sees the next plane down. Leaving it out would flatter the result.
-        if below is not None:
-            shapes.append(polygon(window, below, "GND"))
-    else:
-        shapes.append(polygon(window, reference, "GND"))
-    for x, y in vias:
-        shapes.append({"$type": "Via", "X": int(round(x * 1000 * UM)), "Y": int(round(-y * 1000 * UM)), "PadSize": int(ground.VIA * 1000 * UM),
-                       "DrillSize": int(ground.DRILL * 1000 * UM), "LandingLayer": _layer(signal), "Layer": _layer(vias_on), "Net": "GND"})
+    return [_poly(piece, layer, "GND") for piece in _no_holes(merged) if any(piece.distance(Point(v)) < ground.RADIUS for v in vias)]
+
+
+def _via(x: float, y: float, pad_mm: float, drill_mm: float, landing: int, drawn_on: int, net: str) -> dict:
+    return {"$type": "Via", "X": int(round(x * 1000 * UM)), "Y": int(round(-y * 1000 * UM)), "PadSize": int(pad_mm * 1000 * UM),
+            "DrillSize": int(drill_mm * 1000 * UM), "LandingLayer": _layer(landing), "Layer": _layer(drawn_on), "Net": net}
+
+
+def _port_labels(entry: dict, leave: dict, tracks: tuple[list, list], layers: tuple[int, int]) -> list[dict]:
+    """A port label where the track leaves each end land, on that end's own layer, with the tracks on that layer."""
+    shapes = []
     span = math.dist((entry["x"], entry["y"]), (leave["x"], leave["y"])) or 1.0
     d = ((leave["x"] - entry["x"]) / span, (leave["y"] - entry["y"]) / span)
-    for text, pad, chord in (("1", entry, d), ("2", leave, (-d[0], -d[1]))):
-        into = leaving_direction(pad, tracks, chord)
-        at = _snapped([land_edge(pad, into, tracks)])[0]
+    for text, pad, chord, own, layer in (("1", entry, d, tracks[0], layers[0]), ("2", leave, (-d[0], -d[1]), tracks[1], layers[1])):
+        into = leaving_direction(pad, own, chord)
+        at = _snapped([land_edge(pad, into, own)])[0]
         # Snapping can pull a port that sat a few microns past the edge back onto the land, which is cut out of the model. Step it on again.
         for _ in range(3):
             if pad_polygon(pad).distance(Point(at)) > 1e-3:
                 break
             at = _snapped([(at[0] + into[0] * 0.01, at[1] + into[1] * 0.01)])[0]
-        shapes.append({"$type": "Label", "Layer": _layer(signal), "X": int(round(at[0] * 1000 * UM)), "Y": int(round(-at[1] * 1000 * UM)),
+        shapes.append({"$type": "Label", "Layer": _layer(layer), "X": int(round(at[0] * 1000 * UM)), "Y": int(round(-at[1] * 1000 * UM)),
                        "Text": text, "Height": 400000, "IsPort": True, "PortDirection": direction_label(into)})
     return shapes
+
+
+def cut_shapes(net: str, tracks: list, pads: list, pours: list[Polygon], vias: list[tuple], window, signal: int, reference: int,
+               entry: dict, leave: dict, voids: list[Polygon] | None = None, below: int | None = None, vias_on: int | None = None) -> list[dict]:
+    """Clay shapes for one hop on one layer. Coordinates in, board mm. Coordinates out, clay database units with y flipped. `vias_on` is the
+    via drawing layer from `via_layer`, and is needed whenever there are vias."""
+    if vias and vias_on is None:
+        raise ValueError("ground vias need the stackup's via layer, or the solver reads them as inert")
+    # Tap pads stay, since the routing put them on the line.
+    shapes = _track_paths(net, tracks, unary_union([pad_polygon(entry), pad_polygon(leave)]), signal)
+    for pad in pads:
+        if pad["net"] == net and pad is not entry and pad is not leave:
+            shapes.append(_poly(pad_polygon(pad), signal, net))
+    shapes += _ground_copper(pads, pours, window, vias, signal)
+    holes = [v for v in voids or [] if v.intersects(window)]
+    if holes:
+        for piece in _no_holes(window.difference(unary_union(holes))):
+            shapes.append(_poly(piece, reference, "GND"))
+        # Through a void the pad sees the next plane down. Leaving it out would flatter the result.
+        if below is not None:
+            shapes.append(_poly(window, below, "GND"))
+    else:
+        shapes.append(_poly(window, reference, "GND"))
+    for x, y in vias:
+        shapes.append(_via(x, y, ground.VIA, ground.DRILL, signal, vias_on, "GND"))
+    return shapes + _port_labels(entry, leave, (tracks, tracks), (signal, signal))
 
 
 _PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
@@ -297,7 +317,9 @@ def via_layer(tech: dict, signal: str, reference: str) -> int:
 
 
 def on_layer(pad: dict, layer: str) -> bool:
-    """Whether a pad has copper on an outer layer. A drilled pad has it on both."""
+    """Whether a pad has copper on a layer. A drilled pad has it on every layer, and a surface pad only on its own outer one."""
+    if layer not in ("F.Cu", "B.Cu"):
+        return bool(pad.get("drill"))
     return bool(pad.get("drill")) or bool(pad.get("back") if layer == "B.Cu" else pad.get("front", True))
 
 
@@ -308,9 +330,13 @@ def hop_layers(net: str, tracks: list, ends: tuple[dict, dict], names: list[str]
     inner layers. A hop wholly on B.Cu is the same picture upside down: `bottom_reference_layer` if set, otherwise the mirror of the top's,
     which is an assumption about the stackup and is marked as one."""
     layers = {t.layer for t in tracks if t.kind != "via"}
-    if any(t.kind == "via" for t in tracks) or len(layers) > 1:
-        # One signal layer over a plane, so a hop through a via would be drawn as two pieces with an open between them.
-        raise OffLayer(f"it changes layer ({', '.join(sorted(layers))}) through a via, and this model only has one signal layer")
+    if any(t.kind == "via" for t in tracks):
+        raise ValueError("a hop with a via of its own is planned by plan_via_hop, which draws the barrel")
+    if len(layers) > 1:
+        # Without a via of its own the layers are joined through a drilled pad, whose barrel this model doesn't draw. Drawn anyway, the two
+        # layers' copper would be two pieces with an open between them.
+        raise OffLayer(f"it changes layer ({', '.join(sorted(layers))}) with no via of its own, through a drilled pad, and this model only joins "
+                       "layers through a via")
     if not layers:
         layers = {"B.Cu"} if all(on_layer(x, "B.Cu") and not on_layer(x, "F.Cu") for x in ends) else {"F.Cu"}
     signal = next(iter(layers))
@@ -325,6 +351,223 @@ def hop_layers(net: str, tracks: list, ends: tuple[dict, dict], names: list[str]
         raise OffLayer(f"its reference plane would be {reference}, the layer it runs on")
     i = names.index(reference)
     return signal, reference, names[i - 1] if i > 0 else None, not cfg.get("bottom_reference_layer")
+
+
+# ---------------------------------------------------------------- hops through a via
+#
+# A hop that changes layer through a via of its own is solved as one model: the track on each layer, the via's barrel over the span its stackup
+# entry gives it, its pads, the antipad it has in each plane it passes, each signal layer's own reference planes, and the ground vias around it,
+# which are what carry the return current from one plane to the other.
+
+DISC_QUAD_SEGS = 8          # a round pad or antipad is drawn as a 32-gon with its corners on the circle. Its edge midpoints are 0.5% inside it
+
+
+def signal_vias(board, net: str) -> list[dict]:
+    """The net's own vias as the board file states them: where, how big, which two layers the hole joins, and which layers keep a pad."""
+    from .pcbfile import _child, _val
+    numbered = {x[1]: x[2] for x in board.tree if isinstance(x, list) and x and x[0] == "net" and len(x) > 2}
+    out = []
+
+    def flag(node, name) -> bool:
+        # KiCad 6.0 writes these as an empty list, and later versions as yes or no.
+        c = _child(node, name)
+        return c is not None and (len(c) == 1 or str(c[1]) != "no")
+    for node in board.tree:
+        if not (isinstance(node, list) and node and node[0] == "via"):
+            continue
+        name = _val(node, "net", "")
+        if numbered.get(name, name) != net:
+            continue
+        at, layers, stack = _child(node, "at"), _child(node, "layers"), _child(node, "padstack")
+        bare = [str(x) for x in node[1:] if not isinstance(x, list)]
+        out.append({"x": float(at[1]), "y": float(at[2]), "size": float(_val(node, "size", 0)), "drill": float(_val(node, "drill", 0)),
+                    "layers": [str(x) for x in layers[1:3]] if layers else [],
+                    "type": str(_val(node, "type") or next((b for b in bare if b in ("blind", "buried", "micro")), "through")),
+                    "remove_unused": flag(node, "remove_unused_layers"), "keep_end": flag(node, "keep_end_layers"),
+                    # A padstack other than KiCad's normal one gives the pad a different size on some layers, which this doesn't read.
+                    "padstack": stack is not None and str(_val(stack, "mode", "normal")) != "normal"})
+    return out
+
+
+def zone_clearances(board) -> dict[str, float]:
+    """Each layer's ground pour clearance, mm, from the zone itself. The smallest where several pours share a layer."""
+    from .pcbfile import _child, _val
+    out: dict[str, float] = {}
+    for zone in (x for x in board.tree if isinstance(x, list) and x and x[0] == "zone"):
+        if _child(zone, "keepout") or _val(zone, "net_name", _val(zone, "net")) != "GND":
+            continue
+        pads = _child(zone, "connect_pads")
+        clearance = _val(pads, "clearance") if pads else None
+        layers = _child(zone, "layers")
+        for layer in ([str(x) for x in layers[1:]] if layers else [str(_val(zone, "layer", ""))]):
+            if clearance is not None:
+                out[layer] = min(out.get(layer, math.inf), float(clearance))
+    return out
+
+
+def via_entry(tech: dict, a: str, b: str) -> int:
+    """The drawing layer of the via entry whose span is exactly a to b. A signal via's barrel length is part of its reflection, a stub
+    included, so a longer entry that merely covers the span won't do."""
+    for entry in (x for x in tech["Stackup"]["Layers"] if x.get("Kind") == "Via" and x.get("DrawingLayers")):
+        if {entry.get("SpanFromLayer"), entry.get("SpanToLayer")} == {a, b}:
+            return entry["DrawingLayers"][0]["Layer"]
+    raise OffLayer(f"the stackup circuitRF read has no via entry from {a} to {b}, so a via of that span can't be drawn to its own length")
+
+
+def port_layer(pad: dict, tracks: list) -> str:
+    """Which layer a hop leaves an end land on: the layer of the track that touches it, else the pad's own side."""
+    land = pad_polygon(pad)
+    for t in tracks:
+        if t.kind != "via" and on_layer(pad, t.layer) and LineString([t.start, t.end]).distance(land) < 1e-3:
+            return t.layer
+    return "B.Cu" if on_layer(pad, "B.Cu") and not on_layer(pad, "F.Cu") else "F.Cu"
+
+
+def _references(signal: str, names: list[str], cfg: dict) -> tuple[list[str], str | None]:
+    """A signal layer's reference planes, and the assumption behind them if a person didn't state them."""
+    top = cfg.get("reference_layer") or ("In1.Cu" if "In1.Cu" in names else "B.Cu")
+    if signal == names[0]:
+        return [top], None
+    if signal == names[-1]:
+        stated = cfg.get("bottom_reference_layer")
+        mirror = names[len(names) - 1 - names.index(top)]
+        return [stated or mirror], None if stated else (f"{signal}'s reference plane is taken to be {mirror}, the mirror of {names[0]}'s {top}. "
+                                                         "Set em_hops.bottom_reference_layer to state it")
+    stated = (cfg.get("inner_reference_layers") or {}).get(signal)
+    if stated:
+        return list(stated), None
+    i = names.index(signal)
+    either = [names[j] for j in (i - 1, i + 1) if 0 < j < len(names) - 1]
+    if not either:
+        raise OffLayer(f"it runs on {signal}, which has no inner layer beside it to be its plane. Set em_hops.inner_reference_layers")
+    return either, (f"{signal}'s reference planes are taken to be {' and '.join(either)}, the inner layers either side of it. "
+                    "Set em_hops.inner_reference_layers to state them")
+
+
+def plan_via_hop(tracks: list, ends: tuple[dict, dict], names: list[str], cfg: dict, vias: list[dict], tech: dict,
+                 fills: dict[str, object], ground_vias: list[tuple], clearances: dict[str, float], reach_mm: float) -> dict:
+    """What a hop through one or more vias is modelled with, and what that rests on, or OffLayer saying why it can't be.
+
+    `fills` is each layer's ground fill as one shape, `ground_vias` the ground via centres in the window, and `reach_mm` how near a ground
+    via must be to a via that moves the return current from one plane to another."""
+    if names[0] != "F.Cu" or names[-1] != "B.Cu":
+        raise OffLayer("its board's copper layers aren't F.Cu to B.Cu, and this model names its planes from those")
+    order = {n: i for i, n in enumerate(names)}
+    copper = [t for t in tracks if t.kind != "via"]
+    ports = (port_layer(ends[0], copper), port_layer(ends[1], copper))
+    off = sorted({t.layer for t in copper} - set(names))
+    if off:
+        raise OffLayer(f"it has copper on {', '.join(off)}, which the stackup circuitRF read doesn't have")
+    signals = sorted({t.layer for t in copper} | set(ports), key=order.get)
+    assumed, references = [], {}
+    for s in signals:
+        refs, why = _references(s, names, cfg)
+        for r in refs:
+            if r not in order:
+                raise OffLayer(f"its reference plane {r} for {s} isn't a copper layer of this board")
+            if r in signals:
+                # The plane would have the hop's own track in it. Cutting the track's clearance out of a whole plane is a guess at the pour.
+                raise OffLayer(f"{s}'s reference plane {r} carries the hop's own copper, and this model draws a reference as a whole plane")
+        references[s] = refs
+        if why:
+            assumed.append(why)
+    planes = sorted({r for refs in references.values() for r in refs}, key=order.get)
+    drawn_vias = []
+    for v in vias:
+        where = f"({v['x']:g}, {v['y']:g})"
+        if len(v["layers"]) != 2 or any(x not in order for x in v["layers"]):
+            raise OffLayer(f"its via at {where} names layers {v['layers']}, not two of this board's copper layers")
+        if v["padstack"]:
+            raise OffLayer(f"its via at {where} has a padstack that differs by layer, which this model doesn't read")
+        lo, hi = sorted(order[x] for x in v["layers"])
+        span = names[lo:hi + 1]
+        drawn_on = via_entry(tech, names[lo], names[hi])
+        joined = sorted({t.layer for t in copper if t.layer in span and LineString([t.start, t.end]).distance(Point(v["x"], v["y"])) < v["size"] / 2},
+                        key=order.get)
+        # KiCad keeps a via's ring on every layer it passes unless it's told to remove the unused ones. Then it keeps the layers a track
+        # joins there, and the two ends if asked to.
+        pads_on = span if not v["remove_unused"] else sorted(set(joined) | ({span[0], span[-1]} if v["keep_end"] else set()), key=order.get)
+        antipads, measured = {}, {}
+        for c in span:
+            if c in joined:
+                continue
+            ring = v["size"] / 2 if c in pads_on else v["drill"] / 2
+            fill = fills.get(c)
+            centre = Point(v["x"], v["y"])
+            if fill is not None and not fill.is_empty:
+                gap = fill.distance(centre)
+                if gap <= ring + 1e-3:
+                    raise OffLayer(f"the ground fill on {c} reaches its via at {where}, which shorts it. Refill the zones")
+                antipads[c], measured[c] = round(gap, 4), True
+            else:
+                stated = clearances.get(c)
+                antipads[c], measured[c] = round(ring + (stated if stated is not None else ground.CLEAR), 4), False
+                assumed.append(f"the antipad on {c} round the via at {where} is taken as {2 * antipads[c]:.3f} mm across, its "
+                               f"{'pad' if c in pads_on else 'hole'} plus " + (f"the pour's {stated:g} mm clearance" if stated is not None else
+                               f"{ground.CLEAR:g} mm, the net class clearance, since no ground pour on {c} states one") + ", since the board has no fill there to measure")
+        # Where the layers it joins have no plane in common, the return current changes plane here, and only a ground via carries it across.
+        groups = [set(references[s]) for s in joined if s in references]
+        nearest = min((math.dist((v["x"], v["y"]), g) for g in ground_vias), default=None)
+        moves = len(groups) > 1 and not set.intersection(*groups)
+        if moves and (nearest is None or nearest > reach_mm):
+            moved = " to ".join(sorted({r for g in groups for r in g}, key=order.get))
+            raise OffLayer(f"its via at {where} moves the return current from {moved}, and no ground via within {reach_mm:g} mm carries it across"
+                           + (f" (the nearest is {nearest:.2f} mm away)" if nearest is not None else "") + ". Put a stitching via beside it")
+        drawn_vias.append({**v, "span": span, "drawn_on": drawn_on, "joined": joined, "pads_on": pads_on, "antipad_mm": antipads,
+                           "antipad_measured": measured, "return_via_mm": None if nearest is None else round(nearest, 3), "return_moves": moves})
+    lo = min(order[x] for x in [*signals, *planes, *(y for v in drawn_vias for y in v["span"])])
+    hi = max(order[x] for x in [*signals, *planes, *(y for v in drawn_vias for y in v["span"])])
+    passed = [c for c in names[lo:hi + 1] if c not in signals and c not in planes]
+    # Through a rule-area void in a plane, a pad sees the next plane away from its signal layer.
+    below = {}
+    for s in signals:
+        for r in references[s]:
+            step = 1 if order[r] > order[s] else -1
+            nxt = order[r] + step
+            below[r] = names[nxt] if 0 <= nxt < len(names) and names[nxt] not in signals and names[nxt] not in planes and names[nxt] not in passed else None
+    return {"signals": signals, "ports": ports, "references": references, "planes": planes, "passed": passed, "below": below,
+            "vias": drawn_vias, "assumed": assumed, "extent": (names[lo], names[hi])}
+
+
+def _disc(x: float, y: float, r: float) -> Polygon:
+    return Point(x, y).buffer(r, quad_segs=DISC_QUAD_SEGS)
+
+
+def cut_via_hop(net: str, tracks: list, pads: list, fills: dict[str, list[Polygon]], ground_vias: list[tuple], window, plan: dict,
+                keys: dict[str, int], entry: dict, leave: dict, voids: dict[str, list[Polygon]], vias_on: int) -> list[dict]:
+    """Clay shapes for a hop through vias, from `plan_via_hop`'s plan. Coordinates as `cut_shapes`."""
+    shapes = []
+    copper = [t for t in tracks if t.kind != "via"]
+    for s in plan["signals"]:
+        lands = unary_union([pad_polygon(x) for x in (entry, leave) if on_layer(x, s)])
+        shapes += _track_paths(net, [t for t in copper if t.layer == s], lands, keys[s])
+        for pad in pads:
+            if pad["net"] == net and pad is not entry and pad is not leave and on_layer(pad, s):
+                shapes.append(_poly(pad_polygon(pad), keys[s], net))
+        shapes += _ground_copper([x for x in pads if on_layer(x, s)], fills.get(s, []), window, ground_vias, keys[s])
+    for v in plan["vias"]:
+        for c in v["pads_on"]:
+            shapes.append(_poly(_disc(v["x"], v["y"], v["size"] / 2), keys[c], net))
+
+    def plane(layer: str, rule_areas: list) -> list[dict]:
+        cut = [*rule_areas, *(_disc(v["x"], v["y"], v["antipad_mm"][layer]) for v in plan["vias"] if layer in v["antipad_mm"])]
+        return [_poly(piece, keys[layer], "GND") for piece in (_no_holes(window.difference(unary_union(cut))) if cut else [window])]
+    drawn_below = set()
+    for r in plan["planes"]:
+        holes = [x for x in voids.get(r, []) if x.intersects(window)]
+        shapes += plane(r, holes)
+        nxt = plan["below"].get(r)
+        if holes and nxt is not None and nxt not in drawn_below:
+            drawn_below.add(nxt)
+            shapes += plane(nxt, [])
+    for c in plan["passed"]:
+        shapes += _ground_copper([x for x in pads if on_layer(x, c)], fills.get(c, []), window, ground_vias, keys[c])
+    for x, y in ground_vias:
+        shapes.append(_via(x, y, ground.VIA, ground.DRILL, keys[plan["signals"][0]], vias_on, "GND"))
+    for v in plan["vias"]:
+        shapes.append(_via(v["x"], v["y"], v["size"], v["drill"], keys[v["span"][0]], v["drawn_on"], net))
+    on = [[t for t in copper if t.layer == layer] for layer in plan["ports"]]
+    return shapes + _port_labels(entry, leave, (on[0], on[1]), (keys[plan["ports"][0]], keys[plan["ports"][1]]))
 
 
 def solve_unique(jobs: dict[str, Path], solve, workers: int) -> dict:
@@ -354,9 +597,9 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
     names = list(tech["keys"])
     keys = tech["keys"]
 
-    def prepare(net, entry, leave, reach) -> tuple:
-        ends = (named[f"{entry[0]}.{entry[1]}"], named[f"{leave[0]}.{leave[1]}"])
-        own = [x for x in pads if x["net"] == net]
+    clearances = zone_clearances(board)
+
+    def one_layer(net, ends, own, reach) -> tuple:
         signal, reference, below, assumed = hop_layers(net, [t for t in board.tracks if t.net == net], ends, names, cfg)
         tracks = [t for t in board.tracks if t.net == net and t.kind != "via"]
         outline = unary_union([pad_polygon(x) for x in own])
@@ -367,8 +610,43 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
         near = [x for x in pads if on_layer(x, signal) and pad_polygon(x).intersects(window)]
         shapes = cut_shapes(net, tracks, near, pours.get(keys[signal], []), keep, window, keys[signal], keys[reference], *ends,
                             plane_voids(board, reference), keys[below] if below else None, via_layer(tech["tech"], signal, reference))
-        layers = {"signal_layer": signal, "reference_layer": reference, **({"reference_assumed": True} if assumed else {})}
-        digest = hashlib.sha256(json.dumps([shapes, tech["tech"]["Stackup"], solver, cfg.get("freq_points"), cfg["band_ghz"]], sort_keys=True).encode()).hexdigest()[:14]
+        layers = {"signal_layer": signal, "reference_layer": reference}
+        if assumed:
+            layers.update(reference_assumed=True, assumed=[f"{signal}'s reference plane is taken to be {reference}, the mirror of the top's. "
+                                                           "Set em_hops.bottom_reference_layer to state it"])
+        return shapes, window, keep, layers, [reference], []
+
+    def through_vias(net, ends, own, own_vias, reach) -> tuple:
+        tracks = [t for t in board.tracks if t.net == net]
+        # The window holds the vias and every track too, since a hop that drops a layer can leave the line between its pads to do it.
+        outline = unary_union([*(pad_polygon(x) for x in own), *(LineString([t.start, t.end]) for t in tracks if t.kind != "via"),
+                               *(Point(v["x"], v["y"]) for v in own_vias)])
+        x1, y1, x2, y2 = outline.bounds
+        window = box(x1 - reach, y1 - reach, x2 + reach, y2 + reach)
+        keep = [v for v in vias if window.contains(Point(v))]
+        fills = {n: unary_union([q.intersection(window) for q in pours.get(keys[n], [])]) for n in names}
+        plan = plan_via_hop(tracks, ends, names, cfg, own_vias, tech["tech"], fills, keep, clearances, float(cfg.get("return_via_mm", margin)))
+        near = [x for x in pads if pad_polygon(x).intersects(window)]
+        shapes = cut_via_hop(net, tracks, near, {n: pours.get(keys[n], []) for n in names}, keep, window, plan, keys, *ends,
+                             {r: plane_voids(board, r) for r in plan["planes"]}, via_layer(tech["tech"], *plan["extent"]))
+        layers = {"signal_layer": "+".join(plan["signals"]), "reference_layer": ", ".join(plan["planes"]), "signal_layers": plan["signals"],
+                  "reference_layers": plan["references"], "port_layers": list(plan["ports"]),
+                  "signal_vias": [{"at": [v["x"], v["y"]], "layers": [v["span"][0], v["span"][-1]], "pad_mm": v["size"], "drill_mm": v["drill"],
+                                   "pads_on": v["pads_on"], "antipad_mm": {k: round(2 * r, 3) for k, r in v["antipad_mm"].items()},
+                                   "antipad_from": {k: "fill" if v["antipad_measured"][k] else "assumed" for k in v["antipad_mm"]},
+                                   "return_via_mm": v["return_via_mm"]} for v in plan["vias"]],
+                  **({"reference_assumed": True, "assumed": plan["assumed"]} if plan["assumed"] else {})}
+        return shapes, window, keep, layers, plan["planes"], [plan["planes"]]
+
+    def prepare(net, entry, leave, reach) -> tuple:
+        ends = (named[f"{entry[0]}.{entry[1]}"], named[f"{leave[0]}.{leave[1]}"])
+        own = [x for x in pads if x["net"] == net]
+        own_vias = signal_vias(board, net) if any(t.net == net and t.kind == "via" for t in board.tracks) else []
+        shapes, window, keep, layers, references, extra = through_vias(net, ends, own, own_vias, reach) if own_vias else one_layer(net, ends, own, reach)
+        # A hop through a via flags more than one plane as a ground reference, which isn't in its shapes, so it's in its digest. A hop on one
+        # layer adds nothing, so that its cached solve still matches.
+        digest = hashlib.sha256(json.dumps([shapes, tech["tech"]["Stackup"], solver, cfg.get("freq_points"), cfg["band_ghz"], *extra],
+                                           sort_keys=True).encode()).hexdigest()[:14]
         ws = p.work / "hops" / digest
         if not (ws / ".cws").exists():
             shutil.rmtree(ws, ignore_errors=True)
@@ -376,7 +654,7 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
             (ws / "em").mkdir()
             t = json.loads(json.dumps(tech["tech"]))
             for layer in t["Stackup"]["Layers"]:
-                layer["IsGroundReference"] = layer["Name"] == reference
+                layer["IsGroundReference"] = layer["Name"] in references
             (ws / "cells" / "tech.ctech").write_text(json.dumps(t))
             (ws / "cells" / "HOP" / ".ccell").write_text(json.dumps({"FormatVersion": 1, "Parameters": [], "PrimaryLayout": "HOP.clay",
                                                                       "IsTestBench": False, "Terminals": [], "NumPorts": 0}))
@@ -384,7 +662,8 @@ def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_
                 {"FormatVersion": 1, "DbuPerMicron": 1000, "DisplayUnit": "Um", "SnapDbu": 0, "AngleMode": "AnyAngle",
                  "TechRef": "../../tech.ctech", "Shapes": shapes, "Instances": []}))
             (ws / ".cws").write_text(json.dumps({"FormatVersion": 2, "LibraryRefs": [], "KnownFiles": []}))
-        return digest, ws, (round(x2 - x1 + 2 * reach, 2), round(y2 - y1 + 2 * reach, 2)), len(keep), layers
+        x1, y1, x2, y2 = window.bounds
+        return digest, ws, (round(x2 - x1, 2), round(y2 - y1, 2)), len(keep), layers
 
     def solve_all(todo: list, reach: float) -> dict:
         rows, found = [], {}
