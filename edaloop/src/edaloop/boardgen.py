@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -173,12 +175,20 @@ def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = 
         # Say it before placing anything: a run that would stop at routing does nothing useful first.
         return {"made": False, "stopped_at": "preflight", "missing": missing,
                 "hint": "edaloop build, ground and the KiCad checks still run without the routers. See Requirements in the README"}
+    started = time.monotonic()
+
+    def say(step: str) -> None:
+        # Routing and the checks can take many minutes. Progress goes to stderr, so a --json result on stdout stays clean.
+        print(f"  make: {step} ({time.monotonic() - started:.0f} s in)", file=sys.stderr, flush=True)
+    say("build")
     try:
         built = build(bench_path, out, footprint_dirs)
     except BuildError as e:
         return {"made": False, "stopped_at": "build", "refused": str(e)}
     p = Project(out)
+    say("ground")
     steps = {"build": {k: built[k] for k in ("parts", "span_mm", "outline_mm", "unlisted_pads")}, "ground": ground.pad_vias(p)}
+    say("route")
     rf, cfg = p.section("rf"), p.section("route")
     routed = route_classes.route(p.board, p.root / rf["chains"], p.section("power").get("rails", []), p.root / ".edaloop" / "route_classes",
                                  list(cfg.get("keep_nets") or ["GND"]), max_rise_c=float(p.section("power").get("max_rise_c", 10)),
@@ -188,11 +198,16 @@ def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = 
                                  layer_costs=cfg.get("layer_costs"))
     (out / "route.log").write_text(json.dumps(routed, indent=1))
     steps["route"] = {"final_drc": routed.get("final_drc"), "rf_width": routed["rf_width_loop"][-1], "stopped_at": routed.get("stopped_at")}
+    if routed.get("stopped_at") and routed.get("steps"):
+        # Why it stopped, from the class it stopped at, so that the caller doesn't have to open route.log.
+        last = routed["steps"][-1]
+        steps["route"]["stopped_because"] = {"class": last.get("class"), "drc": last.get("drc"), "unreached": last.get("unreached")}
     if routed.get("stopped_at"):
         return {"made": False, "stopped_at": "route", "steps": steps}
+    say("finish")
     steps["finish"] = ground.finish(p)
     p = Project(out)
-    steps["checks"] = controller.run_all(p, skip=("em_crosscheck",) if quick else ())
+    steps["checks"] = controller.run_all(p, skip=("em_crosscheck",) if quick else (), progress=lambda check: say(f"check {check}"))
     steps["review"] = checks.review_pack(p)
     return {"made": True, "ready_to_release": steps["review"]["ready_to_release"], "next_action": controller.next_action(p), "steps": steps}
 

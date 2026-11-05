@@ -127,6 +127,13 @@ def _body(kind: str, w: float, h: float) -> str:
     return f'(rectangle (start {-w / 2} {h / 2}) (end {w / 2} {-h / 2}) {stroke} (fill (type background)))'
 
 
+def shown_value(ref: str, part: dict) -> str:
+    """The Value written for a part, on the sheet and on the board alike. KiCad reads a symbol's empty Value as its reference, which is also its
+    library name here, but keeps a footprint's empty, so a part with no value failed schematic parity. A value an Eagle file wrote as
+    "  NSR0320" failed it too, so surrounding space goes. kicad_ops.py writes the same."""
+    return str(part.get("value") or "").strip() or ref
+
+
 def add_part(sheet: Sheet, ref: str, part: dict, footprint: str, at: tuple, pins: dict[str, tuple], kind: str, w: float = 0.0, h: float = 0.0,
              show_numbers: bool = False, fields_at: tuple | None = None) -> None:
     """A part at `at`, with each pin number at a (dx, dy) offset on the sheet, y down. The symbol is written to match."""
@@ -146,7 +153,7 @@ def add_part(sheet: Sheet, ref: str, part: dict, footprint: str, at: tuple, pins
         f'(symbol (lib_id {_q("edaloop:" + ref)}) (at {at[0]} {at[1]} 0) (unit 1) (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp {dnp}) '
         f'(uuid {_q(_uid(sheet.name, "symbol", ref))}) '
         f'(property "Reference" {_q(ref)} (at {fx} {fy} 0) (effects (font (size 1.27 1.27)) (justify left))) '
-        f'(property "Value" {_q(part.get("value", ""))} (at {fx} {fy + 2.54} 0) (effects (font (size 1.27 1.27)) (justify left))) '
+        f'(property "Value" {_q(shown_value(ref, part))} (at {fx} {fy + 2.54} 0) (effects (font (size 1.27 1.27)) (justify left))) '
         f'(property "Footprint" {_q(footprint)} (at {at[0]} {at[1]} 0) {HIDE}) (property "Datasheet" "" (at {at[0]} {at[1]} 0) {HIDE}) '
         f'(property "MPN" {_q(part.get("mpn", ""))} (at {fx} {fy + 5.08} 0) {(HIDE if not part.get("mpn") or ref[0] in "RCL" else LEFT)}) {numbers} '
         f'(instances (project {_q(sheet.project)} (path {_q(sheet.path)} (reference {_q(ref)}) (unit 1)))))')

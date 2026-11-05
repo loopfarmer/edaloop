@@ -711,7 +711,7 @@ def em_hops(p: Project) -> Outcome:
         findings.append(Finding(f"em_hops:{net}:unsolved", f"{net}: the solver gave no result, so this hop is unchecked: {m['unsolved']}"))
     results = {net: m for net, m in results.items() if net not in unsolved}
     if not results:
-        raise RuntimeError(f"no hop solved. First: {next(iter(unsolved.values()))['unsolved'] if unsolved else 'no RF hops found'}")
+        raise RuntimeError("no hop solved. " + ("; ".join(f"{net}: {m['unsolved'][:160]}" for net, m in unsolved.items()) if unsolved else "No RF hops found"))
     for net, m in results.items():
         # All of the signal comes back and none gets through: the copper in the model isn't joined up, whatever the board does.
         if m["rl_db"] < 1.0 and m["il_max_db"] > 20.0:

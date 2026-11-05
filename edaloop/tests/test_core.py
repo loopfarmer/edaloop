@@ -1519,6 +1519,116 @@ def test_import_score_knows_kicads_reference_renames(tmp_path):
     assert [r["result"] for r in rows] == ["pass", "pass"]
 
 
+def test_an_eagle_hole_keeps_no_copper_ring():
+    from edaloop import evaluate
+
+    # KiCad's importer widens an Eagle <hole> of 0.65 mm by twice rlMinPadTop (10 mil) to 1.158 mm. A plated pad keeps its size.
+    pcb = """(footprint "USB"
+		(pad "" np_thru_hole circle
+			(at -2.89 -2.47 180)
+			(size 1.158 1.158)
+			(drill 0.65)
+			(layers "*.Cu" "*.Mask")
+		)
+		(pad "3" thru_hole circle
+			(at -2.54 0 180)
+			(size 1.778 1.778)
+			(drill 1)
+			(layers "*.Cu" "*.Mask")
+		)
+	)"""
+    fixed, _ = evaluate.eagle_holes(pcb)
+    assert "(size 0.65 0.65)" in fixed and "(size 1.158 1.158)" not in fixed and "(size 1.778 1.778)" in fixed
+    tree = parse_sexpr(fixed)
+    assert [x[0] for x in tree if isinstance(x, list)] == ["pad", "pad"]
+
+
+def test_drc_names_both_items_so_copper_on_no_net_counts_apart(tmp_path, monkeypatch):
+    from edaloop import evaluate
+
+    p = make(tmp_path)
+    report = {"kicad_version": "10", "unconnected_items": [], "schematic_parity": [], "violations": [
+        {"type": "clearance", "severity": "error", "description": "Clearance violation",
+         "items": [{"description": "Pad GND@1 [GND] of X1 on F.Cu"}, {"description": "Polygon [<no net>] of X1 on F.Cu"}]},
+        {"type": "clearance", "severity": "error", "description": "Clearance violation",
+         "items": [{"description": "Track [A] on F.Cu"}, {"description": "Track [B] on F.Cu"}]}]}
+
+    class Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def drc(cmd, **kw):
+        Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(report))
+        return Done()
+    monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": "kicad-cli"})
+    monkeypatch.setattr(toolchain, "run", drc)
+    ev = checks.run_check(p, "drc")
+    assert "Track [A] on F.Cu and Track [B] on F.Cu" in ev.findings[1]["message"]
+    rows = {r["item"]: r for r in evaluate.drc_rows(ev)}
+    assert rows["known.drc"]["result"] == "gap" and rows["known.drc"]["text"].startswith("1 rule errors") and "and 1 more from footprint copper" in rows["known.drc"]["text"]
+
+
+def test_a_rebuilt_board_is_judged_on_its_finished_drc():
+    from edaloop import evaluate
+
+    no_net = {"id": "drc:shorting_items", "message": "Items shorting two nets - Polygon [<no net>] of X1 on F.Cu and Pad 1 [GND] of X1", "severity": "error"}
+    ev = Evidence("drc", "fail", "", {}, {"unconnected": 0}, [no_net])
+    row = evaluate.regen_connects(ev, True)
+    assert row["result"] == "pass" and row["text"].startswith("0 opens, 0 errors and 1 more")
+    ev.findings.append({"id": "drc:clearance", "message": "Clearance violation - Track [A] and Track [B]", "severity": "error"})
+    assert evaluate.regen_connects(ev, True)["result"] == "gap"
+    # No evidence, or a check that crashed, is never read as a whole board.
+    assert evaluate.regen_connects(None, True)["result"] == "gap"
+    assert evaluate.regen_connects(Evidence("drc", "error", "RuntimeError: x", {}), True)["result"] == "gap"
+
+
+def test_a_missing_rule_pack_says_where_to_set_it(tmp_path):
+    p = make(tmp_path, f"rules: {{pack: {tmp_path / 'gone'}}}\n")
+    ev = checks.run_check(p, "rules")
+    assert ev.status == "error" and "ToolMissing" in ev.summary and "rule_pack" in ev.summary
+
+
+def test_a_hop_on_the_bottom_layer_is_referenced_to_the_plane_above_it():
+    from types import SimpleNamespace as T
+
+    from edaloop import em_hops
+
+    four = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    end = {"front": False, "back": True, "drill": 0.0}
+    on_back = [T(kind="segment", layer="B.Cu")]
+    assert em_hops.hop_layers("A", [T(kind="segment", layer="F.Cu")], (end, end), four, {}) == ("F.Cu", "In1.Cu", "In2.Cu", False)
+    # The mirror of the top's reference is an assumption, and says so. A stated one isn't.
+    assert em_hops.hop_layers("A", on_back, (end, end), four, {}) == ("B.Cu", "In2.Cu", "In1.Cu", True)
+    assert em_hops.hop_layers("A", on_back, (end, end), four, {"bottom_reference_layer": "In1.Cu"}) == ("B.Cu", "In1.Cu", "F.Cu", False)
+    assert em_hops.hop_layers("A", on_back, (end, end), ["F.Cu", "B.Cu"], {}) == ("B.Cu", "F.Cu", None, True)
+    # Pads abutting with no track still say which side they're on.
+    assert em_hops.hop_layers("A", [], (end, end), four, {})[0] == "B.Cu"
+    with pytest.raises(em_hops.OffLayer, match="through a via"):
+        em_hops.hop_layers("A", [*on_back, T(kind="via", layer="F.Cu")], (end, end), four, {})
+    with pytest.raises(em_hops.OffLayer, match="In1.Cu"):
+        em_hops.hop_layers("A", [T(kind="segment", layer="In1.Cu")], (end, end), four, {})
+    assert em_hops.on_layer(end, "B.Cu") and not em_hops.on_layer(end, "F.Cu") and em_hops.on_layer({"drill": 0.3}, "F.Cu")
+
+
+def test_hop_ground_vias_are_drawn_on_the_stackups_via_layer():
+    from shapely.geometry import box
+
+    from edaloop import em_hops
+
+    tech = {"Stackup": {"Layers": [{"Name": "F.Cu", "Kind": "Conductor"}, {"Name": "d", "Kind": "Dielectric"}, {"Name": "B.Cu", "Kind": "Conductor"},
+                                   {"Name": "Via F.Cu-B.Cu", "Kind": "Via", "DrawingLayers": [{"Layer": -12, "Datatype": 0}], "SpanFromLayer": "F.Cu", "SpanToLayer": "B.Cu"}]}}
+    assert em_hops.via_layer(tech, "B.Cu", "F.Cu") == -12
+    tech["Stackup"]["Layers"][-1]["SpanToLayer"] = "F.Cu"
+    with pytest.raises(em_hops.OffLayer):
+        em_hops.via_layer(tech, "F.Cu", "B.Cu")
+    entry = {"ref": "U1", "pad": "1", "net": "A", "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5, "rot": 0}
+    leave = {**entry, "ref": "U2", "x": 10.0}
+    # A via on a layer no via entry claims is inert in the solver, so the hop would be solved with no ground vias at all.
+    with pytest.raises(ValueError):
+        em_hops.cut_shapes("A", [], [], [], [(5.0, 1.0)], box(-3, -3, 13, 3), -4, -6, entry, leave)
+    shapes = em_hops.cut_shapes("A", [], [], [], [(5.0, 1.0)], box(-3, -3, 13, 3), -4, -6, entry, leave, vias_on=-12)
+    assert [s["Layer"]["Layer"] for s in shapes if s["$type"] == "Via"] == [-12]
+
+
 def test_still_air_depends_on_the_board():
     from edaloop.thermal import still_air_h
 
@@ -2218,6 +2328,41 @@ def test_kicad6_schematic_moves_instances_and_speaks_only_6_0(tmp_path):
         assert "hide" in [str(x) for x in k6.kid(props[name], "effects")]
         assert k6.kid(props[name], "hide") is None
     assert "(fields_autoplaced)" in text and "(fields_autoplaced yes)" not in text
+
+
+def test_a_part_with_no_value_shows_the_same_one_on_sheet_and_board():
+    from edaloop import schematic
+
+    assert schematic.shown_value("JP1", {"value": ""}) == "JP1" and schematic.shown_value("JP1", {}) == "JP1"
+    assert schematic.shown_value("C1", {"value": "100n"}) == "100n" and schematic.shown_value("D1", {"value": "  NSR0320"}) == "NSR0320"
+    assert schematic.shown_value("D1", {"value": "   "}) == "D1"
+    sheet = schematic.Sheet("x", "x")
+    schematic.add_part(sheet, "JP1", {"value": ""}, "lib:fp", (0.0, 0.0), {"1": (0.0, 0.0, 0)}, "box", w=5.08, h=5.08)
+    assert '(property "Value" "JP1"' in sheet.items[-1]
+    # The board side is written under KiCad's Python, so hold its source to the same rule.
+    assert 'fp.SetValue(str(part.get("value") or "").strip() or ref)' in Path(schematic.__file__).with_name("kicad_ops.py").read_text()
+
+
+def test_a_chips_rf_pad_faces_along_the_line_from_its_own_side(monkeypatch):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+
+    class Part:
+        def __init__(self, pads):
+            self.pads = pads
+
+        def Pads(self):
+            return list(self.pads)
+    # A QFN's second pin, on its left side and well off the middle of it: the centre-to-pad line is 33.5 degrees off the side.
+    qfn = Part({str(i): (0.0, 0.0) for i in range(1, 49)} | {"2": (-3.4, -2.25)})
+    resistor = Part({"1": (-0.5, -0.3), "2": (0.5, 0.3)})
+    monkeypatch.setattr(ops, "_pose", lambda *a: None)
+    monkeypatch.setattr(ops, "_pad_xy", lambda fp, pad: fp.pads[pad])
+    # The last part in a chain faces upstream, along -x, so its left side needs no turn.
+    assert ops._rot_for(qfn, None, "2", (-1.0, 0.0)) == 0.0
+    assert ops._rot_for(qfn, None, "2", (0.0, 1.0)) == 90.0
+    # A two-pad part is still aimed pad to pad, and on its centre line.
+    assert ops._rot_for(resistor, "1", "2", (1.0, 0.0)) == pytest.approx(31.0, abs=0.1)
+    assert ops._rot_for(resistor, None, "2", (1.0, 0.0)) == pytest.approx(31.0, abs=0.1)
 
 
 @pytest.mark.parametrize("value, farads", [("100n", 100e-9), ("100nF", 100e-9), ("100n 50V", 100e-9), ("4u7", 4.7e-6),

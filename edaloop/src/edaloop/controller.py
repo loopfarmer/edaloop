@@ -74,13 +74,15 @@ def _needs_person(p: Project, name: str, ev: Evidence, live: list) -> dict | Non
             "see": "docs/openems-coupon-bias.md", "do_not": "An agent mustn't add this waiver itself."}
 
 
-def run_all(p: Project, stop_on_failure: bool = False, skip: tuple = ()) -> list[dict]:
-    """Run missing or stale gated checks in order. Results already fresh are not recomputed."""
+def run_all(p: Project, stop_on_failure: bool = False, skip: tuple = (), progress=None) -> list[dict]:
+    """Run missing or stale gated checks in order. Results already fresh are not recomputed. `progress` is told each check's name before it runs."""
     from .checks import run_check
     done = []
     for row in gate_state(p):
         if row["state"] in ("pass", "warn") or row["check"] in skip or row["check"] not in REGISTRY:
             continue
+        if progress:
+            progress(row["check"])
         ev = run_check(p, row["check"])
         done.append({"check": ev.check, "status": ev.status, "summary": ev.summary, "seconds": ev.seconds})
         if stop_on_failure and ev.status in ("fail", "error"):

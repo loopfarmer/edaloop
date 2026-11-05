@@ -218,21 +218,29 @@ def repair(text: str, stackup: dict | None) -> str:
     return text
 
 
-_NPTH = re.compile(r'(\(pad\s+""\s+np_thru_hole\s+circle\s+\(at [^)]*\)\s+)\(size ([\d.]+) ([\d.]+)\)(\s+\(drill ([\d.]+)\))')
-
-
 def eagle_holes(text: str) -> tuple[str, int]:
-    """An Eagle `<hole>` is a bare drill with no copper, but KiCad's import makes it an unplated pad wider than its drill on every copper layer.
-    KiCad counts that ring as copper, so header pins beside a locating hole read as shorted to it. Each one goes back to its drill.
-    Only an Eagle import gets this: a native KiCad board may want a ring round an unplated hole."""
-    count = 0
-    def shrink(m):
-        nonlocal count
-        if float(m[2]) <= float(m[5]) and float(m[3]) <= float(m[5]):
-            return m[0]
-        count += 1
-        return f"{m[1]}(size {m[5]} {m[5]}){m[4]}"
-    return _NPTH.sub(shrink, text), count
+    """An Eagle `<hole>` is a bare drill with no copper. KiCad's importer makes it an NPTH pad the drill's size, then widens every round drilled pad,
+    holes included, to the drill plus twice `rlMinPadTop` (`adjustFootprintForDesignRules` in pcb_io_eagle.cpp). That ring is copper the board
+    doesn't have, so DRC reads tracks Eagle passed beside the hole as touching it. Eagle pads are always plated, so every NPTH pad in an Eagle
+    import is a hole, and each goes back to its drill. Only for Eagle imports: a native KiCad NPTH pad can carry a copper ring on purpose."""
+    out, at, count = [], 0, 0
+    for m in re.finditer(r'\(pad\s+"[^"]*"\s+np_thru_hole\s+circle\b', text):
+        if m.start() < at:
+            continue
+        depth, end = 0, m.start()
+        for end in range(m.start(), len(text)):
+            depth += {"(": 1, ")": -1}.get(text[end], 0)
+            if depth == 0:
+                break
+        block = text[m.start():end + 1]
+        drill = re.search(r"\(drill\s+([\d.]+)\s*\)", block)
+        if drill:
+            shrunk = re.sub(r"\(size\s+[\d.]+\s+[\d.]+\)", f"(size {drill[1]} {drill[1]})", block, count=1)
+            count += shrunk != block
+            block = shrunk
+        out += [text[at:m.start()], block]
+        at = end + 1
+    return "".join(out) + text[at:], count
 
 
 def stack_for(sample: dict, copper_layers: int) -> tuple[dict, list[str]]:
@@ -352,11 +360,10 @@ def _pads_in_footprint_copper(message: str) -> set[str]:
     return {f"{m[3]}.{m[1]}" for m in _PAD.finditer(message) if m[2] != "<no net>" and m[3] in owners}
 
 
-def checks_score(sample: dict, out: Path, chain: list | None, approved: int = 0) -> list[dict]:
-    from .project import Project
-    p = Project(out)
+def drc_rows(ev, approved: int = 0) -> list[dict]:
+    """Opens and rule errors on a board that works. Copper drawn inside an Eagle footprint arrives with no net, so it reads as touching what it was
+    made to touch, and is counted apart. A finding names every item it involves, so a fault against such copper counts there whichever item is first."""
     rows = []
-    ev = checks.run_check(p, "drc")
     m = ev.metrics or {}
     if not m:
         rows.append(_row("known.drc", False, f"the check itself failed: {ev.summary}"))
@@ -383,6 +390,21 @@ def checks_score(sample: dict, out: Path, chain: list | None, approved: int = 0)
         types = dict(collections.Counter(f["id"].removeprefix("drc:") for f in hard if f not in no_net).most_common(4))
         note = f" The released file approves {approved} DRC errors in Eagle, with no name or reason, so they aren't matched or waived." if approved else ""
         rows.append(_row("known.drc", errs == 0, f"{errs} rule errors against the file's own clearances {types}, and {len(no_net)} more from footprint copper the import leaves on no net.{note} Warnings: {by}"))
+    return rows
+
+
+def _drc_errors(ev) -> tuple[int, int]:
+    """Rule errors, and those of them that involve copper on no net. The note on a blocked refill is about opens, not a rule error."""
+    hard = [f for f in ev.findings if f.get("severity") == "error" and f.get("id") not in ("drc:unconnected", "drc:refill_blocked")]
+    no_net = sum("<no net>" in f["message"] for f in hard)
+    return len(hard) - no_net, no_net
+
+
+def checks_score(sample: dict, out: Path, chain: list | None, approved: int = 0) -> list[dict]:
+    from .project import Project
+    p = Project(out)
+    rows = []
+    rows += drc_rows(checks.run_check(p, "drc"), approved)
     ev = checks.run_check(p, "rules")
     fab = [f["message"] for f in ev.findings if f.get("severity") == "error"]
     rows.append(_row("known.fabricator", None if ev.status == "error" else not fab, ev.summary if ev.status == "error" else ("; ".join(fab)[:200] or "within the fabricator limits")))
@@ -394,7 +416,8 @@ def checks_score(sample: dict, out: Path, chain: list | None, approved: int = 0)
         ev = checks.run_check(p, "em_hops")
         hops = (ev.metrics or {}).get("hops") or {}
         skipped = {k: v["unsolved"][:160] for k, v in ((ev.metrics or {}).get("unsolved_why") or {}).items()}
-        rows.append(_row("rf.hops", False if skipped or ev.status == "error" else None, (", ".join(f"{k}: {v['rl_db']} dB return loss, {v['il_max_db']} dB loss" for k, v in hops.items()) + (f". Couldn't model: {skipped}" if skipped else "")) if hops or skipped else ev.summary))
+        rows.append(_row("rf.hops", False if skipped or ev.status == "error" else None, (", ".join(f"{k}: {v['rl_db']} dB return loss, {v['il_max_db']} dB loss" + (f" on {v['signal_layer']} over an assumed {v['reference_layer']}" if v.get("reference_assumed") else "")
+                       for k, v in hops.items()) + (f". Couldn't model: {skipped}" if skipped else "")) if hops or skipped else ev.summary))
     if p.section("power").get("rails"):
         ev = checks.run_check(p, "power")
         fatal = [f["message"][:140] for f in ev.findings if f["severity"] == "error"]
@@ -410,6 +433,7 @@ def checks_score(sample: dict, out: Path, chain: list | None, approved: int = 0)
 def regenerate(sample: dict, board: Path, d: dict | None, eagle: dict, out: Path, name: str) -> list[dict]:
     """Rebuild the board from its netlist alone and hold the result against the released layout."""
     from . import compare as comparing
+    from .project import Project
     if not d or not d.get("chain"):
         return [_row("regen.layout", False, "the placer only handles RF rows, and this board has none")]
     lib = out / "imported.pretty"
@@ -422,16 +446,27 @@ def regenerate(sample: dict, board: Path, d: dict | None, eagle: dict, out: Path
     spec.write_text(yaml.safe_dump(bench, sort_keys=False))
     made = boardgen.make(spec, out / "generated", [out], True)
     if not made.get("made"):
-        return [_row("regen.layout", False, f"stopped at {made.get('stopped_at')}: {str(made.get('refused') or made.get('steps', {}).get('route'))[:300]}")]
+        route = made.get("steps", {}).get("route") or {}
+        why = made.get("refused") or made.get("missing") or route.get("stopped_because") or route
+        return [_row("regen.layout", False, f"stopped at {made.get('stopped_at')}: {str(why)[:400]}")]
     new = out / "generated" / f"{name}.kicad_pcb"
     c = comparing.compare(new, board, [row[0] for row in d["chain"]])
-    drc = made["steps"]["route"].get("final_drc") or {}
     a, b = c["first_board"], c["second_board"]
-    return [_row("regen.connects", drc.get("opens") == 0 and drc.get("errors") == 0 and c["same_connections"],
-                 f"{drc.get('opens')} opens, {drc.get('errors')} errors, and {'the same' if c['same_connections'] else 'different'} connections as the released board"),
+    return [regen_connects(Project(out / "generated").ledger.latest().get("drc"), c["same_connections"]),
             _row("regen.size", None, f"{a['size_mm']} mm, released {b['size_mm']} mm"),
             _row("regen.rf", None, f"RF {sum(a['rf_mm'].values()):.2f} mm with {a['rf_vias']} vias, released {sum(b['rf_mm'].values()):.2f} mm with {b['rf_vias']} vias"),
             _row("regen.copper", None, f"{a['copper_mm']} mm of copper and {a['vias']} vias, released {b['copper_mm']} mm and {b['vias']}")]
+
+
+def regen_connects(ev, same: bool) -> dict:
+    """Whether the rebuilt board is whole. Judged on the drc evidence of the finished board, after `finish` replaces the by-class route and
+    adds the stitching, not on the router's own count from before. Copper on no net comes from the released footprints and is counted apart."""
+    if ev is None or not ev.metrics:
+        return _row("regen.connects", False, f"the finished board's DRC didn't run: {ev.summary if ev else 'no drc evidence'}")
+    errs, no_net = _drc_errors(ev)
+    opens = ev.metrics["unconnected"]
+    return _row("regen.connects", opens == 0 and errs == 0 and same,
+                f"{opens} opens, {errs} errors and {no_net} more from footprint copper on no net, and {'the same' if same else 'different'} connections as the released board")
 
 
 def evaluate_one(key: str, sample: dict, work: Path, level: str) -> dict:
