@@ -5,6 +5,7 @@ A clean DRC says nothing about any of this. These rules come from RF design revi
 | Rule | Why | Built by | Measured as |
 |---|---|---|---|
 | Weld a via to each ground pad, at its outer end | Ground reaches the plane through the shortest path, and the via's hole stays out of the pad, so solder can't wick into it | `ground.pad_vias` | `ground_pattern` |
+| Fill an RF connector's ground pads with vias, as many as fit | The cable's shield current returns to the plane through them, and one via is an inductance in series with the shield. General RF practice, not a maker's drawing: none of these connectors' drawings counts vias. `connector_ground_vias` (default `fill`, or a number) sets it, and `connector_ground_min_vias` (default 2) is the floor below which it's reported | `ground.pad_vias`, for parts `rf_rules.is_rf_connector` recognises by footprint, part number or value. A `per_pad` count in the description wins | `connector_ground` |
 | Follow the maker's via pattern for each part | The part was characterised on that layout. Counts and positions come from its drawing | `rf_rules.LAND_PATTERNS`, matched by `mpn` | `ground_pattern` |
 | Fence both sides of an RF line at 70 mil, or a twentieth of a guided wavelength if that's tighter | It holds the coplanar ground to the line. Fences go in after the route, where the copper leaves room | `ground.finish` | `fence` |
 | Connect pours solidly, not with spokes | A thermal spoke is a slot in the return path, and a reflowed board doesn't need one | `kicad_ops` | Zone settings |

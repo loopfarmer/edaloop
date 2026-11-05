@@ -139,14 +139,22 @@ def _write_vias(board: Path, points: list[tuple], locked: bool, work: Path) -> N
     _op("add_vias", board, spec, board)
 
 
-def maker_patterns(bench: dict, facts: dict, cfg: dict) -> dict:
-    """The ground vias each part's maker draws, from `rf_rules.LAND_PATTERNS`. What the description says about a part wins."""
+def maker_patterns(bench: dict, facts: dict, cfg: dict, rf_layout: dict | None = None) -> dict:
+    """The ground vias each part's maker draws, from `rf_rules.LAND_PATTERNS`, and an RF connector's, which fill its
+    ground pads. What the description says about a part wins."""
     parts = bench.get("parts") or {}
+    footprints = (bench.get("layout") or {}).get("footprints") or {}
+    per_pad = cfg.get("per_pad") or {}
+    connector = {**rf_rules.DEFAULTS, **(rf_layout or {})}["connector_ground_vias"]
     by_ref: dict[str, dict] = {}
     for pad in facts["pads"]:
         by_ref.setdefault(pad["ref"], {})[pad["pad"]] = pad
     paddle, counts, under = dict(cfg.get("paddle") or {}), {}, []
     for ref, pads in by_ref.items():
+        if ref not in per_pad and rf_rules.is_rf_connector({**(parts.get(ref) or {}), "footprint": footprints.get(ref, "")}):
+            for number, pad in pads.items():
+                if pad["net"] == "GND" and f"{ref}.{number}" not in per_pad:
+                    counts[f"{ref}.{number}"] = connector
         rule = rf_rules.land_pattern((parts.get(ref) or {}).get("mpn"))
         if not rule:
             continue
@@ -163,7 +171,7 @@ def maker_patterns(bench: dict, facts: dict, cfg: dict) -> dict:
         for a, b in pairs:
             if a in pads and b in pads:
                 under.append((f"{ref} under the body", ((pads[a]["x"] + pads[b]["x"]) / 2, (pads[a]["y"] + pads[b]["y"]) / 2)))
-    return {"paddle": paddle, "counts": {**counts, **(cfg.get("per_pad") or {})}, "under": under}
+    return {"paddle": paddle, "counts": {**counts, **per_pad}, "under": under}
 
 
 def pad_vias(p) -> dict:
@@ -175,7 +183,8 @@ def pad_vias(p) -> dict:
     lines = _planned_lines(bench, facts)
     field = Field(facts, [], [], lines)
     placed, bare, stubs = [], [], []
-    patterned = maker_patterns(bench, facts, cfg)
+    rf_layout = {**rf_rules.DEFAULTS, **p.section("rf_layout")}
+    patterned = maker_patterns(bench, facts, cfg, rf_layout)
     # Datasheet patterns first: vias inside a part's paddle, on a grid.
     for name, (cols, rows) in patterned["paddle"].items():
         pad = next(x for x in facts["pads"] if f"{x['ref']}.{x['pad']}" == name)
@@ -201,7 +210,11 @@ def pad_vias(p) -> dict:
         name = f"{pad['ref']}.{pad['pad']}"
         if pad["net"] != "GND" or name in paddles or not pad["front"]:
             continue
-        want = int(counts.get(name, counts.get(pad["ref"], 1)))
+        asked = counts.get(name, counts.get(pad["ref"], 1))
+        # "fill" takes every welded site that clears. Short of the floor, it's reported like any other count.
+        fill = str(asked).lower() == "fill"
+        want = math.inf if fill else int(asked)
+        need = int(rf_layout["connector_ground_min_vias"]) if fill else want
         got = 0
         for x, y in _candidates(pad, [(a, b, h) for a, b, h in lines]):
             if got >= want:
@@ -210,7 +223,7 @@ def pad_vias(p) -> dict:
                 placed.append((x, y))
                 field.vias.append((x, y))
                 got += 1
-        if got < want:
+        if got < need:
             # A fine-pitch pin has no room for a welded via. Take a short stub off its end to the nearest via that fits.
             long_u = pad["w"] >= pad["h"]
             half = (pad["w"] if long_u else pad["h"]) / 2
@@ -220,14 +233,14 @@ def pad_vias(p) -> dict:
                     u, v = (sign * (half + reach), sideways) if long_u else (sideways, sign * (half + reach))
                     a = _from_pad(pad, sign * half if long_u else 0.0, 0.0 if long_u else sign * half)
                     x, y = _from_pad(pad, u, v)
-                    if got < want and field.clear(x, y) and _stub_clear(field, a, (x, y)):
+                    if got < need and field.clear(x, y) and _stub_clear(field, a, (x, y)):
                         placed.append((x, y))
                         field.vias.append((x, y))
                         stubs.append({"net": "GND", "start": [round(a[0], 4), round(a[1], 4)],
                                       "end": [round(x, 4), round(y, 4)], "width": STUB, "layer": "F.Cu"})
                         got += 1
-        if got < want:
-            bare.append({"pad": name, "wanted": want, "placed": got})
+        if got < need:
+            bare.append({"pad": name, "wanted": "fill" if fill else want, "placed": got})
     _write_vias(p.board, placed, True, work)
     if stubs:
         spec = work / "ground_stubs.json"
