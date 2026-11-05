@@ -2334,3 +2334,104 @@ def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatc
     assert got["made"] is False and got["stopped_at"] == "preflight"
     assert {m["tool"] for m in got["missing"]} == {"circuitRF", "KiCadRoutingTools"}
     assert not out.exists()                     # nothing placed, nothing written
+
+
+def test_an_eagle_hole_imports_without_copper():
+    from edaloop import evaluate
+
+    # KiCad's Eagle import makes a bare <hole> an unplated pad wider than its drill on every copper layer, which DRC reads as copper.
+    pcb = """(kicad_pcb (footprint "L:PI"
+\t\t(pad "" np_thru_hole circle
+\t\t\t(at -22.86 0)
+\t\t\t(size 2.508 2.508)
+\t\t\t(drill 2)
+\t\t\t(layers "*.Cu" "*.Mask"))
+\t\t(pad "" np_thru_hole circle
+\t\t\t(at 0 0)
+\t\t\t(size 3 3)
+\t\t\t(drill 3)
+\t\t\t(layers "*.Cu" "*.Mask"))
+\t\t(pad "1" thru_hole circle
+\t\t\t(at -24.13 1.27)
+\t\t\t(size 1.408 1.408)
+\t\t\t(drill 0.9)
+\t\t\t(layers "*.Cu" "*.Mask"))))"""
+    fixed, n = evaluate.eagle_holes(pcb)
+    assert n == 1
+    assert "(size 2 2)" in fixed and "(size 2.508 2.508)" not in fixed
+    assert "(size 3 3)" in fixed and "(size 1.408 1.408)" in fixed     # a bare hole and a plated pad are left alone
+    # The general repair also runs on native KiCad copies, where a ring round an unplated hole may be meant, so it mustn't do this.
+    assert "(size 2.508 2.508)" in evaluate.repair(pcb, None)
+
+
+def test_eagle_approvals_are_counted_not_waived(tmp_path):
+    from edaloop import evaluate
+
+    f = tmp_path / "b.brd"
+    f.write_text('<eagle><drawing><board><signals/><errors><approved hash="4,1,a"/><approved hash="4,16,b"/></errors></board></drawing></eagle>')
+    assert evaluate.read_eagle(f)["approved"] == 2
+
+
+def _fake_drc(monkeypatch, violations, unconnected=()):
+    def run(cmd, **kw):
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.write_text(json.dumps({"violations": violations, "unconnected_items": list(unconnected), "schematic_parity": [], "kicad_version": "test"}))
+
+        class Done:
+            returncode, stdout, stderr = 0, "", ""
+        return Done()
+    monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": "kicad-cli"})
+    monkeypatch.setattr(toolchain, "run", run)
+
+
+def test_drc_finding_names_every_item(tmp_path, monkeypatch):
+    p = make(tmp_path)
+    _fake_drc(monkeypatch, [{"type": "clearance", "severity": "error", "description": "Clearance violation (actual 0.0000 mm)",
+                             "items": [{"description": "Pad 1 [GND] of SJ6 on F.Cu"}, {"description": "Pad WIRE [<no net>] of SJ6 on F.Cu"}]}])
+    ev = checks.run_check(p, "drc")
+    msg = next(f["message"] for f in ev.findings if f["id"] == "drc:clearance")
+    # The second item decides what this is: copper inside a footprint that the import left on no net.
+    assert "[GND] of SJ6" in msg and "[<no net>]" in msg
+
+
+def test_known_drc_sets_footprint_copper_apart_and_reports_approvals(tmp_path, monkeypatch):
+    from edaloop import evaluate
+
+    make(tmp_path)
+    _fake_drc(monkeypatch, [
+        {"type": "clearance", "severity": "error", "description": "Clearance violation", "items": [{"description": "Pad 1 [GND] of SJ6"}, {"description": "Pad WIRE [<no net>] of SJ6"}]},
+        {"type": "hole_clearance", "severity": "error", "description": "Hole clearance violation", "items": [{"description": "PTH pad 1 [3.3V] of RPI1"}, {"description": "NPTH pad of RPI1"}]}])
+    rows = {r["item"]: r for r in evaluate.checks_score({}, tmp_path, None, approved=16)}
+    assert rows["known.opens"]["result"] == "pass"
+    drc = rows["known.drc"]
+    assert drc["result"] == "gap"           # an Eagle approval has no name or reason, so it can't make a pass
+    assert drc["text"].startswith("1 rule errors") and "hole_clearance" in drc["text"] and "1 more from footprint copper" in drc["text"]
+    assert "approves 16 DRC errors" in drc["text"]
+    assert "Warnings: {}" in drc["text"]     # both findings are errors, so neither is counted as a warning
+
+
+def test_known_opens_sets_apart_only_pads_under_their_own_footprint_copper(tmp_path, monkeypatch):
+    from edaloop import evaluate
+
+    make(tmp_path)
+    def violation(a, b):
+        return {"type": "clearance", "severity": "error", "description": "Clearance violation", "items": [{"description": a}, {"description": b}]}
+    def gap(pad):
+        return {"description": "Missing connection between items", "items": [{"description": pad}, {"description": "Zone [GND] on F.Cu, priority 6"}]}
+    _fake_drc(monkeypatch, [violation("Pad 61 [GND] of U6 on F.Cu", "Polygon [<no net>] of U6 on F.Cu"),
+                            violation("Pad 3 [GND] of U7 on F.Cu", "Polygon [<no net>] of U9 on F.Cu")],     # someone else's copper
+              [gap("Pad 61 [GND] of U6 on F.Cu"), gap("Pad 3 [GND] of U7 on F.Cu"), gap("Pad 1 [VBUS] of J1 on F.Cu")])
+    opens = next(r for r in evaluate.checks_score({}, tmp_path, None) if r["item"] == "known.opens")
+    assert opens["result"] == "gap" and opens["text"].startswith("2 open connections")
+    assert "1 more at pads under footprint copper" in opens["text"] and "U6.61" in opens["text"] and "U7.3" not in opens["text"]
+    _fake_drc(monkeypatch, [violation("Pad 61 [GND] of U6 on F.Cu", "Polygon [<no net>] of U6 on F.Cu")], [gap("Pad 61 [GND] of U6 on F.Cu")])
+    opens = next(r for r in evaluate.checks_score({}, tmp_path, None) if r["item"] == "known.opens")
+    assert opens["result"] == "pass" and opens["text"].startswith("0 open connections") and "U6.61" in opens["text"]
+
+
+def test_a_missing_rule_pack_says_where_to_point(tmp_path, monkeypatch):
+    p = make(tmp_path)
+    monkeypatch.setattr(toolchain, "paths", lambda: {"rule_pack": str(tmp_path / "no-pack")})
+    ev = checks.run_check(p, "rules")
+    assert ev.status == "error" and "summit_standard.yaml" in ev.summary
+    assert "Set rule_pack in the toolchain config" in ev.summary      # where to point edaloop, not a bare FileNotFoundError
