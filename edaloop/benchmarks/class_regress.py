@@ -11,9 +11,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from edaloop import checks, route_classes                 # noqa: E402
-from edaloop.pcbfile import Board                         # noqa: E402
-from edaloop.project import Project                       # noqa: E402
+from edaloop import checks, route_classes
+from edaloop.pcbfile import Board
+from edaloop.project import Project
 
 GATE = ["drc", "rf_path", "rf_reference", "rules", "impedance"]
 

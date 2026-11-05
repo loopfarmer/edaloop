@@ -2748,3 +2748,19 @@ def test_em_hops_plots_each_hops_sparameters(tmp_path):
     svg = em_hops.sparams_svg(paths, 1.0e9, 1.5e9, tmp_path / "s.svg", "demo").read_text()
     assert svg.count("<polyline") == 4 and ">IN<" in svg and ">OUT<" in svg     # S11 and S21 for each hop
     assert not re.search(r">-0\.0+<", svg) and "not a measurement" in svg     # no negative zero on a tick
+
+
+def test_an_eagle_wire_lying_on_the_outline_is_dropped():
+    from edaloop import evaluate
+
+    def line(a, b, layer="Edge.Cuts"):
+        return f'\t(gr_line\n\t\t(start {a[0]} {a[1]})\n\t\t(end {b[0]} {b[1]})\n\t\t(stroke\n\t\t\t(width 0.05)\n\t\t)\n\t\t(layer "{layer}")\n\t)\n'
+    # Eagle's Dimension layer can carry a short wire over a longer edge. Eagle cuts the same board, and KiCad reads the outline as open.
+    pcb = ("(kicad_pcb\n" + line((0, -27.7), (0, -3)) + line((0, -19.558), (0, -19.685)) + line((3, 0), (62, 0)) + line((3, 0), (62, 0))
+           + line((0, -10), (0, -5), "F.SilkS") + line((0, -2), (0, -1)) + ")\n")
+    fixed, n = evaluate.eagle_outline(pcb)
+    assert n == 2              # the short wire on the left edge, and one of two identical edges
+    assert "(start 0 -19.558)" not in fixed and fixed.count("(start 3 0)") == 1
+    assert "(start 0 -27.7)" in fixed and "(start 0 -10)" in fixed      # the edge it lay on, and silk, stay
+    assert "(start 0 -2)" in fixed                                      # a wire beyond the edge's end isn't on it
+    assert fixed.count("(gr_line") == 4 and parse_sexpr(fixed)

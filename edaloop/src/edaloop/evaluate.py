@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import collections
 import json
+import math
 import re
 import shutil
 import sys
@@ -243,6 +244,55 @@ def eagle_holes(text: str) -> tuple[str, int]:
     return "".join(out) + text[at:], count
 
 
+def _block_end(text: str, start: int) -> int:
+    """The index of the parenthesis that closes the s-expression opening at `start`."""
+    depth = 0
+    for end in range(start, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[end], 0)
+        if depth == 0:
+            return end
+    return len(text) - 1
+
+
+def _on_segment(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float], tol: float = 1e-4) -> bool:
+    (px, py), (ax, ay), (bx, by) = p, a, b
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    if length2 == 0:
+        return math.hypot(px - ax, py - ay) <= tol
+    t = ((px - ax) * dx + (py - ay) * dy) / length2
+    if t < -tol or t > 1 + tol:
+        return False
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy)) <= tol
+
+
+def eagle_outline(text: str) -> tuple[str, int]:
+    """Eagle cuts the board along every wire on its Dimension layer, so a short wire drawn over a longer one changes nothing. KiCad wants the
+    Edge.Cuts segments to meet end to end, and reads such a wire as an open outline (`invalid_outline`), and then won't refill any pour. A
+    straight edge lying wholly on another straight edge is dropped, as the cut is the same without it. Only for Eagle imports, and arcs stay."""
+    found = []
+    for m in re.finditer(r"\(gr_line\s+\(start\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)", text):
+        end = _block_end(text, m.start())
+        if '(layer "Edge.Cuts")' in text[m.start():end + 1]:
+            a, b = (float(m[1]), float(m[2])), (float(m[3]), float(m[4]))
+            found.append((m.start(), end, a, b, math.dist(a, b)))
+    drop = []
+    for i, (s, e, a, b, length) in enumerate(found):
+        # Of two identical edges, the first is kept.
+        if any(j != i and _on_segment(a, c, d) and _on_segment(b, c, d) and (other > length or (other == length and j < i))
+               for j, (_, _, c, d, other) in enumerate(found)):
+            drop.append((s, e))
+    out, at = [], 0
+    for s, e in drop:
+        line_start = text.rfind("\n", 0, s) + 1
+        cut = line_start if not text[line_start:s].strip() else s
+        out.append(text[at:cut])
+        at = e + 1
+        if text[at:at + 1] == "\n":
+            at += 1
+    return "".join(out) + text[at:], len(drop)
+
+
 def stack_for(sample: dict, copper_layers: int) -> tuple[dict, list[str]]:
     """The stackup, and which of its values aren't stated by the board's own documents."""
     known, assumed = sample.get("known") or {}, sample.get("assumed") or {}
@@ -271,6 +321,7 @@ def import_board(sample: dict, brd: Path, eagle: dict, out: Path, name: str) -> 
     stack, _ = stack_for(sample, eagle["copper_layers"])
     board = out / f"{name}.kicad_pcb"
     text, _ = eagle_holes(raw.read_text())
+    text, _ = eagle_outline(text)
     board.write_text(repair(text, stack))
     raw.unlink()
     (out / "imported_raw.kicad_prl").unlink(missing_ok=True)
