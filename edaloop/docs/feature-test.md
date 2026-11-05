@@ -8,6 +8,8 @@ KiCad 10.0.8, `pcbnew` and ngspice 44.2 ran from KiCad's Docker image (`kicad/ki
 
 ## What ran
 
+### gain_block_demo
+
 | Step | Result | Notes |
 |---|---|---|
 | `build` | Placed 18 parts on a 40 × 20 mm board | |
