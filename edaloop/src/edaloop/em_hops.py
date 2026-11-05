@@ -29,6 +29,7 @@ UM = 1000       # clay's database units per micron
 MESH_FAULTS = ("volume is 0", "MeshError")
 WINDOW_RETRIES_MM = (0.37, 0.71)   # not round numbers, so the new edge doesn't land on the same copper
 DEFAULT_WORKERS = 3      # each solver uses several threads itself, so more than this mostly contends
+KILLED = "killed by the system"     # what _em_run says when the solver died to SIGKILL, which is most often the kernel out of memory
 
 
 def _layer(n: int) -> dict:
@@ -62,27 +63,57 @@ def _snapped(points) -> list[tuple[float, float]]:
     return [(round(p[0], 2), round(p[1], 2)) for p in points]
 
 
-def land_edge(pad: dict, into: tuple[float, float]) -> tuple[float, float]:
-    """Where the track leaves a land, heading along the line, stepped just onto the track so that a solver reads it as on the metal."""
+def land_edge(pad: dict, into: tuple[float, float], tracks: list = ()) -> tuple[float, float]:
+    """Where the track leaves a land, heading along the line, stepped just onto the track so that a solver reads it as on the metal.
+
+    The line through the land's centre is used when the track is on it. A track can leave from off centre, as one drawn from a corner of a
+    wide connector land does, and then the port goes where that track crosses the land's edge, since anywhere else it's on no metal."""
+    land = pad_polygon(pad)
     reach = pad["w"] + pad["h"]
     ray = LineString([(pad["x"], pad["y"]), (pad["x"] + into[0] * reach, pad["y"] + into[1] * reach)])
-    hit = ray.intersection(pad_polygon(pad).exterior)
+    hit = ray.intersection(land.exterior)
     point = hit if hit.geom_type == "Point" else min(hit.geoms, key=lambda g: g.distance(Point(pad["x"], pad["y"])))
     step = 0.005
-    return point.x + into[0] * step, point.y + into[1] * step
+    at = (point.x + into[0] * step, point.y + into[1] * step)
+    if tracks and not any(LineString([t.start, t.end]).distance(Point(at)) < t.width / 2 for t in tracks):
+        crossing = _track_leaves(land, tracks, into)
+        if crossing is not None:
+            at = (crossing[0] + into[0] * step, crossing[1] + into[1] * step)
+    return at
+
+
+def _track_leaves(land: Polygon, tracks: list, into: tuple[float, float]) -> tuple[float, float] | None:
+    """Where a track heading `into` crosses out of the land, or None if no track does."""
+    for t in tracks:
+        for near, far in ((t.start, t.end), (t.end, t.start)):
+            span = math.dist(near, far)
+            if span < 1e-9 or land.distance(Point(near)) >= 1e-3 or land.contains(Point(far)):
+                continue
+            if ((far[0] - near[0]) * into[0] + (far[1] - near[1]) * into[1]) / span < 0.9998:
+                continue
+            hit = LineString([near, far]).intersection(land.exterior)
+            points = [hit] if hit.geom_type == "Point" else [g for g in getattr(hit, "geoms", []) if g.geom_type == "Point"]
+            if points:
+                p = max(points, key=lambda g: g.distance(Point(near)))
+                return p.x, p.y
+    return None
 
 
 def leaving_direction(pad: dict, tracks: list, chord: tuple[float, float]) -> tuple[float, float]:
     """Which way the track leaves a land. On a hop that bends, the straight line to the far end misses the copper, and so would a port put on it."""
     land = pad_polygon(pad)
+    leaving = []
     for t in tracks:
         for near, far in ((t.start, t.end), (t.end, t.start)):
             if land.distance(Point(near)) < 1e-3 and not land.contains(Point(far)):
                 span = math.dist(near, far)
-                d = ((far[0] - near[0]) / span, (far[1] - near[1]) / span)
-                # Keep the straight line when the track agrees with it, so that a straight hop's port doesn't move.
-                return chord if d[0] * chord[0] + d[1] * chord[1] > 0.9998 else d
-    return chord
+                leaving.append(((far[0] - near[0]) / span, (far[1] - near[1]) / span))
+    if not leaving:
+        return chord
+    # A land with a tap on it has more than one track leaving. The hop runs along the one heading most towards its other end.
+    d = max(leaving, key=lambda v: v[0] * chord[0] + v[1] * chord[1])
+    # Keep the straight line when the track agrees with it, so that a straight hop's port doesn't move.
+    return chord if d[0] * chord[0] + d[1] * chord[1] > 0.9998 else d
 
 
 def direction_label(d: tuple[float, float]) -> str:
@@ -148,7 +179,12 @@ def cut_shapes(net: str, tracks: list, pads: list, pours: list[Polygon], vias: l
     d = ((leave["x"] - entry["x"]) / span, (leave["y"] - entry["y"]) / span)
     for text, pad, chord in (("1", entry, d), ("2", leave, (-d[0], -d[1]))):
         into = leaving_direction(pad, tracks, chord)
-        at = _snapped([land_edge(pad, into)])[0]
+        at = _snapped([land_edge(pad, into, tracks)])[0]
+        # Snapping can pull a port that sat a few microns past the edge back onto the land, which is cut out of the model. Step it on again.
+        for _ in range(3):
+            if pad_polygon(pad).distance(Point(at)) > 1e-3:
+                break
+            at = _snapped([(at[0] + into[0] * 0.01, at[1] + into[1] * 0.01)])[0]
         shapes.append({"$type": "Label", "Layer": _layer(signal), "X": int(round(at[0] * 1000 * UM)), "Y": int(round(-at[1] * 1000 * UM)),
                        "Text": text, "Height": 400000, "IsPort": True, "PortDirection": direction_label(into)})
     return shapes
@@ -205,7 +241,12 @@ def solve_unique(jobs: dict[str, Path], solve, workers: int) -> dict:
         except RuntimeError as e:
             return str(e)[:900]
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
-        return dict(zip(jobs, pool.map(one, jobs.values())))
+        out = dict(zip(jobs, pool.map(one, jobs.values())))
+    # A solver the system killed most likely ran out of memory beside the others. Alone it may fit, so each gets one more go, one at a time.
+    for key in [k for k, v in out.items() if isinstance(v, str) and KILLED in v]:
+        again = one(jobs[key])
+        out[key] = again if not isinstance(again, str) else f"{again[:820]} (also when run alone)"
+    return out
 
 
 def run(p, cfg: dict, board, chains: list, solver: dict, solver_label: str, run_solver) -> dict:

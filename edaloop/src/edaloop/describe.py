@@ -150,12 +150,15 @@ def find_chains(parts: dict, nets: dict) -> list[list[list[str]]]:
     # A part that says it's an RF connector or antenna, whatever its reference. On a schematic with no such word, any J.
     ports = sorted((r for r, p in parts.items() if RF_PORT.search(f"{p.get('value', '')} {p.get('footprint', '')}")), key=lambda r: (len(r), r))
     connectors = ports or sorted((r for r in parts if CONNECTOR_REF.match(r)), key=lambda r: (len(r), r))
-    # One RF port and a radio: the path ends at the radio, and a series inductor on the way is matching rather than a choke.
-    radio_end = len(connectors) == 1 and bool(ports)
-    if len(connectors) < 2 and not radio_end:
-        raise DescribeError(f"an RF path needs two connectors, and this has {connectors or 'none'}")
     # A control or power bus joins many parts, and a signal doesn't travel along one.
     usable = {n for n, m in nets.items() if not GROUND.match(n) and not RAIL.match(n) and not n.startswith("unconnected-") and len(m) <= MAX_RF_NET_PINS}
+    # One footprint can hold two RF ports, as an in-line part with a plug at one end and a jack at the other does. Each of its signal pins on a
+    # net of its own is then a port, and a path can run from one to another. Only a part that says it's an RF port counts: a header's pins aren't.
+    multi_port = {r for r in ports if len({n for n in pins[r].values() if n in usable}) >= 2}
+    # One RF port and a radio: the path ends at the radio, and a series inductor on the way is matching rather than a choke.
+    radio_end = len(connectors) == 1 and bool(ports) and not multi_port
+    if len(connectors) < 2 and not radio_end and not multi_port:
+        raise DescribeError(f"an RF path needs two connectors, and this has {connectors or 'none'}")
     chains: list = []
     used: set[str] = set()
     steps = [0]
@@ -174,9 +177,16 @@ def find_chains(parts: dict, nets: dict) -> list[list[list[str]]]:
                     continue
                 for member in nets[net]:
                     other, _, other_pin = member.partition(".")
-                    if other == ref or other in seen or other in used or other not in parts or parts[other].get("dnp"):
+                    if other == ref:
                         continue
                     step = [net, f"{ref}.{pin}", member]
+                    if other == start and start in multi_port and path and net != path[0][0]:
+                        # Back at the footprint it started from, on another of its ports.
+                        if len(path) + 1 > len(best):
+                            best = [*path, step]
+                        continue
+                    if other in seen or other in used or other not in parts or parts[other].get("dnp"):
+                        continue
                     if other in connectors or (radio_end and other.startswith(ACTIVE) and len(pins[other]) > 2):
                         if len(path) + 1 > len(best):
                             best = [*path, step]
