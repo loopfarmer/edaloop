@@ -2176,3 +2176,17 @@ def test_convert_chains_reads_back_the_same_and_never_overwrites(tmp_path):
 def test_init_points_at_a_python_chain_spec_it_cannot_use(tmp_path):
     (tmp_path / "chains.py").write_text("CHAINS = []\n")
     assert init(tmp_path)["convert"] == ["edaloop convert-chains chains.py"]
+
+
+def test_a_missing_tool_is_named_not_a_raw_traceback(monkeypatch, tmp_path):
+    monkeypatch.setattr(toolchain, "paths", lambda: {"circuitrf": str(tmp_path / "nope" / "CircuitRF.Cli")})
+    with pytest.raises(toolchain.ToolMissing, match="circuitrf isn't installed.*edaloop doctor"):
+        toolchain.run([str(tmp_path / "nope" / "CircuitRF.Cli"), "--version"])
+    # Still a FileNotFoundError, so handlers written for that keep working.
+    assert issubclass(toolchain.ToolMissing, FileNotFoundError)
+    # Inside a check it's an error with the message, never a pass.
+    monkeypatch.setitem(checks.REGISTRY["project_files"], "fn",
+                        lambda p: toolchain.run([str(tmp_path / "nope" / "CircuitRF.Cli")]))
+    p = make(tmp_path)
+    ev = checks.run_check(p, "project_files")
+    assert ev.status == "error" and "circuitrf isn't installed" in ev.summary
