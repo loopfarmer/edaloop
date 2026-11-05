@@ -44,6 +44,8 @@ All of these go under `layout`, and all are optional except `footprints`.
 | `schematic_pages` | one per path | `one` draws everything on one sheet. A board with one path always does. |
 | `unlisted_pads` | refuse | `open` lets a footprint have pads the schematic doesn't. The rules check still reports them, because they may be pins a symbol dropped. Confirm them against the datasheet first. |
 
+The RF layout rules' limits go under `project.rf_layout`, which the build copies to `rf_layout:` in `edaloop.yaml`, so that placement builds to the same numbers the `rf_layout` check measures. Placement reads `tap_stub_mm` from it. Unset, a shunt tap's RF pad goes on the line. Set, it sits beside the line, that far from the line's edge, on a stub. That measured worse on gain_block_demo: see [Taps beside the line](rf-layout-rules.md#taps-beside-the-line).
+
 ## Limits
 
 - Placement handles straight RF rows. It doesn't fold a path, avoid an obstacle or fit a fixed outline with a cut-out.
