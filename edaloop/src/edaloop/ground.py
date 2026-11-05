@@ -75,6 +75,9 @@ class Field:
         self.lines = lines          # planned copper that isn't laid yet: (a, b, half width)
         self.x1, self.y1, self.x2, self.y2 = facts["outline"]
         self.keepouts = [k["pts"] for k in facts.get("keepouts") or [] if len(k["pts"]) >= 3]
+        # Every drilled pad is a hole, whatever its net. A footprint's own ground holes (a land pattern's vias, a filter's
+        # plated ground holes) aren't foreign copper, but a new via's drill must still keep its distance from them.
+        self.holes = [(p["x"], p["y"], p["drill"]) for p in facts["pads"] if (p.get("drill") or 0) > 0]
 
     def clear(self, x: float, y: float) -> bool:
         reach = RADIUS + CLEAR
@@ -87,6 +90,9 @@ class Field:
         if any(_in_polygon(x, y, pts) or _polygon_gap(x, y, pts) < RADIUS for pts in self.keepouts):
             return False
         if any(_seg_gap((x, y), a, b) < reach + hw for a, b, hw in self.tracks + self.lines):
+            return False
+        # The same edge-to-edge gap as two of these vias at their pitch.
+        if any(math.hypot(x - hx, y - hy) < (DRILL + d) / 2 + HOLE_PITCH - DRILL for hx, hy, d in self.holes):
             return False
         return all(math.hypot(x - vx, y - vy) >= HOLE_PITCH for vx, vy in self.vias)
 

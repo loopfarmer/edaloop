@@ -2776,6 +2776,22 @@ def test_no_via_is_placed_in_a_keepout_rule_area():
     assert field.clear(5.0, 5.0 - 0.95 - ground.RADIUS - 0.01)
 
 
+def test_no_via_is_placed_on_a_footprints_own_ground_hole():
+    # lband_element's TT1224 land pattern carries its own ground vias as pads, and its filters have plated ground holes.
+    # ground placed vias on top of them (holes co-located) and 0.16 mm from them (hole to hole), as only other nets' pads were obstacles.
+    from edaloop import ground
+    hole = {"ref": "U1", "pad": "2", "net": "GND", "x": 10.0, "y": 10.0, "w": 0.6, "h": 0.6, "rot": 0, "drill": 0.3}
+    field = ground.Field({"pads": [hole], "outline": [0, 0, 20, 20]}, [], [], [])
+    assert not field.clear(10.0, 10.0)                                   # co-located
+    gap = ground.HOLE_PITCH - ground.DRILL                               # the gap two of its own vias keep
+    edge = (ground.DRILL + 0.3) / 2 + gap
+    assert not field.clear(10.0 + edge - 0.01, 10.0)
+    assert field.clear(10.0 + edge + 0.01, 10.0)
+    # An SMD ground pad has no hole, so a via may still weld to it.
+    smd = {**hole, "drill": 0}
+    assert ground.Field({"pads": [smd], "outline": [0, 0, 20, 20]}, [], [], []).clear(10.0 + 0.5, 10.0)
+
+
 def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatch):
     from edaloop import boardgen
     monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "py"),
