@@ -360,7 +360,8 @@ def checks_score(sample: dict, out: Path, chain: list | None) -> list[dict]:
         ev = checks.run_check(p, "em_hops")
         hops = (ev.metrics or {}).get("hops") or {}
         skipped = {k: v["unsolved"][:90] for k, v in ((ev.metrics or {}).get("unsolved_why") or {}).items()}
-        rows.append(_row("rf.hops", False if skipped or ev.status == "error" else None, (", ".join(f"{k}: {v['rl_db']} dB return loss, {v['il_max_db']} dB loss" for k, v in hops.items()) + (f". Couldn't model: {skipped}" if skipped else "")) if hops or skipped else ev.summary))
+        rows.append(_row("rf.hops", False if skipped or ev.status == "error" else None, (", ".join(f"{k}: {v['rl_db']} dB return loss, {v['il_max_db']} dB loss" + (f" on {v['signal_layer']} over an assumed {v['reference_layer']}" if v.get("reference_assumed") else "")
+                       for k, v in hops.items()) + (f". Couldn't model: {skipped}" if skipped else "")) if hops or skipped else ev.summary))
     if p.section("power").get("rails"):
         ev = checks.run_check(p, "power")
         fatal = [f["message"][:140] for f in ev.findings if f["severity"] == "error"]
