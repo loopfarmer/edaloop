@@ -2696,6 +2696,19 @@ def test_a_tap_stub_of_none_puts_the_pad_back_on_the_line(monkeypatch):
     assert ops.tap_offset(0.18, None, 0.4) == 0.0 and ops.tap_offset(0.18, 0.1, 0.4) == pytest.approx(0.68)
 
 
+def test_a_described_rotation_overrides_the_derived_one(monkeypatch):
+    # cband_element's TT1224 limiter has its RF pads on opposite corners. Derived, it turns 49.6 degrees to put both on the line, and the
+    # board no longer fits its outline. layout.rotation lets a person set it; with nothing set, the derived rotation stands.
+    ops = _fake_placement(monkeypatch)
+    fps, spec = _tap_spec("x", None)
+    derived = {w[0]: w[1] for w in ops._derive_layout(fps, spec)[0][0]}
+    fps, spec = _tap_spec("x", None)
+    spec["layout"]["rotation"] = {"U2": 90}
+    turned = {w[0]: w[1] for w in ops._derive_layout(fps, spec)[0][0]}
+    assert turned["U2"] == 90.0
+    assert {r: v for r, v in turned.items() if r != "U2"} == {r: v for r, v in derived.items() if r != "U2"}
+
+
 def test_the_project_states_the_tap_rule_only_when_the_description_sets_it():
     import yaml
 
