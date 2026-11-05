@@ -406,6 +406,9 @@ pub struct Outcome {
     pub timing: Timing,
     #[serde(skip)]
     pub temperature: Vec<f32>,
+    /// The rise above ambient, in C, at the two ends of the --png colour ramp, so a plot can carry a scale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub png_rise_range_c: Option<[f64; 2]>,
 }
 
 struct Runner<'a> {
@@ -1066,6 +1069,7 @@ pub fn run(p: &Problem, backend: Backend, gpu: Option<&Gpu>) -> Result<Outcome, 
             mcells_per_s: runner.updates / runner.solve_s.max(1e-9) / 1e6,
             sweep_s: crate::solve::SWEEP_NANOS.load(std::sync::atomic::Ordering::Relaxed) as f64 * 1e-9,
         },
+        png_rise_range_c: None,
         temperature: (0..p.layers.len()).flat_map(|k| x_t[k * per * plane..(k * per + 1) * plane].iter().copied()).collect(),
     })
 }

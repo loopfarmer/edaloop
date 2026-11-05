@@ -640,8 +640,21 @@ def board_facts(src, out):
                          "x": pcbnew.ToMM(p.x), "y": pcbnew.ToMM(p.y), "w": pcbnew.ToMM(size.x), "h": pcbnew.ToMM(size.y),
                          "rot": pad.GetOrientationDegrees(), "back": pad.IsOnLayer(pcbnew.B_Cu), "drill": pcbnew.ToMM(pad.GetDrillSizeX()),
                          "front": pad.IsOnLayer(pcbnew.F_Cu)})
+    # Rule areas that forbid vias, the board's own and each footprint's (KiCad's U.FL has one between its ground
+    # pads). A via goes through every layer, so a keepout on any layer rules a site out.
+    keepouts = []
+    zones = list(board.Zones()) + [(fp.GetReference(), z) for fp in board.GetFootprints() for z in fp.Zones()]
+    for item in zones:
+        ref, zone = item if isinstance(item, tuple) else ("", item)
+        if not (zone.GetIsRuleArea() and zone.GetDoNotAllowVias()):
+            continue
+        outline = zone.Outline()
+        for i in range(outline.OutlineCount()):
+            chain = outline.Outline(i)
+            pts = [[pcbnew.ToMM(chain.CPoint(j).x), pcbnew.ToMM(chain.CPoint(j).y)] for j in range(chain.PointCount())]
+            keepouts.append({"ref": ref, "name": zone.GetZoneName(), "pts": pts})
     box = board.GetBoardEdgesBoundingBox()
-    json.dump({"pads": pads, "courtyards": yards,
+    json.dump({"pads": pads, "courtyards": yards, "keepouts": keepouts,
                "outline": [pcbnew.ToMM(box.GetLeft()), pcbnew.ToMM(box.GetTop()), pcbnew.ToMM(box.GetRight()), pcbnew.ToMM(box.GetBottom())]},
               open(out, "w"))
     print(json.dumps({"pads": len(pads)}))

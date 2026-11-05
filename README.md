@@ -140,9 +140,64 @@ edaloop -C my_board export
 
 This writes the board in KiCad 6.0 and EAGLE 7.7 formats, for tools that can't read KiCad 10, and reads each back through KiCad to check that no net, pad or via changed. See [exports.md](edaloop/docs/exports.md). Neither format has been opened in Altium or EAGLE itself.
 
+## Requirements
+
+edaloop drives other tools, and each step needs only some of them. `uv run edaloop doctor` runs every tool it knows, says which work, and gives the fix for each one that doesn't. A check whose tool is missing records an error that names the tool, never a pass.
+
+### What each step needs
+
+| Step | Needs |
+|---|---|
+| `edaloop bench`, and the Python tests | Python and uv only |
+| `build`, `ground`, `drc`, `erc`, `export` | KiCad 10, its Python with `pcbnew`, and `xmllint` for the EAGLE export |
+| Routing (`route`, `make`) | The above, circuitRF to solve the RF line width, and KiCadRoutingTools for power and signal nets. Freerouting is the fallback router |
+| `impedance`, `em_fast`, `em_hops`, `em_crosscheck` | circuitRF with its EM solvers (Palace, openEMS, EMerge, and Gmsh to mesh). `em_crosscheck` needs at least two |
+| `spice` | ngspice |
+| `power`, `thermal_field` | `boardfield`, built from this repository |
+| `mechanical` | OpenSCAD |
+| `capture` | atopile, when the design is written in `ato` |
+
+### The tools
+
+| Tool | Version | How to get it | `toolchain.yaml` key |
+|---|---|---|---|
+| Python | 3.11 or later | Your system, or `uv python install` | |
+| [uv](https://docs.astral.sh/uv/) | Recent | Its installer | |
+| Rust | 1.91 or later. CI builds with 1.99 | [rustup](https://rustup.rs) | |
+| KiCad | 10. CI uses 10.0.8 | [kicad.org](https://www.kicad.org/download/), or the `kicad/kicad:10.0.8` Docker image | `kicad_cli` |
+| KiCad's Python | The one KiCad ships: 3.9 on macOS, 3.13 in the Docker image | Comes with KiCad. It must import `pcbnew` | `kicad_python` |
+| `xmllint` | Any | `libxml2-utils` on Debian and Ubuntu. macOS has it | On `PATH` |
+| [circuitRF](https://github.com/potatobeanradio/circuitRF) | 1.6.5 or later, for EMerge and compare mode | Clone it to `~/.cache/edaloop/circuitRF`, install the .NET 10 SDK, then `dotnet build src/Cli -c Release` | `circuitrf`, and `dotnet_root` for the .NET runtime |
+| EM solvers | As circuitRF installs them | `circuitrf solver install <palace\|openems\|emerge\|gmsh> --yes` | Found by circuitRF |
+| [KiCadRoutingTools](https://github.com/drandyhaas/KiCadRoutingTools) | Recent | Clone it to `~/.cache/edaloop/ext/KiCadRoutingTools`. Make a venv at `~/.cache/edaloop/krt-venv` with its `requirements.txt` (numpy, scipy, shapely, Pillow, ortools), then run `build_router.py` in it. That downloads a prebuilt router, or builds one with `cargo`. `doctor` looks for `rust_router/grid_router.so` | `krt` |
+| Freerouting | One whose jar answers `--version`, which is how `doctor` checks it | Its jar, and a Java runtime | `freerouting_jar`, `java` |
+| ngspice | Developed against 47. The KiCad image has 44.2, which runs the KiCad half of CI | Your package manager | `ngspice` |
+| `boardfield` | This repository | `cargo build --release` in `boardfield/` | `boardfield` |
+| `boardhand` | This repository | `cargo build --release` in `boardhand/` | `boardhand` |
+| OpenSCAD | Developed with 2021.01 | [openscad.org](https://openscad.org) | `openscad` |
+| atopile | Recent | atopile's own instructions | `ato` |
+
+These are optional, and nothing in the loop needs them to run: OrthoRoute (`orthoroute`, `orthoroute_python`) for large regular backplanes; a fabricator rule pack (`rule_pack`) for the `rules` check; a local pcbparts catalogue (`pcbparts_db`) for `capture`; and the KiCad MCP server (`kicad_mcp`) for agents that edit KiCad files directly.
+
+### Telling edaloop where the tools are
+
+The defaults are a macOS install with Homebrew. Elsewhere, list the paths in `~/.config/edaloop/toolchain.yaml`, one key per tool from the table above. This is what CI's `kicad` job writes, inside KiCad's Docker image:
+
+```yaml
+kicad_cli: /usr/bin/kicad-cli
+kicad_python: /usr/bin/python3
+ngspice: /usr/bin/ngspice
+```
+
+`boardhand`'s tests find KiCad through `BOARDHAND_TEST_KICAD_CLI` and `BOARDHAND_TEST_KICAD_PY` instead.
+
+### Running in Docker
+
+KiCad's official image has `kicad-cli`, `pcbnew`, the standard footprints and ngspice. `.github/workflows/ci.yml` runs the KiCad half of the flow in it: `doctor`, the tests, then building, grounding, checking and exporting `gain_block_demo`. That job is the reference for a working Linux setup. It doesn't route yet, because circuitRF and KiCadRoutingTools aren't installed in it. [feature-test.md](edaloop/docs/feature-test.md) records a run of every step those tools allow on `gain_block_demo`, with its results.
+
 ## Getting started
 
-You need KiCad 10 and [uv](https://docs.astral.sh/uv/), plus Rust for `boardfield` and `boardhand`. `doctor` runs each external tool, reports what works, and tells you how to get the rest, including circuitRF and its solvers.
+Install what the steps you want need: see [Requirements](#requirements). `doctor` checks each tool and tells you how to get the ones that are missing.
 
 ```bash
 cd edaloop && uv sync && uv run edaloop doctor --fix

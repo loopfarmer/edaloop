@@ -23,13 +23,25 @@ LAND_PATTERNS = [
     (r"^RLM-(33|63)", {"under": [(("1", "6"), ("3", "4"))], "per_ground_pin": 2, "drawing": "Mini-Circuits PL-258"}),
     (r"^HFCN-3100\+?", {"mid": [("2", "5")], "drawing": "Mini-Circuits PL-158"}),
 ]
+# An RF connector, by its footprint, part number or value. Its ground pads are where the cable's shield meets the
+# board, so they get as many vias as fit. General RF practice, not a maker's drawing: no connector here has one
+# that counts vias, which is why this isn't a LAND_PATTERNS entry.
+RF_CONNECTOR = re.compile(r"Connector_Coaxial|\b[UWH]\.?FL\b|\bIPEX\b|\bMHF|\bSMA\b|\bSMB\b|\bSMP\b|\bMMCX\b|\bMCX\b|\bBNC\b", re.I)
 LIMITER = re.compile(r"^(RLM|VLM)-|limiter", re.I)
 FILTER = re.compile(r"^FL\d|(high|low|band)pass|^(HFCN|LFCN|BFCN)-", re.I)
 SERIES_L_NH = {"0201": 0.25, "0402": 0.35, "0603": 0.45, "0805": 0.6}      # a chip capacitor's own inductance, typical
 VIA_L_NH = 0.25             # a bypass's via to the plane
 
 DEFAULTS = {"fence_factor": 1.25, "fence_reach_mm": 1.3, "coverage_warn": 1.0, "coverage_error": 0.9, "parallel_gap_mm": 1.0, "parallel_max_mm": 3.0,
-            "top_run_max_mm": 5.0, "tap_max_mm": 3.0, "bypass_max_mm": 3.0, "series_rl_min_db": 20.0, "bypass_max_ohm": 25.0}
+            "top_run_max_mm": 5.0, "tap_max_mm": 3.0, "bypass_max_mm": 3.0, "series_rl_min_db": 20.0, "bypass_max_ohm": 25.0,
+            # An RF connector's ground pads: "fill" places as many vias as fit, or give a number. Fewer than the minimum is reported.
+            "connector_ground_vias": "fill", "connector_ground_min_vias": 2}
+
+
+def is_rf_connector(part: dict | None) -> bool:
+    """True for a coax connector, read from its footprint, part number or value."""
+    part = part or {}
+    return any(RF_CONNECTOR.search(str(part.get(k) or "")) for k in ("footprint", "mpn", "value"))
 
 
 def land_pattern(mpn: str | None) -> dict | None:
@@ -338,6 +350,22 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
                     if not any(math.dist(at, v) <= 0.6 for v in ground_vias):
                         short.append(f"{ref}: no via in the row under the body, between pads {x} and {y}")
     metrics["ground_pattern_short"] = short
+
+    # RF connectors: the shield's return reaches the plane through every via on the ground pads.
+    floor = int(c["connector_ground_min_vias"])
+    thin = []
+    for ref, own_pads in by_ref.items():
+        if not is_rf_connector({**(parts.get(ref) or {}), "value": value_of(ref)}):
+            continue
+        for p in own_pads:
+            if p["net"] == "GND":
+                got = sum(1 for v in ground_vias if _pad_edge_distance(p, *v) <= radius_reach)
+                if got < floor:
+                    thin.append(f"{ref}.{p['pad']}: {got}")
+    metrics["connector_ground_thin"] = thin
+    if thin:
+        findings.append(("rf_layout:connector_ground", f"RF connector ground pads with fewer than {floor} vias: " + "; ".join(thin[:8])
+                         + (f"; and {len(thin) - 8} more" if len(thin) > 8 else "") + ". The cable's return current reaches the plane through them", "warning"))
     if short:
         findings.append(("rf_layout:ground_pattern", "Short of the maker's ground-via pattern: " + "; ".join(short[:8]) + (f"; and {len(short) - 8} more" if len(short) > 8 else ""), "warning"))
     return metrics, findings

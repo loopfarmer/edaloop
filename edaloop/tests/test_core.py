@@ -111,9 +111,9 @@ def test_waived_finding_passes_but_stays_on_record(tmp_path):
 
 def test_tool_crash_is_an_error_never_a_pass(tmp_path):
     p = make(tmp_path)
-    ev = checks.run_check(p, "cascade")          # no cascade section, so it raises
-    assert ev.status == "error"
-    assert not controller.status(p)["ready_to_release"] or "cascade" not in p.gate()
+    ev = checks.run_check(p, "capture")          # no capture.kind, so it raises
+    assert ev.status == "error" and "RuntimeError" in ev.summary
+    assert not controller.status(p)["ready_to_release"] or "capture" not in p.gate()
 
 
 def test_em_refuses_draft_and_single_solver(tmp_path):
@@ -2211,3 +2211,126 @@ def test_a_missing_tool_is_named_not_a_raw_traceback(monkeypatch, tmp_path):
     p = make(tmp_path)
     ev = checks.run_check(p, "project_files")
     assert ev.status == "error" and "circuitrf isn't installed" in ev.summary
+
+
+def test_rf_checks_with_no_rf_copper_say_so_rather_than_pass(tmp_path):
+    # An RF net in the chain spec with no copper on the board: a placed but unrouted board.
+    (tmp_path / "c.yaml").write_text('chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n  - {net: RF2, entry: J2.2, exit: J3.1}\n')
+    p = make(tmp_path, "rf: {chains: c.yaml}\n")
+    ev = checks.run_check(p, "rf_reference")
+    assert ev.status == "fail" and any(f["id"] == "rf_reference:unrouted" and "RF2" in f["message"] for f in ev.findings)
+    assert checks._no_rf_copper("x", {"RF"}, Board(tmp_path / "b.kicad_pcb").tracks) == []
+
+
+def test_heat_svg_carries_a_scale_in_absolute_temperature_and_the_parts(tmp_path):
+    import base64
+
+    from edaloop import thermal
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text(PCB.replace('(footprint "x"', '(footprint "x" (at 0 0) (property "Reference" "U1" (at 0 0 0))').replace(
+        'smd rect (net', 'smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net'))
+    png = tmp_path / "heat.png"     # a 1x1 PNG: the renderer embeds whatever boardfield drew
+    png.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"))
+    result = {"png_rise_range_c": [2.0, 12.0], "hotspot": {"x": 0.0, "y": 0.0, "temp_c": 37.0, "rise_c": 12.0}}
+    svg = thermal.heat_svg(png, result, [-5, -5, 5, 5], board, tmp_path / "heat.svg", "demo").read_text()
+    assert "37.0 C" in svg and "27.0 C" in svg and "rise 2.0" in svg          # ambient 25 C plus the rise, both shown
+    assert ">U1<" in svg and "data:image/png;base64," in svg and "not a measurement" in svg
+    del result["png_rise_range_c"]
+    assert "no scale" in thermal.heat_svg(png, result, [-5, -5, 5, 5], board, tmp_path / "h2.svg", "demo").read_text()
+
+
+def test_cascade_with_no_stage_table_says_so_rather_than_crash(tmp_path):
+    p = make(tmp_path, "cascade: {freq_mhz: [], stages: []}\n")
+    ev = checks.run_check(p, "cascade")
+    assert ev.status == "fail" and ev.findings[0]["id"] == "cascade:no_stages" and "stages and freq_mhz" in ev.findings[0]["message"]
+
+# ---------------------------------------------------------------- RF connector ground pads
+
+UFL = "Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical"
+
+
+def _ufl_pads(ref="J1", x0=5.0, y0=5.0):
+    """The U.FL-R-SMT land as KiCad 10's footprint draws it: the centre pin, and two 2.2 x 1.05 mm ground pads."""
+    return [_pad(ref, "1", "RF", x0 - 1.525, y0, 1.05, 1.0),
+            _pad(ref, "2", "GND", x0, y0 - 1.475, 2.2, 1.05), _pad(ref, "2", "GND", x0, y0 + 1.475, 2.2, 1.05)]
+
+
+def _ufl_keepout(ref="J1", x0=5.0, y0=5.0):
+    """The footprint's own top_keepout rule area between the ground pads: no vias, tracks or pour."""
+    return {"ref": ref, "name": "top_keepout", "pts": [[x0 + 1.1, y0 - 0.95], [x0 - 0.99, y0 - 0.95], [x0 - 0.99, y0 + 0.95], [x0 + 1.1, y0 + 0.95]]}
+
+
+def test_rf_connectors_are_recognised_by_footprint_part_number_or_value():
+    from edaloop import rf_rules
+    assert rf_rules.is_rf_connector({"footprint": UFL})
+    assert rf_rules.is_rf_connector({"value": "SMA edge launch"}) and rf_rules.is_rf_connector({"mpn": "U.FL-R-SMT-1(10)"})
+    assert not rf_rules.is_rf_connector({"footprint": "Capacitor_SMD:C_0603_1608Metric", "value": "100n"})
+    assert not rf_rules.is_rf_connector({"value": "SMAJ5.0A"})       # a TVS diode, not a connector
+
+
+def test_connector_ground_pads_are_filled_unless_the_description_says_otherwise():
+    from edaloop import ground
+    pads = _ufl_pads() + [_pad("U1", "2", "GND", 9, 9)]
+    bench = {"parts": {"J1": {"value": "U.FL input"}, "U1": {}}, "layout": {"footprints": {"J1": UFL}}}
+    got = ground.maker_patterns(bench, {"pads": pads}, {})["counts"]
+    assert got["J1.2"] == "fill" and "J1.1" not in got and "U1.2" not in got
+    assert ground.maker_patterns(bench, {"pads": pads}, {"per_pad": {"J1": 1}})["counts"]["J1"] == 1     # a person's count wins
+    assert "J1.2" not in ground.maker_patterns(bench, {"pads": pads}, {"per_pad": {"J1": 1}})["counts"]
+    assert ground.maker_patterns(bench, {"pads": pads}, {}, {"connector_ground_vias": 4})["counts"]["J1.2"] == 4
+
+
+def test_pad_vias_puts_as_many_vias_as_fit_on_a_connector_ground_pad(tmp_path, monkeypatch):
+    from edaloop import ground
+    p = make(tmp_path)
+    pads = _ufl_pads()
+    bench = {"parts": {"J1": {"value": "U.FL input"}}, "layout": {"footprints": {"J1": UFL}}}
+    written = {}
+    monkeypatch.setattr(ground, "_load", lambda p: (bench, {}))
+    keepout = _ufl_keepout()
+    monkeypatch.setattr(ground, "_facts", lambda board, work: {"pads": pads, "outline": [0, 0, 20, 20], "keepouts": [keepout]})
+    monkeypatch.setattr(ground, "_planned_lines", lambda bench, facts: [])
+    monkeypatch.setattr(ground, "_write_vias", lambda board, points, locked, work: written.setdefault("vias", points))
+    out = ground.pad_vias(p)
+    assert out["short_of_target"] == []
+    vias = written["vias"]
+    for pad in pads[1:]:
+        mine = [v for v in vias if ground.pad_gap(pad, *v) <= ground.RADIUS]
+        assert len(mine) >= 4, f"only {len(mine)} vias on a 2.2 x 1.05 mm ground pad"
+    # Nothing in, or touching, the footprint's keepout between the pads: KiCad's DRC would object to every one.
+    assert all(not ground._in_polygon(*v, keepout["pts"]) and ground._polygon_gap(*v, keepout["pts"]) >= ground.RADIUS for v in vias)
+    # Every via clears the centre pin and keeps its hole pitch: filling never breaks a rule to fit one more.
+    assert all(ground.pad_gap(pads[0], *v) >= ground.RADIUS + ground.CLEAR for v in vias)
+    assert all(math.dist(a, b) >= ground.HOLE_PITCH for i, a in enumerate(vias) for b in vias[i + 1:])
+
+
+def test_a_lone_via_on_a_connector_ground_pad_is_reported():
+    from edaloop import rf_rules
+    pads = _ufl_pads()
+    parts = {"J1": {"value": "U.FL input", "footprint": UFL}}
+    lone = [_track("GND", (5.0, 5.0 - 1.475 - 0.6), (5.0, 5.0 - 1.475 - 0.6), 0.61, kind="via"),
+            _track("GND", (5.0, 5.0 + 1.475 + 0.6), (5.0, 5.0 + 1.475 + 0.6), 0.61, kind="via")]
+    metrics, found = rf_rules.audit(lone, {"pads": pads}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
+    assert len(metrics["connector_ground_thin"]) == 2 and any(f[0] == "rf_layout:connector_ground" for f in found)
+    _, found = rf_rules.audit(lone, {"pads": pads}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4, {"connector_ground_min_vias": 1})
+    assert not any(f[0] == "rf_layout:connector_ground" for f in found)       # the floor is a person's setting
+
+
+def test_no_via_is_placed_in_a_keepout_rule_area():
+    from edaloop import ground
+    field = ground.Field({"pads": [], "outline": [0, 0, 20, 20], "keepouts": [_ufl_keepout()]}, [], [], [])
+    assert not field.clear(5.0, 5.0)                     # inside
+    assert not field.clear(5.0, 5.0 - 0.95 - 0.2)         # outside, but the ring would overlap the edge
+    assert field.clear(5.0, 5.0 - 0.95 - ground.RADIUS - 0.01)
+
+
+def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatch):
+    from edaloop import boardgen
+    monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "py"),
+                                                     "circuitrf": str(tmp_path / "crf"), "krt": str(tmp_path / "krt")})
+    (tmp_path / "kicad-cli").write_text("")
+    (tmp_path / "py").write_text("")
+    out = tmp_path / "board"
+    got = boardgen.make(Path("unused.yaml"), out, [])
+    assert got["made"] is False and got["stopped_at"] == "preflight"
+    assert {m["tool"] for m in got["missing"]} == {"circuitRF", "KiCadRoutingTools"}
+    assert not out.exists()                     # nothing placed, nothing written

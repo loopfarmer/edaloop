@@ -152,6 +152,41 @@ jobs:
         run: |
           echo "DEMO=$RUNNER_TEMP/demo" >> "$GITHUB_ENV"
           uv run edaloop build testbenches/gain_block_demo.yaml -o "$RUNNER_TEMP/demo"
+      # Ground vias on the real footprints, through pcbnew. Each U.FL ground pad must take more than one: the
+      # connector rule fills them, and the bare default of one via per pad is what it replaced.
+      - name: Ground vias on gain_block_demo
+        working-directory: edaloop
+        run: |
+          uv run edaloop --json -C "$DEMO" ground | tee "$RUNNER_TEMP/ground.json"
+          uv run python - "$DEMO" "$RUNNER_TEMP/ground.json" <<'EOF'
+          import json, sys
+          from pathlib import Path
+          from edaloop.pcbfile import Board
+          from edaloop.rf_rules import _pad_edge_distance
+          board = Board(next(Path(sys.argv[1]).glob("*.kicad_pcb")))
+          vias = [t.start for t in board.tracks if t.kind == "via" and t.net == "GND"]
+          # all_pads gives half sizes already turned into board axes, so the box needs no rotation.
+          pads = [{**p, "w": 2 * p["hw"], "h": 2 * p["hh"], "rot": 0.0} for p in board.all_pads()
+                  if p["name"].split(".")[0] in ("J1", "J2") and p["net"] == "GND"]
+          counts = {f"{p['name']}@{p['x']:.2f}": sum(_pad_edge_distance(p, *v) <= 0.9 for v in vias) for p in pads}
+          print("connector ground vias:", counts)
+          if not pads or min(counts.values()) < 2:
+              sys.exit(f"a U.FL ground pad has fewer than 2 vias: {counts}")
+          short = [s for s in json.load(open(sys.argv[2]))["short_of_target"] if s["pad"].startswith(("J1", "J2"))]
+          if short:
+              sys.exit(f"connector ground pads short of their target: {short}")
+          EOF
+          # KiCad's own DRC has the last word on where a via may sit: none of the new ones may break a rule area or a clearance.
+          kicad-cli pcb drc --format json --severity-all -o "$RUNNER_TEMP/ground_drc.json" "$(ls "$DEMO"/*.kicad_pcb | head -n 1)"
+          uv run python - "$RUNNER_TEMP/ground_drc.json" <<'EOF'
+          import json, sys
+          placement = {"clearance", "hole_clearance", "hole_to_hole", "shorting_items", "items_not_allowed", "copper_edge_clearance"}
+          bad = [f"{v['type']}: {v['description']}" for v in json.load(open(sys.argv[1]))["violations"]
+                 if v["type"] in placement and any(i["description"].startswith("Via") and "[GND]" in i["description"] for i in v.get("items", []))]
+          print(f"DRC objections to ground vias: {len(bad)}")
+          if bad:
+              sys.exit("\n".join(bad[:20]))
+          EOF
       - name: KiCad checks on gain_block_demo
         working-directory: edaloop
         run: |
