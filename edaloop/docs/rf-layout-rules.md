@@ -21,6 +21,34 @@ A clean DRC says nothing about any of this. These rules come from RF design revi
 | Don't tie filters at a plain node | A lossless node reflects what each filter rejects, so loss swings with phase | Your decision | `tee` |
 | State the stackup and CPWG callout to the fabricator | A width only means 50 ohm on the stackup it was solved for | `review_pack` writes `fab_notes.txt` | Review |
 
+## What `em_hops` solves for each hop
+
+`em_hops` cuts a window round each RF hop from the routed board and solves it as a 2-port in EMerge through circuitRF. It holds the hop's tracks, the tap pads on the line, the ground fill and ground pads on each signal layer, the ground vias in the window, and each signal layer's reference plane. The parts aren't in it, and neither are their own lands: the track is cut where it enters each end land, and a port is a lumped sheet there. Read the result as what the routing adds to the parts' datasheet figures.
+
+| Hop | Reference planes | Marked assumed when |
+|---|---|---|
+| Wholly on F.Cu | `reference_layer`, or In1.Cu on a board with inner layers | Never. It's the plane the stackup is routed against |
+| Wholly on B.Cu | `bottom_reference_layer`, or the mirror of the top's | The mirror is used |
+| Through vias of its own | Each signal layer's own. F.Cu's and B.Cu's as above. An inner layer's are `inner_reference_layers[layer]`, or the inner layers either side of it | A mirror or the inner default is used, or an antipad isn't measured |
+
+A hop through a via is solved as one model across its layers:
+
+- **The via:** its barrel is a solid cylinder of its drill, from the top of its span to the bottom, so a through via used to reach an inner layer keeps its stub. The span comes from the stackup entry of exactly that span. A blind or buried via needs one, or the hop is refused.
+- **Its rings:** drawn on every layer of its span, unless the board removes the unused ones. Then only the layers a track joins, and the two ends if it keeps them.
+- **Its antipads:** each reference plane is drawn whole across the window, with a round hole at each signal via. The hole's radius is measured from the board's own ground fill on that layer, the distance from the via's centre to the fill. With no fill there it's the via's ring, or its hole where the ring is removed, plus that layer's pour clearance, or 0.2 mm if no pour states one. That one is marked assumed. A hole is drawn as a 32-gon with its corners on the circle, so its edge midpoints are 0.5% inside it.
+- **Layers it passes:** a layer inside the via's span that's neither a signal layer nor a reference is drawn from its own ground fill, with the fill's own clearance round the via.
+- **Ground vias:** every ground via in the window, at the fabricator's preferred 0.61 mm pad and 0.254 mm drill, on the stackup's via entry that joins all the hop's layers.
+- **Ports:** each on its own end's layer, returning through the nearest reference plane with metal under it.
+
+These are refused, each with its reason in the finding:
+
+- A via whose layers have no plane in common, so that the return current changes plane there, with no ground via within `return_via_mm` of it. That defaults to the window's margin, `margin_mm`, 2.5 mm, so that the return path is inside the model.
+- A ground fill that reaches a signal via's ring, which shorts it on the board as filled.
+- A via with a padstack that differs by layer, a span the stackup has no entry for, or a signal layer that's another signal layer's reference plane. That includes every hop through a via on a two-layer board.
+- A hop that changes layer with no via of its own, through a drilled pad, since that pad's barrel isn't drawn.
+
+Each hop's assumptions are listed under `assumed` in its metrics, in its return loss finding, and in an `em_hops:<net>:assumed` warning. Each via's measured antipads, which layers kept a ring, and the distance to its nearest ground via are under `signal_vias`.
+
 ## What's measured, and what isn't
 
 Readings that lean on a typical inductance are estimates, and they say so. The check can't see a choke's self-resonance, a part's stability or anything populated, so those stay with models and the bench.

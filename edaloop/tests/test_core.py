@@ -1621,8 +1621,11 @@ def test_a_hop_on_the_bottom_layer_is_referenced_to_the_plane_above_it():
     assert em_hops.hop_layers("A", on_back, (end, end), ["F.Cu", "B.Cu"], {}) == ("B.Cu", "F.Cu", None, True)
     # Pads abutting with no track still say which side they're on.
     assert em_hops.hop_layers("A", [], (end, end), four, {})[0] == "B.Cu"
-    with pytest.raises(em_hops.OffLayer, match="through a via"):
+    # A hop with a via of its own is planned elsewhere. One that changes layer without one goes through a drilled pad, which isn't drawn.
+    with pytest.raises(ValueError, match="plan_via_hop"):
         em_hops.hop_layers("A", [*on_back, T(kind="via", layer="F.Cu")], (end, end), four, {})
+    with pytest.raises(em_hops.OffLayer, match="no via of its own"):
+        em_hops.hop_layers("A", [*on_back, T(kind="segment", layer="F.Cu")], (end, end), four, {})
     with pytest.raises(em_hops.OffLayer, match="In1.Cu"):
         em_hops.hop_layers("A", [T(kind="segment", layer="In1.Cu")], (end, end), four, {})
     assert em_hops.on_layer(end, "B.Cu") and not em_hops.on_layer(end, "F.Cu") and em_hops.on_layer({"drill": 0.3}, "F.Cu")
@@ -1646,6 +1649,168 @@ def test_hop_ground_vias_are_drawn_on_the_stackups_via_layer():
         em_hops.cut_shapes("A", [], [], [], [(5.0, 1.0)], box(-3, -3, 13, 3), -4, -6, entry, leave)
     shapes = em_hops.cut_shapes("A", [], [], [], [(5.0, 1.0)], box(-3, -3, 13, 3), -4, -6, entry, leave, vias_on=-12)
     assert [s["Layer"]["Layer"] for s in shapes if s["$type"] == "Via"] == [-12]
+
+
+_FOUR = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+_FOUR_KEYS = {"F.Cu": -2, "In1.Cu": -6, "In2.Cu": -5, "B.Cu": -4}
+
+
+def _four_tech(*spans):
+    layers = []
+    for name in _FOUR:
+        layers += [{"Name": name, "Kind": "Conductor", "DrawingLayers": [{"Layer": _FOUR_KEYS[name], "Datatype": 0}]}, {"Name": "d", "Kind": "Dielectric"}]
+    for i, (a, b) in enumerate(spans or [("F.Cu", "B.Cu")]):
+        layers.append({"Name": f"Via {a}-{b}", "Kind": "Via", "DrawingLayers": [{"Layer": -11 - i, "Datatype": 0}], "SpanFromLayer": a, "SpanToLayer": b})
+    return {"Stackup": {"Layers": layers}}
+
+
+def _via_hop(tmp_path, via_layers='"F.Cu" "B.Cu"', flags="(remove_unused_layers yes) (keep_end_layers yes)", far="B.Cu"):
+    """A line on F.Cu that drops through a via at x = 5 to run on `far` to a part on the back, as the board file and board facts give it."""
+    f = tmp_path / "b.kicad_pcb"
+    f.write_text(f"""(kicad_pcb (version 20241229)
+ (segment (start 0 0) (end 5 0) (width 0.36) (layer "F.Cu") (net "A"))
+ (via (at 5 0) (size 0.6) (drill 0.3) (layers {via_layers}) {flags} (net "A"))
+ (segment (start 5 0) (end 10 0) (width 0.36) (layer "{far}") (net "A"))
+ (via (at 5 1.2) (size 0.61) (drill 0.254) (layers "F.Cu" "B.Cu") (net "GND"))
+ (zone (net "GND") (layer "In2.Cu") (connect_pads yes (clearance 0.25)) (polygon (pts (xy 0 0) (xy 9 0) (xy 9 9)))))
+""")
+    board = Board(f)
+    entry = {"ref": "U1", "pad": "1", "net": "A", "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5, "rot": 0, "front": True, "back": False, "drill": 0.0}
+    leave = {**entry, "ref": "U2", "x": 10.0, "front": far != "B.Cu", "back": far == "B.Cu"}
+    return board, (entry, leave)
+
+
+def test_a_hop_through_a_via_is_planned_on_both_layers_with_each_ones_own_plane(tmp_path):
+    from shapely.geometry import Point, box
+
+    from edaloop import em_hops
+
+    board, ends = _via_hop(tmp_path)
+    vias = em_hops.signal_vias(board, "A")
+    assert vias == [{"x": 5.0, "y": 0.0, "size": 0.6, "drill": 0.3, "layers": ["F.Cu", "B.Cu"], "type": "through",
+                     "remove_unused": True, "keep_end": True, "padstack": False}]
+    assert em_hops.zone_clearances(board) == {"In2.Cu": 0.25}
+    window = box(-3, -3, 13, 3)
+    # In1.Cu's fill has its own hole round the via, which is measured. In2.Cu has no fill to measure, so its antipad is the pour's clearance
+    # past the hole, the via having no ring there, and says it's assumed.
+    fills = {"In1.Cu": window.difference(Point(5, 0).buffer(0.55))}
+    tracks = [t for t in board.tracks if t.net == "A"]
+    plan = em_hops.plan_via_hop(tracks, ends, _FOUR, {}, vias, _four_tech(), fills, [(5.0, 1.2)], em_hops.zone_clearances(board), 2.5)
+    assert plan["signals"] == ["F.Cu", "B.Cu"] and plan["ports"] == ("F.Cu", "B.Cu")
+    assert plan["references"] == {"F.Cu": ["In1.Cu"], "B.Cu": ["In2.Cu"]} and plan["planes"] == ["In1.Cu", "In2.Cu"] and plan["passed"] == []
+    v = plan["vias"][0]
+    assert v["span"] == _FOUR and v["drawn_on"] == -11 and v["joined"] == ["F.Cu", "B.Cu"] and v["pads_on"] == ["F.Cu", "B.Cu"]
+    assert v["antipad_mm"] == {"In1.Cu": pytest.approx(0.55, abs=1e-3), "In2.Cu": pytest.approx(0.15 + 0.25)}
+    assert v["antipad_measured"] == {"In1.Cu": True, "In2.Cu": False} and v["return_moves"] and v["return_via_mm"] == pytest.approx(1.2)
+    assert len(plan["assumed"]) == 2 and "mirror" in plan["assumed"][0] and "antipad on In2.Cu" in plan["assumed"][1]
+    # Stated planes are no assumption.
+    stated = em_hops.plan_via_hop(tracks, ends, _FOUR, {"bottom_reference_layer": "In2.Cu"}, vias, _four_tech(),
+                                  {**fills, "In2.Cu": fills["In1.Cu"]}, [(5.0, 1.2)], {}, 2.5)
+    assert stated["assumed"] == []
+
+    shapes = em_hops.cut_via_hop("A", tracks, list(ends), {}, [(5.0, 1.2)], window, plan, _FOUR_KEYS, *ends, {}, -11)
+    def on(kind, net=None):
+        return sorted({s["Layer"]["Layer"] for s in shapes if s["$type"] == kind and (net is None or s.get("Net") == net)})
+    # The track on each signal layer, the via's rings where KiCad keeps them, and a whole plane on each reference, flagged nowhere else.
+    assert on("Path") == [-4, -2] and on("Poly", "A") == [-4, -2] and on("Poly", "GND") == [-6, -5]
+    signal = [s for s in shapes if s["$type"] == "Via" and s["Net"] == "A"]
+    assert len(signal) == 1 and signal[0]["Layer"]["Layer"] == -11 and signal[0]["DrillSize"] == 300000 and signal[0]["PadSize"] == 600000
+    assert [s["Layer"]["Layer"] for s in shapes if s["$type"] == "Via" and s["Net"] == "GND"] == [-11]
+    assert {s["Text"]: s["Layer"]["Layer"] for s in shapes if s["$type"] == "Label"} == {"1": -2, "2": -4}
+    # Each plane's antipad is cut round the barrel, and the rest of the window is plane.
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    for key, r in ((-6, 0.55), (-5, 0.4)):
+        plane = unary_union([Polygon([(s["Xy"][i] / 1e6, -s["Xy"][i + 1] / 1e6) for i in range(0, len(s["Xy"]), 2)])
+                             for s in shapes if s["$type"] == "Poly" and s["Net"] == "GND" and s["Layer"]["Layer"] == key])
+        assert not plane.contains(Point(5, 0)) and plane.distance(Point(5, 0)) == pytest.approx(r, rel=0.01)
+        assert plane.area == pytest.approx(window.area - math.pi * r * r, rel=1e-3)
+
+
+def test_a_via_keeps_its_rings_on_every_layer_unless_told_not_to(tmp_path):
+    from shapely.geometry import box
+
+    from edaloop import em_hops
+
+    board, ends = _via_hop(tmp_path, flags="")
+    vias = em_hops.signal_vias(board, "A")
+    plan = em_hops.plan_via_hop([t for t in board.tracks if t.net == "A"], ends, _FOUR, {}, vias, _four_tech(), {}, [(5.0, 1.2)], {}, 2.5)
+    v = plan["vias"][0]
+    # An unused ring stays on the inner layers, and the antipad clears it, by the net class clearance as no pour states one on In1.Cu.
+    assert v["pads_on"] == _FOUR and v["antipad_mm"]["In1.Cu"] == pytest.approx(0.3 + 0.2)
+    shapes = em_hops.cut_via_hop("A", board.tracks, list(ends), {}, [(5.0, 1.2)], box(-3, -3, 13, 3), plan, _FOUR_KEYS, *ends, {}, -11)
+    assert sorted({s["Layer"]["Layer"] for s in shapes if s["$type"] == "Poly" and s["Net"] == "A"}) == [-6, -5, -4, -2]
+
+
+def test_a_hop_to_an_inner_layer_keeps_the_through_vias_stub(tmp_path):
+    from edaloop import em_hops
+
+    board, ends = _via_hop(tmp_path, far="In2.Cu")
+    tracks = [t for t in board.tracks if t.net == "A"]
+    # A through via used to reach In2.Cu leaves a stub to B.Cu. Its barrel is drawn to B.Cu and B.Cu's own ground copper is in the model.
+    ends[1]["front"] = ends[1]["back"] = False
+    ends[1]["drill"] = 0.8
+    plan = em_hops.plan_via_hop(tracks, ends, _FOUR, {}, em_hops.signal_vias(board, "A"), _four_tech(), {}, [], {}, 2.5)
+    assert plan["signals"] == ["F.Cu", "In2.Cu"] and plan["ports"] == ("F.Cu", "In2.Cu")
+    assert plan["references"] == {"F.Cu": ["In1.Cu"], "In2.Cu": ["In1.Cu"]} and plan["passed"] == ["B.Cu"]
+    assert plan["vias"][0]["span"] == _FOUR and not plan["vias"][0]["return_moves"]
+    assert any("inner layers either side" in a for a in plan["assumed"])
+    stated = em_hops.plan_via_hop(tracks, ends, _FOUR, {"inner_reference_layers": {"In2.Cu": ["In1.Cu"]}}, em_hops.signal_vias(board, "A"),
+                                  _four_tech(), {}, [], {}, 2.5)
+    assert not any("inner" in a for a in stated["assumed"])
+    # A blind via is drawn to its own span when the stackup has an entry of exactly that span.
+    board, ends = _via_hop(tmp_path, via_layers='"F.Cu" "In2.Cu"', far="In2.Cu")
+    ends[1].update(front=False, back=False, drill=0.8)
+    plan = em_hops.plan_via_hop([t for t in board.tracks if t.net == "A"], ends, _FOUR, {}, em_hops.signal_vias(board, "A"),
+                                _four_tech(("F.Cu", "B.Cu"), ("F.Cu", "In2.Cu")), {}, [], {}, 2.5)
+    assert plan["vias"][0]["span"] == _FOUR[:3] and plan["vias"][0]["drawn_on"] == -12 and plan["passed"] == []
+
+
+def test_a_hop_through_a_via_is_refused_where_the_model_cant_hold_it(tmp_path):
+    from shapely.geometry import box
+
+    from edaloop import em_hops
+
+    board, ends = _via_hop(tmp_path)
+    tracks = [t for t in board.tracks if t.net == "A"]
+    vias = em_hops.signal_vias(board, "A")
+
+    def plan(**k):
+        args = {"names": _FOUR, "cfg": {}, "vias": vias, "tech": _four_tech(), "fills": {}, "ground_vias": [(5.0, 1.2)], "clearances": {}, "reach_mm": 2.5}
+        args.update(k)
+        return em_hops.plan_via_hop(tracks, ends, **args)
+    plan()
+    # The return current changes plane at the via, so with no ground via near it the model has no path for it.
+    with pytest.raises(em_hops.OffLayer, match="no ground via within 2.5 mm"):
+        plan(ground_vias=[])
+    with pytest.raises(em_hops.OffLayer, match="nearest is 4.00 mm"):
+        plan(ground_vias=[(5.0, 4.0)])
+    # A fill that runs over the via would short it.
+    with pytest.raises(em_hops.OffLayer, match="ground fill on In1.Cu reaches"):
+        plan(fills={"In1.Cu": box(-3, -3, 13, 3)})
+    # No entry of the via's span: a through entry would draw a blind via's barrel too long.
+    with pytest.raises(em_hops.OffLayer, match="no via entry from F.Cu to In1.Cu"):
+        plan(vias=[{**vias[0], "layers": ["F.Cu", "In1.Cu"]}])
+    with pytest.raises(em_hops.OffLayer, match="padstack"):
+        plan(vias=[{**vias[0], "padstack": True}])
+    # On two layers the bottom's plane is the top layer, which carries the hop.
+    with pytest.raises(em_hops.OffLayer, match="carries the hop's own copper"):
+        plan(names=["F.Cu", "B.Cu"])
+    with pytest.raises(em_hops.OffLayer, match="In3.Cu"):
+        plan(cfg={"bottom_reference_layer": "In3.Cu"})
+
+
+def test_a_hops_assumptions_are_in_its_findings(tmp_path, monkeypatch):
+    from edaloop import em_hops, route_classes
+
+    p = _tiny_project(tmp_path, "rf:\n  chains: c.yaml\nem_hops:\n  band_ghz: [1, 2]\n")
+    (tmp_path / "c.yaml").write_text("")
+    monkeypatch.setattr(route_classes, "_load_chains", lambda path: ([("A", ("U1", "1"), ("U2", "1")), ("B", ("U2", "2"), ("U3", "1"))], 0.36, {}))
+    monkeypatch.setattr(em_hops, "run", lambda *a, **k: {"A": {"rl_db": 30.0, "il_max_db": 0.1, "assumed": ["the antipad is 0.8 mm"]},
+                                                         "B": {"rl_db": 18.0, "il_max_db": 0.1, "assumed": ["the plane is In2.Cu"]}})
+    found = {f.id: f for f in checks.em_hops(p).findings}
+    assert found["em_hops:A:assumed"].severity == "warning" and "antipad is 0.8 mm" in found["em_hops:A:assumed"].message
+    assert "the plane is In2.Cu" in found["em_hops:B:return_loss"].message
 
 
 def test_still_air_depends_on_the_board():

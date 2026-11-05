@@ -713,15 +713,20 @@ def em_hops(p: Project) -> Outcome:
     if not results:
         raise RuntimeError("no hop solved. " + ("; ".join(f"{net}: {m['unsolved'][:160]}" for net, m in unsolved.items()) if unsolved else "No RF hops found"))
     for net, m in results.items():
+        # A reading that rests on an assumption about the board says which, wherever it's reported.
+        assumed = f". It assumes {'; '.join(m['assumed'])}" if m.get("assumed") else ""
         # All of the signal comes back and none gets through: the copper in the model isn't joined up, whatever the board does.
         if m["rl_db"] < 1.0 and m["il_max_db"] > 20.0:
-            findings.append(Finding(f"em_hops:{net}:open", f"{net}: reads as an open circuit ({m['rl_db']} dB return loss, {m['il_max_db']} dB loss), so this reading is about the model and not the hop"))
+            findings.append(Finding(f"em_hops:{net}:open", f"{net}: reads as an open circuit ({m['rl_db']} dB return loss, {m['il_max_db']} dB loss), so this reading is about the model and not the hop{assumed}"))
         if m.get("port_narrowed"):
             findings.append(Finding(f"em_hops:{net}:port", f"{net}: the solver narrowed a port on a tilted track, so this reading can't be trusted"))
         if m["rl_db"] < min_rl:
-            findings.append(Finding(f"em_hops:{net}:return_loss", f"{net}: return loss {m['rl_db']} dB in band, under {min_rl:g} dB"))
+            findings.append(Finding(f"em_hops:{net}:return_loss", f"{net}: return loss {m['rl_db']} dB in band, under {min_rl:g} dB{assumed}"))
         elif m["rl_db"] < warn_rl:
-            findings.append(Finding(f"em_hops:{net}:return_loss", f"{net}: return loss {m['rl_db']} dB in band", "warning"))
+            findings.append(Finding(f"em_hops:{net}:return_loss", f"{net}: return loss {m['rl_db']} dB in band{assumed}", "warning"))
+        if m.get("assumed"):
+            findings.append(Finding(f"em_hops:{net}:assumed", f"{net}: {m['rl_db']} dB return loss, {m['il_max_db']} dB loss, on a model that assumes "
+                                    + "; ".join(m["assumed"]), "warning"))
     rls = [m["rl_db"] for m in results.values()]
     channels = [g for g in ([n for n in group if n in results] for group in series_groups(every)) if g]
     metrics = {"hops": results, "channels": channels, "unsolved": sorted(unsolved), "unsolved_why": unsolved, "worst_rl_db": min(rls),
