@@ -193,9 +193,7 @@ def main(argv=None):
                 data = controller.run_all(p)
                 _out(data, args.json, lambda x: _table(x, ["check", "status", "seconds", "summary"]))
             else:
-                if args.check not in checks.REGISTRY:
-                    raise ProjectError(f"no check named {args.check}")
-                ev = checks.run_check(p, args.check)
+                ev =checks.run_check(p, args.check)
                 _out(ev.__dict__, args.json, lambda e: f"{e['check']}: {e['status']} - {e['summary']}" + "".join(
                     f"\n  {'waived ' if f['waived_by'] else ''}{f['severity']}: {f['message']}" for f in e['findings'][:25]))
                 return 0 if ev.status in ("pass", "warn") else 1
@@ -203,6 +201,8 @@ def main(argv=None):
             names = (p.section("stages") or {}).get(args.name)
             if not names:
                 raise ProjectError(f"edaloop.yaml has no stage named {args.name}")
+            for n in names:  # refuse a misspelt stage before any of it runs
+                checks.require_check(n)
             data = [checks.run_check(p, n) for n in names]
             rows = [{"check": e.check, "status": e.status, "seconds": e.seconds, "summary": e.summary} for e in data]
             _out(rows, args.json, lambda x: _table(x, ["check", "status", "seconds", "summary"]))

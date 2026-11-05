@@ -11,6 +11,7 @@ import json
 import math
 import re
 import shutil
+import subprocess
 import sys
 import time
 import zipfile
@@ -25,7 +26,7 @@ from . import parts_api, power, spice, thermal, toolchain
 from .em_diagnose import diagnose
 from .ledger import ERROR, FAIL, PASS, WARN, Evidence, Finding, sha_bytes, sha_file
 from .pcbfile import Board, compare_copper
-from .project import Project
+from .project import Project, ProjectError
 
 REGISTRY = {}
 
@@ -70,8 +71,25 @@ def _digest(obj) -> str:
     return sha_bytes(json.dumps(obj, sort_keys=True, default=str).encode())
 
 
+class UnknownCheck(ProjectError):
+    """A check name that isn't in the registry. Raised before anything runs or is recorded."""
+
+
+def require_check(name: str) -> dict:
+    """The registry entry for `name`, or a refusal that lists the checks there are."""
+    spec = REGISTRY.get(name)
+    if spec is None:
+        raise UnknownCheck(f"no check named {name!r}. Available checks: {', '.join(sorted(REGISTRY))}")
+    return spec
+
+
 def run_check(p: Project, name: str) -> Evidence:
-    spec = REGISTRY[name]
+    # An unknown name is refused and deliberately not recorded. No check ran and no input was read, so
+    # there are no bytes for evidence to stand on, and an entry would be evidence of nothing. It could
+    # never read as a pass either way, but an error filed under a typo would add a ledger name that no
+    # gate resolves. A gated name with no check is already reported by gate_state as "unknown", which
+    # hands it to a person, so leaving the ledger untouched is the honest record.
+    spec = require_check(name)
     start = time.time()
     try:
         o = spec["fn"](p)
@@ -1310,8 +1328,14 @@ def release(p: Project) -> dict:
         steps.append([cli, "sch", "export", "bom", "-o", out / "bom.csv", p.schematic])
         steps.append([cli, "sch", "export", "pdf", "-o", out / "schematic.pdf", p.schematic])
     for cmd in steps:
-        r = toolchain.run(cmd, timeout=600)
+        try:
+            r = toolchain.run(cmd, timeout=600)
+        except (OSError, subprocess.SubprocessError) as e:
+            # An exporter that can't start is an error, and it mustn't leave a half-written release folder behind.
+            shutil.rmtree(out, ignore_errors=True)
+            return {"released": False, "blockers": [{"check": "export", "state": "error", "summary": f"{type(e).__name__}: {e}"[:300]}]}
         if r.returncode != 0:
+            shutil.rmtree(out, ignore_errors=True)
             return {"released": False, "blockers": [{"check": "export", "state": "error", "summary": r.stderr.strip()[-300:]}]}
     if sha_file(p.board) != board_sha or any(r["state"] not in ("pass", "warn") for r in gate_state(p)):
         shutil.rmtree(out, ignore_errors=True)
