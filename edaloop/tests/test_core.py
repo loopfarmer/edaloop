@@ -212,6 +212,224 @@ def test_mcp_server_module_imports_and_registers_its_tools():
     assert not any("waive" in n or "requirement" in n for n in names)
 
 
+# ---------------------------------------------------------------- the MCP interface, called the way an agent calls it
+
+MCP_TOOLS = {"next_action", "gate_status", "run_check", "list_checks", "route_board", "adopt_route", "make_board",
+             "describe_design", "make_mechanical", "review_pack", "release", "doctor"}
+
+
+def _mcp(name, args=None):
+    """Call a tool through the MCP server, and return what the agent would read. A refusal raises ToolError."""
+    import asyncio
+
+    from edaloop import mcp_server
+    result = asyncio.run(mcp_server.mcp.call_tool(name, args or {}))
+    assert not result.is_error, result
+    return json.loads(result.content[0].text)
+
+
+def _mcp_refused(name, args):
+    """Call a tool that must refuse: a deliberate ToolError, not a crash, with the message returned."""
+    import asyncio
+
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+
+    from edaloop import mcp_server
+    with pytest.raises(ToolError) as e:
+        asyncio.run(mcp_server.mcp.call_tool(name, args))
+    assert not isinstance(e.value, UnexpectedToolError), e.value.__cause__
+    return str(e.value)
+
+
+def _gate(tmp_path):
+    return {r["check"]: r["state"] for r in _mcp("gate_status", {"project_dir": str(tmp_path)})["gate"]}
+
+
+def test_mcp_tool_list_is_exactly_the_reviewed_set_and_none_edits_requirements_or_waivers():
+    import asyncio
+
+    from edaloop import mcp_server
+    tools = asyncio.run(mcp_server.mcp.list_tools())
+    # A new tool must be added here on purpose, after checking it can't touch requirements or waivers.
+    assert {t.name for t in tools} == MCP_TOOLS
+    for t in tools:
+        params = " ".join(t.input_schema.get("properties", {})).lower()
+        assert "waive" not in params and "requirement" not in params and "gate" not in params, t.name
+
+
+def test_mcp_gate_loop_end_to_end_goes_stale_when_the_board_changes(tmp_path):
+    make(tmp_path)
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    d = str(tmp_path)
+    assert _gate(tmp_path) == {"project_files": "missing"}
+    step = _mcp("next_action", {"project_dir": d})
+    assert step["action"] == "run_check" and step["check"] == "project_files"
+    ev = _mcp("run_check", {"check": "project_files", "project_dir": d})
+    assert ev["check"] == "project_files" and ev["status"] in ("pass", "warn", "fail", "error")
+    assert _gate(tmp_path) == {"project_files": ev["status"]}
+    if ev["status"] in ("pass", "warn"):
+        assert _mcp("next_action", {"project_dir": d})["action"] == "release"
+    with open(tmp_path / "b.kicad_pcb", "a") as f:
+        f.write("\n")
+    assert _gate(tmp_path) == {"project_files": "stale"}
+    step = _mcp("next_action", {"project_dir": d})
+    assert step["action"] == "run_check" and step["check"] == "project_files"
+
+
+def test_mcp_run_check_refuses_an_unknown_name_and_records_nothing(tmp_path):
+    make(tmp_path)
+    ledger = tmp_path / ".edaloop" / "ledger.jsonl"
+    before = ledger.read_bytes() if ledger.exists() else None
+    msg = _mcp_refused("run_check", {"check": "drc_typo", "project_dir": str(tmp_path)})
+    assert "drc_typo" in msg and "project_files" in msg and "drc" in msg      # lists what there is
+    assert (ledger.read_bytes() if ledger.exists() else None) == before
+    assert _gate(tmp_path) == {"project_files": "missing"}
+    with pytest.raises(checks.UnknownCheck, match="Available checks"):
+        checks.run_check(Project(tmp_path), "drc_typo")
+
+
+def test_cli_run_refuses_an_unknown_check_with_the_list_and_a_nonzero_exit(tmp_path, capsys):
+    from edaloop.cli import main
+    make(tmp_path)
+    assert main(["-C", str(tmp_path), "run", "drc_typo"]) == 2
+    err = capsys.readouterr().err
+    assert "drc_typo" in err and "project_files" in err
+    assert not (tmp_path / ".edaloop" / "ledger.jsonl").exists() or "drc_typo" not in (tmp_path / ".edaloop" / "ledger.jsonl").read_text()
+
+
+def test_cli_stage_refuses_a_misspelt_check_before_running_any(tmp_path, capsys):
+    from edaloop.cli import main
+    make(tmp_path, "stages: {s: [project_files, drc_typo]}\n")
+    assert main(["-C", str(tmp_path), "stage", "s"]) == 2
+    assert "drc_typo" in capsys.readouterr().err
+    assert not (tmp_path / ".edaloop" / "ledger.jsonl").exists()
+
+
+def test_mcp_release_is_refused_while_the_gate_is_open(tmp_path):
+    make(tmp_path)
+    result = _mcp("release", {"project_dir": str(tmp_path)})
+    assert result["released"] is False and result["blockers"][0]["check"] == "project_files"
+    assert not (tmp_path / "release").exists() and not list(tmp_path.glob("*_release.zip"))
+
+
+def test_mcp_release_with_no_exporter_is_an_error_and_leaves_no_release_folder(tmp_path, monkeypatch):
+    make(tmp_path)
+    p = Project(tmp_path)
+    monkeypatch.setattr(checks, "gate_state", lambda p: [{"check": "project_files", "state": "pass"}])
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", str(cmd[0]))
+    monkeypatch.setattr(toolchain, "run", missing)
+    result = _mcp("release", {"project_dir": str(p.root)})
+    assert result["released"] is False and result["blockers"][0]["state"] == "error"
+    assert not (tmp_path / "release").exists() and not list(tmp_path.glob("*_release.zip"))
+
+
+@pytest.fixture
+def confined(tmp_path, monkeypatch):
+    """A project the MCP server was started for, and a folder beside it that the server mustn't write into."""
+    proj, outside = tmp_path / "proj", tmp_path / "outside"
+    proj.mkdir()
+    outside.mkdir()
+    make(proj)
+    (proj / "sub").mkdir()
+    (proj / "link").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("EDALOOP_PROJECT", str(proj))
+    monkeypatch.chdir(tmp_path)
+    return proj, outside
+
+
+def _tree(path):
+    return sorted((str(f.relative_to(path)), f.read_bytes() if f.is_file() else None) for f in path.rglob("*"))
+
+
+@pytest.mark.parametrize("where", ["outside", "dotdot", "symlink", "absolute_symlink", "edaloop_yaml", "ledger"])
+def test_mcp_make_board_writes_only_inside_the_project(confined, where):
+    from edaloop import testbench
+    proj, outside = confined
+    target = {"outside": str(outside / "new"), "dotdot": "sub/../../outside/new", "symlink": "link/new",
+              "absolute_symlink": str(proj / "link" / "new"), "edaloop_yaml": "edaloop.yaml",
+              "ledger": ".edaloop/new"}[where]
+    before_proj, before_out = _tree(proj), _tree(outside)
+    msg = _mcp_refused("make_board", {"description_file": str(testbench.BENCHES / "gain_block_demo.yaml"), "output_dir": target})
+    assert "refused" in msg
+    assert _tree(proj) == before_proj and _tree(outside) == before_out
+
+
+def test_mcp_make_board_refuses_the_project_folder_and_a_full_folder(confined):
+    from edaloop import testbench
+    proj, _ = confined
+    bench = str(testbench.BENCHES / "gain_block_demo.yaml")
+    assert "project folder itself" in _mcp_refused("make_board", {"description_file": bench, "output_dir": "."})
+    assert "project folder itself" in _mcp_refused("make_board", {"description_file": bench, "output_dir": str(proj / "sub" / "..")})
+    assert "existing file" in _mcp_refused("make_board", {"description_file": bench, "output_dir": "b.kicad_pcb"})
+    (proj / "sub" / "routed.kicad_pcb").write_text("x")
+    assert "isn't empty" in _mcp_refused("make_board", {"description_file": bench, "output_dir": "sub"})
+    assert (proj / "sub" / "routed.kicad_pcb").read_text() == "x"
+
+
+@pytest.mark.parametrize("where", ["outside", "dotdot", "symlink", "absolute_symlink", "edaloop_yaml",
+                                   "edaloop_yaml_dotdot", "link_to_edaloop_yaml", "ledger", "existing", "not_yaml"])
+def test_mcp_describe_design_writes_only_a_new_description_inside_the_project(confined, where):
+    proj, outside = confined
+    (proj / "desc.yaml").symlink_to(proj / "edaloop.yaml")
+    (proj / "mine.yaml").write_text("filled in by a person\n")
+    target = {"outside": str(outside / "d.yaml"), "dotdot": "../outside/d.yaml", "symlink": "link/d.yaml",
+              "absolute_symlink": str(proj / "link" / "d.yaml"), "edaloop_yaml": "edaloop.yaml",
+              "edaloop_yaml_dotdot": "sub/../edaloop.yaml", "link_to_edaloop_yaml": "desc.yaml",
+              "ledger": ".edaloop/d.yaml", "existing": "mine.yaml", "not_yaml": "b.kicad_pro"}[where]
+    before_proj, before_out = _tree(proj), _tree(outside)
+    msg = _mcp_refused("describe_design", {"source_file": str(proj / "b.kicad_pcb"), "output_file": target, "band_mhz": [900, 1500]})
+    assert "refused" in msg
+    assert _tree(proj) == before_proj and _tree(outside) == before_out
+
+
+def _describable_board(path):
+    def fp(ref, value, pads):
+        body = "".join(f'(pad "{n}" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net {i}))' for n, i in pads)
+        return f'(footprint "Lib:{ref}" (at 0 0) (property "Reference" "{ref}") (property "Value" "{value}") {body})'
+    path.write_text('(kicad_pcb (version 20241229) (net 0 "") (net 1 "A") (net 2 "B") (net 3 "GND") '
+                    + fp("J1", "in", [("1", 1), ("2", 3)]) + fp("U1", "LNA", [("1", 1), ("2", 2), ("3", 3)])
+                    + fp("J2", "out", [("1", 2), ("2", 3)]) + ')')
+
+
+def test_mcp_describe_design_writes_a_new_file_inside_the_project(confined):
+    proj, _ = confined
+    _describable_board(proj / "src.kicad_pcb")
+    result = _mcp("describe_design", {"source_file": str(proj / "src.kicad_pcb"),
+                                      "output_file": "sub/desc.yaml", "band_mhz": [900, 1500]})
+    assert Path(result["written"]) == (proj / "sub" / "desc.yaml").resolve() and (proj / "sub" / "desc.yaml").exists()
+
+
+def test_describe_never_writes_edaloop_yaml_from_the_cli_either(tmp_path):
+    from edaloop.cli import main
+    make(tmp_path)
+    _describable_board(tmp_path / "src.kicad_pcb")
+    before = (tmp_path / "edaloop.yaml").read_bytes()
+    assert main(["describe", str(tmp_path / "src.kicad_pcb"), "-o", str(tmp_path / "edaloop.yaml"), "--band-mhz", "900", "1500"]) == 1
+    assert (tmp_path / "edaloop.yaml").read_bytes() == before
+
+
+def test_no_safe_mcp_tool_changes_edaloop_yaml(confined):
+    from edaloop import testbench
+    proj, _ = confined
+    (proj / "b.kicad_pro").write_text("{}")
+    _describable_board(proj / "src.kicad_pcb")
+    before = (proj / "edaloop.yaml").read_bytes()
+    d = str(proj)
+    _mcp("list_checks")
+    _mcp("next_action", {"project_dir": d})
+    _mcp("gate_status", {"project_dir": d})
+    _mcp("run_check", {"check": "project_files", "project_dir": d})
+    _mcp("run_check", {"check": "requirements", "project_dir": d})
+    _mcp("release", {"project_dir": d})
+    _mcp_refused("run_check", {"check": "waivers", "project_dir": d})
+    _mcp_refused("describe_design", {"source_file": str(proj / "src.kicad_pcb"), "output_file": "edaloop.yaml", "band_mhz": [900, 1500]})
+    _mcp_refused("make_board", {"description_file": str(testbench.BENCHES / "gain_block_demo.yaml"), "output_dir": "edaloop.yaml"})
+    _mcp("describe_design", {"source_file": str(proj / "src.kicad_pcb"), "output_file": "new.yaml", "band_mhz": [900, 1500]})
+    assert (proj / "edaloop.yaml").read_bytes() == before
+
+
 def test_ipc2221_matches_published_shape_and_round_trips():
     rise = power.ipc2221_rise_c(1.0, 0.3, 35, True)
     assert 10 < rise < 40                 # 1 A on 12 mil 1 oz outer is known to be warm

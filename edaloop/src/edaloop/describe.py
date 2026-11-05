@@ -259,6 +259,10 @@ def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "") 
 
 def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path) -> dict:
     """Write the description from a schematic, through KiCad's netlist, or straight from a board's pads."""
+    from .project import FILE
+    if Path(out).name == FILE or Path(out).resolve().name == FILE:
+        # edaloop.yaml holds a person's requirements and waivers. A description is a different file.
+        raise DescribeError(f"won't write a description over {FILE}: it holds a person's requirements and waivers. Name another file")
     if Path(schematic).suffix == ".kicad_pcb":
         netlist = Path(schematic)
     else:
