@@ -74,6 +74,7 @@ class Field:
         self.vias = list(vias)
         self.lines = lines          # planned copper that isn't laid yet: (a, b, half width)
         self.x1, self.y1, self.x2, self.y2 = facts["outline"]
+        self.keepouts = [k["pts"] for k in facts.get("keepouts") or [] if len(k["pts"]) >= 3]
 
     def clear(self, x: float, y: float) -> bool:
         reach = RADIUS + CLEAR
@@ -82,9 +83,24 @@ class Field:
             return False
         if any(pad_gap(p, x, y) < reach for p in self.foreign):
             return False
+        # KiCad flags a via that so much as overlaps a rule area forbidding vias, so the whole ring must stay out.
+        if any(_in_polygon(x, y, pts) or _polygon_gap(x, y, pts) < RADIUS for pts in self.keepouts):
+            return False
         if any(_seg_gap((x, y), a, b) < reach + hw for a, b, hw in self.tracks + self.lines):
             return False
         return all(math.hypot(x - vx, y - vy) >= HOLE_PITCH for vx, vy in self.vias)
+
+
+def _in_polygon(x: float, y: float, pts: list) -> bool:
+    inside = False
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _polygon_gap(x: float, y: float, pts: list) -> float:
+    return min(_seg_gap((x, y), a, b) for a, b in zip(pts, pts[1:] + pts[:1]))
 
 
 def _stub_clear(field: Field, a: tuple, b: tuple) -> bool:

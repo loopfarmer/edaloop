@@ -176,6 +176,17 @@ jobs:
           if short:
               sys.exit(f"connector ground pads short of their target: {short}")
           EOF
+          # KiCad's own DRC has the last word on where a via may sit: none of the new ones may break a rule area or a clearance.
+          kicad-cli pcb drc --format json --severity-all -o "$RUNNER_TEMP/ground_drc.json" "$(ls "$DEMO"/*.kicad_pcb | head -n 1)"
+          uv run python - "$RUNNER_TEMP/ground_drc.json" <<'EOF'
+          import json, sys
+          placement = {"clearance", "hole_clearance", "hole_to_hole", "shorting_items", "items_not_allowed", "copper_edge_clearance"}
+          bad = [f"{v['type']}: {v['description']}" for v in json.load(open(sys.argv[1]))["violations"]
+                 if v["type"] in placement and any(i["description"].startswith("Via") and "[GND]" in i["description"] for i in v.get("items", []))]
+          print(f"DRC objections to ground vias: {len(bad)}")
+          if bad:
+              sys.exit("\n".join(bad[:20]))
+          EOF
       - name: KiCad checks on gain_block_demo
         working-directory: edaloop
         run: |

@@ -2219,9 +2219,14 @@ UFL = "Connector_Coaxial:U.FL_Hirose_U.FL-R-SMT-1_Vertical"
 
 
 def _ufl_pads(ref="J1", x0=5.0, y0=5.0):
-    """The U.FL-R-SMT land as KiCad draws it, near enough: a 1 mm centre pin and two 1.05 x 2.2 mm ground pads."""
-    return [_pad(ref, "1", "RF", x0, y0 - 1.5, 1.0, 1.0),
-            _pad(ref, "2", "GND", x0 - 1.475, y0, 1.05, 2.2), _pad(ref, "2", "GND", x0 + 1.475, y0, 1.05, 2.2)]
+    """The U.FL-R-SMT land as KiCad 10's footprint draws it: the centre pin, and two 2.2 x 1.05 mm ground pads."""
+    return [_pad(ref, "1", "RF", x0 - 1.525, y0, 1.05, 1.0),
+            _pad(ref, "2", "GND", x0, y0 - 1.475, 2.2, 1.05), _pad(ref, "2", "GND", x0, y0 + 1.475, 2.2, 1.05)]
+
+
+def _ufl_keepout(ref="J1", x0=5.0, y0=5.0):
+    """The footprint's own top_keepout rule area between the ground pads: no vias, tracks or pour."""
+    return {"ref": ref, "name": "top_keepout", "pts": [[x0 + 1.1, y0 - 0.95], [x0 - 0.99, y0 - 0.95], [x0 - 0.99, y0 + 0.95], [x0 + 1.1, y0 + 0.95]]}
 
 
 def test_rf_connectors_are_recognised_by_footprint_part_number_or_value():
@@ -2250,7 +2255,8 @@ def test_pad_vias_puts_as_many_vias_as_fit_on_a_connector_ground_pad(tmp_path, m
     bench = {"parts": {"J1": {"value": "U.FL input"}}, "layout": {"footprints": {"J1": UFL}}}
     written = {}
     monkeypatch.setattr(ground, "_load", lambda p: (bench, {}))
-    monkeypatch.setattr(ground, "_facts", lambda board, work: {"pads": pads, "outline": [0, 0, 20, 20]})
+    keepout = _ufl_keepout()
+    monkeypatch.setattr(ground, "_facts", lambda board, work: {"pads": pads, "outline": [0, 0, 20, 20], "keepouts": [keepout]})
     monkeypatch.setattr(ground, "_planned_lines", lambda bench, facts: [])
     monkeypatch.setattr(ground, "_write_vias", lambda board, points, locked, work: written.setdefault("vias", points))
     out = ground.pad_vias(p)
@@ -2258,7 +2264,9 @@ def test_pad_vias_puts_as_many_vias_as_fit_on_a_connector_ground_pad(tmp_path, m
     vias = written["vias"]
     for pad in pads[1:]:
         mine = [v for v in vias if ground.pad_gap(pad, *v) <= ground.RADIUS]
-        assert len(mine) >= 4, f"only {len(mine)} vias on a 1.05 x 2.2 mm ground pad"
+        assert len(mine) >= 4, f"only {len(mine)} vias on a 2.2 x 1.05 mm ground pad"
+    # Nothing in, or touching, the footprint's keepout between the pads: KiCad's DRC would object to every one.
+    assert all(not ground._in_polygon(*v, keepout["pts"]) and ground._polygon_gap(*v, keepout["pts"]) >= ground.RADIUS for v in vias)
     # Every via clears the centre pin and keeps its hole pitch: filling never breaks a rule to fit one more.
     assert all(ground.pad_gap(pads[0], *v) >= ground.RADIUS + ground.CLEAR for v in vias)
     assert all(math.dist(a, b) >= ground.HOLE_PITCH for i, a in enumerate(vias) for b in vias[i + 1:])
@@ -2268,9 +2276,17 @@ def test_a_lone_via_on_a_connector_ground_pad_is_reported():
     from edaloop import rf_rules
     pads = _ufl_pads()
     parts = {"J1": {"value": "U.FL input", "footprint": UFL}}
-    lone = [_track("GND", (5.0 - 1.475 - 0.6, 5.0), (5.0 - 1.475 - 0.6, 5.0), 0.61, kind="via"),
-            _track("GND", (5.0 + 1.475 + 0.6, 5.0), (5.0 + 1.475 + 0.6, 5.0), 0.61, kind="via")]
+    lone = [_track("GND", (5.0, 5.0 - 1.475 - 0.6), (5.0, 5.0 - 1.475 - 0.6), 0.61, kind="via"),
+            _track("GND", (5.0, 5.0 + 1.475 + 0.6), (5.0, 5.0 + 1.475 + 0.6), 0.61, kind="via")]
     metrics, found = rf_rules.audit(lone, {"pads": pads}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4)
     assert len(metrics["connector_ground_thin"]) == 2 and any(f[0] == "rf_layout:connector_ground" for f in found)
     _, found = rf_rules.audit(lone, {"pads": pads}, [], [], parts, (1.0, 2.0), "In1.Cu", {}, 4, {"connector_ground_min_vias": 1})
     assert not any(f[0] == "rf_layout:connector_ground" for f in found)       # the floor is a person's setting
+
+
+def test_no_via_is_placed_in_a_keepout_rule_area():
+    from edaloop import ground
+    field = ground.Field({"pads": [], "outline": [0, 0, 20, 20], "keepouts": [_ufl_keepout()]}, [], [], [])
+    assert not field.clear(5.0, 5.0)                     # inside
+    assert not field.clear(5.0, 5.0 - 0.95 - 0.2)         # outside, but the ring would overlap the edge
+    assert field.clear(5.0, 5.0 - 0.95 - ground.RADIUS - 0.01)
