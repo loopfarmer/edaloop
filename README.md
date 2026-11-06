@@ -195,6 +195,20 @@ ngspice: /usr/bin/ngspice
 
 KiCad's official image has `kicad-cli`, `pcbnew`, the standard footprints and ngspice. `.github/workflows/ci.yml` runs the KiCad half of the flow in it: `doctor`, the tests, then building, grounding, checking and exporting `gain_block_demo`. That job is the reference for a working Linux setup. It doesn't route yet, because circuitRF and KiCadRoutingTools aren't installed in it. [feature-test.md](edaloop/docs/feature-test.md) records a run of every step those tools allow on `gain_block_demo`, with its results.
 
+To use that image from a machine without KiCad, point edaloop at the wrappers in [`edaloop/tools/kicad-docker`](edaloop/tools/kicad-docker). `kicad-cli`, `kicad-python` and `ngspice` there each run the tool they're named after in CI's image. They mount your home folder, `/tmp`, the current folder and the checkout at the same paths inside, so the files edaloop hands over line up:
+
+```yaml
+kicad_cli: /path/to/edaloop/edaloop/tools/kicad-docker/kicad-cli
+kicad_python: /path/to/edaloop/edaloop/tools/kicad-docker/kicad-python
+ngspice: /path/to/edaloop/edaloop/tools/kicad-docker/ngspice
+```
+
+They need a running Docker daemon. Two settings change what they do:
+- `EDALOOP_DOCKER_MOUNTS` adds more folders, colon-separated, for projects outside those four.
+- `EDALOOP_KICAD_IMAGE` picks another image, for example a registry mirror.
+
+Each call starts a container, so a full `make` takes longer than with KiCad installed.
+
 ## Getting started
 
 Install what the steps you want need: see [Requirements](#requirements). `doctor` checks each tool and tells you how to get the ones that are missing.
