@@ -25,6 +25,20 @@ STANDARD_LIBS = ["/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprint
 # Stand-ins for the shipped testbenches' own land patterns, so they build with nothing fetched. Searched after any folder the
 # caller names, so a real library of the same name wins. data/footprints/README.md says what each one is and what it assumes.
 BUNDLED_FOOTPRINTS = Path(__file__).with_name("data") / "footprints"
+STAND_IN = "edaloop stand-in"     # how a bundled footprint's descr begins, and what the project_files check looks for on a board
+
+
+def stand_ins(bench: dict, libs_from: dict[str, Path]) -> list[dict]:
+    """The parts placed from a bundled stand-in, each marked when its package is a guess rather than a copy of the maker's part."""
+    out = []
+    for ref, footprint in sorted((bench.get("layout") or {}).get("footprints", {}).items()):
+        lib, _, name = footprint.partition(":")
+        if libs_from.get(lib) != BUNDLED_FOOTPRINTS:
+            continue
+        path = BUNDLED_FOOTPRINTS / f"{lib}.pretty" / f"{name}.kicad_mod"
+        text = path.read_text() if path.exists() else ""
+        out.append({"ref": ref, "footprint": footprint, "assumed": "ASSUMED" in text})
+    return out
 NS = uuid.UUID("6f2a6c1e-0b5e-4d0a-9f55-0d3b7d1f7a10")
 
 RULES = {"min_clearance": 0.0, "min_connection": 0.0, "min_copper_edge_clearance": 0.5, "min_hole_clearance": 0.25,
@@ -192,7 +206,7 @@ def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = 
         return {"made": False, "stopped_at": "build", "refused": str(e)}
     p = Project(out)
     say("ground")
-    steps = {"build": {k: built[k] for k in ("parts", "span_mm", "outline_mm", "unlisted_pads")}, "ground": ground.pad_vias(p)}
+    steps = {"build": {k: built[k] for k in ("parts", "span_mm", "outline_mm", "unlisted_pads", "stand_in_footprints")}, "ground": ground.pad_vias(p)}
     say("route")
     rf, cfg = p.section("rf"), p.section("route")
     routed = route_classes.route(p.board, p.root / rf["chains"], p.section("power").get("rails", []), p.root / ".edaloop" / "route_classes",
@@ -230,13 +244,21 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     footprint_dirs = [*footprint_dirs, BUNDLED_FOOTPRINTS]
     libs = {f.split(":")[0] for f in bench["layout"]["footprints"].values()}
     table = []
-    copied = set()
+    copied, libs_from = set(), {}
     for root in footprint_dirs:
         for lib in sorted(libs - copied):
             if (Path(root) / f"{lib}.pretty").is_dir():
                 shutil.copytree(Path(root) / f"{lib}.pretty", out / f"{lib}.pretty")
                 table.append(f'  (lib (name "{lib}")(type "KiCad")(uri "${{KIPRJMOD}}/{lib}.pretty")(options "")(descr ""))')
                 copied.add(lib)
+                libs_from[lib] = Path(root)
+    standing_in = stand_ins(bench, libs_from)
+    if standing_in:
+        # Said where it can't be missed. The board is placed from these, and project_files holds a guessed package back from release.
+        print("  build: no land pattern named " + ", ".join(sorted({x["footprint"].split(":")[0] for x in standing_in}))
+              + " was found in --footprints, so edaloop's stand-ins were used for " + ", ".join(
+                  f"{x['ref']} ({x['footprint']}{', a guessed package' if x['assumed'] else ''})" for x in standing_in)
+              + ". Give the real library with --footprints before building a board to fabricate", file=sys.stderr, flush=True)
     # KiCad's own libraries are listed through its path variable, not copied. Without them the project names
     # footprints it can't find, and ERC reports every one, though the board was placed from them.
     for lib in sorted(libs - copied):
@@ -278,4 +300,4 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     lines = [x for x in r.stdout.splitlines() if x.startswith("{")]
     if r.returncode != 0 or not lines:
         raise BuildError(f"placement failed: {(r.stdout + r.stderr).strip()[-600:]}")
-    return json.loads(lines[-1])
+    return {**json.loads(lines[-1]), "stand_in_footprints": standing_in}
