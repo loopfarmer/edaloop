@@ -104,7 +104,17 @@ def em_solvers_missing(kinds) -> list[str]:
         raise ToolMissing(f"circuitRF is not built at {exe}. Run edaloop doctor for how to build it")
     r = run([exe, "solver", "list"], env=circuitrf_env())
     listed = r.stdout if r.returncode == 0 else ""
-    return [k for k in kinds if f"{EM_SOLVER_NAMES.get(k, k)}: installed" not in listed]
+    return [k for k in kinds if not solver_listed(listed, EM_SOLVER_NAMES.get(k, k))]
+
+
+def solver_listed(listing: str, name: str) -> bool:
+    """Whether `circuitrf solver list` reports a solver as usable. It writes `Name: installed by circuitRF` for one it installed,
+    `Name: found` for one on PATH or in another install, and `Name: not found` or `not installed` otherwise."""
+    for line in listing.splitlines():
+        if line.startswith(f"{name}:"):
+            status = line[len(name) + 1:].strip().lower()
+            return status.startswith(("installed", "found"))
+    return False
 
 
 def ato_shim() -> Path:
@@ -170,7 +180,7 @@ def doctor() -> list[Probe]:
     if r and r.returncode == 0:
         s = run([p["circuitrf"], "solver", "list"], env=circuitrf_env()).stdout
         for solver in ("Palace", "openEMS", "EMerge", "Gmsh"):
-            ok = f"{solver}: installed" in s
+            ok = solver_listed(s, solver)
             out.append(Probe(solver.lower(), "EM solver via circuitRF" if solver != "Gmsh" else "mesher",
                              ok, "installed, validated" if ok else "not installed",
                              f"circuitrf solver install {solver.lower()} --yes"))
