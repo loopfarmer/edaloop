@@ -209,7 +209,82 @@ def tap_offset(half_line, stub, pad_reach):
     return half_line + float(stub) + pad_reach
 
 
-def _derive_layout(fps, spec):
+EXIT_CLEARANCE_MM = 0.2     # copper to copper beside a pad's exit: the Default net class's clearance, as boardgen writes it
+JOG_MIN_MM = 0.01           # an exit pad nearer the line than this is on it. A pad-to-pad turn rounded to 0.1 degree leaves less
+
+
+def _is_square(rot):
+    return abs((float(rot) + 45.0) % 90.0 - 45.0) < 0.05
+
+
+def _exit_clear(fp, rot, number, direction, nets, half):
+    """Whether a line `half` wide each side, clearance included, leaves a pad along a direction without crossing a pad of the same part
+    on another net. A pad with no number is counted as another net's."""
+    _pose(fp, 0, 0, rot)
+    px, py = _pad_xy(fp, number)
+    mine = nets.get(number)
+    for pad in fp.Pads():
+        n = pad.GetNumber()
+        if n == number or (n and mine is not None and nets.get(n) == mine):
+            continue
+        box = pad.GetBoundingBox()
+        corners = [(pcbnew.ToMM(x) - px, pcbnew.ToMM(y) - py) for x in (box.GetLeft(), box.GetRight()) for y in (box.GetTop(), box.GetBottom())]
+        along = [cx * direction[0] + cy * direction[1] for cx, cy in corners]
+        across = [-cx * direction[1] + cy * direction[0] for cx, cy in corners]
+        if max(along) > 0.0 and min(across) < half and max(across) > -half:
+            return False
+    return True
+
+
+def _square_rot(fp, entry, leave, travel, nets, half, fallback, choice=0):
+    """A square rotation for a part whose RF pads a pad-to-pad turn would leave at an angle, such as a TT1224 limiter's opposite corners.
+
+    Each RF pad must face its way along the row: the entry pad's line leaves it backwards along the row, and the exit pad's forwards,
+    neither crossing the part's own pads on other nets. The square rotations that do are ranked by how near the exit pad sits to the
+    entry pad's line, so that the line's jog across the row is least, then by how near they are to the pad-to-pad turn. `choice` picks
+    one by rank, the last if there are fewer. None does: the fallback."""
+    back = (-travel[0], -travel[1])
+    ranked = []
+    for rot in (0.0, 90.0, 180.0, 270.0):
+        if not (_exit_clear(fp, rot, entry, back, nets, half) and _exit_clear(fp, rot, leave, travel, nets, half)):
+            continue
+        _pose(fp, 0, 0, rot)
+        ex, ey = _pad_xy(fp, entry)
+        lx, ly = _pad_xy(fp, leave)
+        if (lx - ex) * travel[0] + (ly - ey) * travel[1] <= 0:
+            continue
+        jog = abs(-(lx - ex) * travel[1] + (ly - ey) * travel[0])
+        turn = abs((rot - float(fallback) + 180.0) % 360.0 - 180.0)
+        ranked.append(((round(jog, 3), turn), rot))
+    ranked.sort()
+    return ranked[min(choice, len(ranked) - 1)][1] if ranked else fallback
+
+
+def _row_lines(fps, walk, attach, line, axis):
+    """Where the line runs across the board at each part of a row.
+
+    A part whose exit pad sits off its entry pad's line, a square-set TT1224 for one, moves the line across by that much for the parts
+    after it, so that every hop stays straight and on its pads' axis. Where the line jogs like that, the stretch of the row with the most
+    parts, counting those stacked off its taps, keeps the line the description gives, and the rest move to suit."""
+    across = 1 if axis == "x" else 0
+    offsets, stretch, here, counts = [], [], 0.0, [0]
+    for item in walk:
+        ref, rot, entry, leave = item[:4]
+        offsets.append(here)
+        stretch.append(len(counts) - 1)
+        counts[-1] += 1 + len(attach.get(ref, []))
+        if entry is not None and leave is not None and str(entry) != str(leave):
+            _pose(fps[ref], 0, 0, rot)
+            jog = _pad_xy(fps[ref], str(leave))[across] - _pad_xy(fps[ref], str(entry))[across]
+            if abs(jog) > JOG_MIN_MM:
+                here += jog
+                counts.append(0)
+    keep = max(range(len(counts)), key=lambda i: (counts[i], -i))
+    base = next(o for o, s in zip(offsets, stretch) if s == keep)
+    return [round(float(line) + o - base, 4) for o in offsets]
+
+
+def _derive_layout(fps, spec, square=False, choice=0):
     """Rotations and bias positions from the netlist, so that a new board needs only its parts and nets.
 
     The row: each part's input and output pads on the line, facing along it. A two-pin part with one pin on an RF net is a tap, reaching
@@ -217,6 +292,9 @@ def _derive_layout(fps, spec):
     beside the line, that far from the line's edge, on a stub. Rails rise from each tap in one column: the
     smallest capacitor nearest the choke, then the bulk, then any link onward. Capacitors go in pairs, the first pair at the rail's
     feed, where the cable's RF arrives, and the next at the load.
+
+    A part with more than two pads is aimed pad to pad, which turns it to an odd angle when its RF pads sit on different corners. With
+    `square`, such a part is set square instead, at `_square_rot`'s `choice`, and the line jogs across the row at it: see `_row_lines`.
     """
     layout, pins = spec["layout"], spec["pins"]
     chain, nets, parts = spec["chain"], spec["nets"], spec["parts"]
@@ -347,7 +425,12 @@ def _derive_layout(fps, spec):
         ref, pin = leave.split(".")
         following = next((c for c in chain if c[1].split(".")[0] == ref), None)
         if following:
-            walk.append([ref, _rot_for(fps[ref], pin, following[1].split(".")[1], travel), pin, following[1].split(".")[1]])
+            out_pin = following[1].split(".")[1]
+            rot = _rot_for(fps[ref], pin, out_pin, travel)
+            if square and len(list(fps[ref].Pads())) > 2 and not _is_square(rot):
+                half = max(float(widths.get(n, spec.get("rf_line_width_mm") or 0.0)) for n in (net, following[0])) / 2 + EXIT_CLEARANCE_MM
+                rot = _square_rot(fps[ref], pin, out_pin, travel, pins.get(ref) or {}, half, rot, choice)
+            walk.append([ref, rot, pin, out_pin])
         else:
             walk.append([ref, _rot_for(fps[ref], None, pin, (-travel[0], -travel[1])), pin, None])
     # A person's rotation for a part wins over the derived one. A part whose RF pads sit on opposite corners, like a TT1224
@@ -361,9 +444,12 @@ def _derive_layout(fps, spec):
 
 
 def _solve_row(fps, layout):
-    """Walk the cascade along its line: each input pad goes on the line as close as the courtyards allow."""
+    """Walk the cascade along its line: each input pad goes on the line as close as the courtyards allow.
+
+    `lines`, from `_row_lines`, gives the line at each part where it jogs. Left out, the line is straight."""
     axis = 1 if layout["axis"] == "y" else 0
     line, start = layout["line"], layout["start"]
+    lines = layout.get("lines") or [line] * len(layout["walk"])
     gap, step = layout.get("gap_mm", 0.1), 0.05
     placed, inline, previous = [], [], None
     groups = layout.get("attach") or {}
@@ -371,7 +457,7 @@ def _solve_row(fps, layout):
     def point(s):
         return (line, s) if axis else (s, line)
 
-    for row in layout["walk"]:
+    for row, line in zip(layout["walk"], lines):
         ref, rot, entry, leave = row[:4]
         # A tap's pad sits off the line, beside it, by this much.
         ox, oy = row[4] if len(row) > 4 else (0.0, 0.0)
@@ -424,7 +510,24 @@ def _box_mm(fp, gap=0.0):
     return (pcbnew.ToMM(b.GetLeft()) - gap, pcbnew.ToMM(b.GetTop()) - gap, pcbnew.ToMM(b.GetRight()) + gap, pcbnew.ToMM(b.GetBottom()) + gap)
 
 
-def _seat_channel_parts(fps, row, refs, spec, attach, walk):
+def _line_bands(boxes, lines, band, axis, x0, y0, x1, y1):
+    """The keep-out along the RF line, one box for each straight stretch of it. A stretch runs from the part where the line last jogged,
+    so that the hop out of that part is covered, to its own last part. The first and last reach a millimetre past the row."""
+    starts = [i for i in range(len(lines)) if i == 0 or abs(lines[i] - lines[i - 1]) > 1e-6]
+    out = []
+    for k, i in enumerate(starts):
+        j = starts[k + 1] - 1 if k + 1 < len(starts) else len(lines) - 1
+        first, last = boxes[max(i - 1, 0)], boxes[j]
+        if axis == "x":
+            lo, hi = (x0 - 1 if k == 0 else first[0]), (x1 + 1 if k == len(starts) - 1 else last[2])
+            out.append((lo, lines[i] - band, hi, lines[i] + band))
+        else:
+            lo, hi = (y0 - 1 if k == 0 else first[1]), (y1 + 1 if k == len(starts) - 1 else last[3])
+            out.append((lines[i] - band, lo, lines[i] + band, hi))
+    return out
+
+
+def _seat_channel_parts(fps, row, refs, spec, attach, walk, lines=None):
     """Put a channel's own support parts in and beside its row, keeping off the RF line and the bias stacks."""
     layout, pins = spec["layout"], spec["pins"]
     axis, line = layout["axis"], float(layout["line"])
@@ -434,14 +537,18 @@ def _seat_channel_parts(fps, row, refs, spec, attach, walk):
     margin = 12.0
     # The RF line and everything between a stack and the line stay clear, for the line itself and for its via fence.
     band = float(layout.get("rf_keepout_mm", 1.2))
-    obstacles = [(x0 - 1, line - band, x1 + 1, line + band)] if axis == "x" else [(line - band, y0 - 1, line + band, y1 + 1)]
+    if lines and len(set(lines)) > 1:
+        inline = [_box_mm(fps[w[0]]) for w in walk]
+        obstacles = _line_bands(inline, lines, band, axis, x0, y0, x1, y1)
+    else:
+        obstacles = [(x0 - 1, line - band, x1 + 1, line + band)] if axis == "x" else [(line - band, y0 - 1, line + band, y1 + 1)]
     for fp in row:
         crowded = len(list(fp.Pads())) > 4
         obstacles.append(_box_mm(fp, 1.0 if crowded else 0.4))
-    for walk_row in walk:
+    for walk_row, at in zip(walk, lines or [line] * len(walk)):
         for item in attach.get(walk_row[0], []):
             b = _box_mm(fps[item["ref"]], 0.4)
-            obstacles.append((b[0], min(b[1], line), b[2], max(b[3], line)) if axis == "x" else (min(b[0], line), b[1], max(b[2], line), b[3]))
+            obstacles.append((b[0], min(b[1], at), b[2], max(b[3], at)) if axis == "x" else (min(b[0], at), b[1], max(b[2], at), b[3]))
     net_pads = {}
 
     def note(fp):
@@ -506,10 +613,11 @@ def _place_rows(fps, layout, rows, attach, spec=None):
         _pose(first, 0, 0, walk[0][1])
         box = _courtyard(first, 0).BBox()
         low = pcbnew.ToMM(box.GetTop() if layout["axis"] == "y" else box.GetLeft())
-        row = _solve_row(fps, {**layout, "walk": walk, "attach": attach, "start": layout.get("start", 0.9 - low)})
+        lines = _row_lines(fps, walk, attach, layout["line"], layout["axis"])
+        row = _solve_row(fps, {**layout, "walk": walk, "attach": attach, "start": layout.get("start", 0.9 - low), "lines": lines})
         if by_row.get(index):
             # A part that finds no room goes to the shelf with the shared ones rather than failing the board.
-            row += _seat_channel_parts(fps, row, by_row[index], spec, attach, walk)[0]
+            row += _seat_channel_parts(fps, row, by_row[index], spec, attach, walk, lines)[0]
         across, stack = ("y", "x") if layout["axis"] == "x" else ("x", "y")
         if index == 0:
             home, first_top = _extent(row, across)[0], _extent(row, stack)[0]
@@ -580,6 +688,14 @@ def _pour(board, net, layer, x1, y1, x2, y2, clearance):
     board.Add(zone)
 
 
+def fits(span, outline, margin=0.5):
+    """Whether parts spanning (left, right, top, bottom) sit inside an outline from the origin, with a margin. No outline always fits."""
+    if outline is None:
+        return True
+    left, right, top, bottom = span
+    return left >= margin and top >= margin and right <= outline[0] - margin and bottom <= outline[1] - margin
+
+
 def build_board(seed, spec_path, dst):
     """Parts, nets, solved positions, outline and ground pours on the seed's stackup. No tracks."""
     spec = json.load(open(spec_path))
@@ -634,15 +750,40 @@ def build_board(seed, spec_path, dst):
     if problems:
         raise SystemExit("pin and pad counts disagree on %d pads, which may be pins the schematic dropped. Confirm against the datasheet, "
                          "then list them in open_pins, or set layout.unlisted_pads to open. First: %s" % (len(problems), "; ".join(problems[:10])))
-    rows, attach = _derive_layout(fps, spec)
-    placed = _place_rows(fps, layout, rows, attach, spec)
-    extras = [x for x in fps.values() if x not in placed]
-    placed += _shelf(extras, placed, layout)
-    boxes = [_courtyard(fp, 0).BBox() for fp in placed]
-    left = min(pcbnew.ToMM(b.GetLeft()) for b in boxes)
-    right = max(pcbnew.ToMM(b.GetRight()) for b in boxes)
-    top = min(pcbnew.ToMM(b.GetTop()) for b in boxes)
-    bottom = max(pcbnew.ToMM(b.GetBottom()) for b in boxes)
+    def place(square, choice=0):
+        rows, attach = _derive_layout(fps, spec, square, choice)
+        placed = _place_rows(fps, layout, rows, attach, spec)
+        extras = [x for x in fps.values() if x not in placed]
+        placed += _shelf(extras, placed, layout)
+        boxes = [_courtyard(fp, 0).BBox() for fp in placed]
+        return rows, placed, (min(pcbnew.ToMM(b.GetLeft()) for b in boxes), max(pcbnew.ToMM(b.GetRight()) for b in boxes),
+                              min(pcbnew.ToMM(b.GetTop()) for b in boxes), max(pcbnew.ToMM(b.GetBottom()) for b in boxes))
+
+    rows, placed, span = place(False)
+    squared = []
+    if not fits(span, spec["outline"]):
+        # A part turned to an odd angle to put two corner pads on the line is longer along the row than it is square. Where the row
+        # doesn't fit, such parts are set square and the line jogs at them. A board that fits is never changed by this.
+        # Each such part tries its square rotations in `_square_rot`'s order, least jog first, until the row fits.
+        turned = {w[0]: w[1] for row in rows for w in row}
+        tried = []
+        for choice in range(4):
+            rows2, placed2, span2 = place(True, choice)
+            rotations = {w[0]: w[1] for row in rows2 for w in row}
+            if rotations == turned or rotations in tried:
+                break
+            tried.append(rotations)
+            if fits(span2, spec["outline"]):
+                break
+        if tried and not fits(span2, spec["outline"]):
+            rows2, placed2, span2 = place(True, 0)     # none fits: report the first, with the least jog
+            rotations = tried[0]
+        if tried:
+            squared = sorted(r for r in rotations if rotations[r] != turned.get(r))
+            placed, span = placed2, span2
+        else:
+            rows, placed, span = place(False)
+    left, right, top, bottom = span
     if spec["outline"] is None:
         # No outline given: the smallest that holds the parts with room for the pour and stitching, with the parts moved to suit.
         side = 2.5
@@ -652,8 +793,8 @@ def build_board(seed, spec_path, dst):
         spec["outline"] = [round(right + side + 0.05, 1), round(bottom + side + 0.05, 1)]
     w, h = spec["outline"]
     if left < 0.5 or top < 0.5 or right > w - 0.5 or bottom > h - 0.5:
-        raise SystemExit("parts span x %.2f..%.2f, y %.2f..%.2f, outside the %g x %g mm outline with a 0.5 mm margin"
-                         % (left, right, top, bottom, w, h))
+        raise SystemExit("parts span x %.2f..%.2f, y %.2f..%.2f, outside the %g x %g mm outline with a 0.5 mm margin%s"
+                         % (left, right, top, bottom, w, h, ", with %s set square" % ", ".join(squared) if squared else ""))
     _outline(board, 0, 0, w, h)
     inset = 0.6
     ground = nets["GND"]
@@ -661,7 +802,7 @@ def build_board(seed, spec_path, dst):
         _pour(board, ground, layer, inset, inset, w - inset, h - inset, layout.get("pour_clearance_mm", 0.3))
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     pcbnew.SaveBoard(dst, board)
-    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
+    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
                       "outline_mm": [w, h], "positions": {r: [round(pcbnew.ToMM(f.GetPosition().x), 3),
                                                               round(pcbnew.ToMM(f.GetPosition().y), 3),
                                                               f.GetOrientationDegrees()] for r, f in fps.items()}}))

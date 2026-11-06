@@ -2803,6 +2803,181 @@ def test_a_described_rotation_overrides_the_derived_one(monkeypatch):
     assert {r: v for r, v in turned.items() if r != "U2"} == {r: v for r, v in derived.items() if r != "U2"}
 
 
+class _FakeLandPattern(_FakePart):
+    """A footprint whose pads may share a number, as a land pattern's ground pads and plated holes do: (number, x, y, w, h)."""
+
+    def __init__(self, ref, pads):
+        super().__init__(ref, {})
+        self.all = pads
+        for number, x, y, w, h in pads:
+            self.local.setdefault(number, (x, y, w, h))
+
+    def Pads(self):
+        part = self
+
+        class Pad:
+            def __init__(self, number, x, y, w, h):
+                self.number, self.shape = number, (x, y, w, h)
+
+            def GetNumber(self):
+                return self.number
+
+            def GetBoundingBox(self):
+                x, y, w, h = self.shape
+                corners = [part.turned(x + u, y + v) for u in (-w / 2, w / 2) for v in (-h / 2, h / 2)]
+                return _FakeBox(min(c[0] for c in corners), min(c[1] for c in corners), max(c[0] for c in corners), max(c[1] for c in corners))
+        return [Pad(*p) for p in self.all]
+
+
+def _tt1224(ref="U1"):
+    """KiCad's TT1224 PL-258 land pattern, as bundled: RF in on pad 1 and out on pad 4, at opposite corners, ground all round."""
+    holes = [(-2.54, 0), (-2.54, 1.651), (-2.54, 4.318), (-1.27, 0), (-1.27, 1.651), (-1.27, 4.318), (0, -4.318), (0, -1.651), (0, 0),
+             (0, 1.651), (0, 4.318), (1.27, -4.318), (1.27, -1.651), (1.27, 0), (2.54, -4.318), (2.54, -1.651), (2.54, 0)]
+    pads = [("1", -2.54, -2.9845, 1.524, 1.651), ("2", 0.0, -2.9845, 1.524, 1.651), ("3", 2.54, -2.9845, 1.524, 1.651),
+            ("4", 2.54, 2.9845, 1.524, 1.651), ("5", 0.0, 2.9845, 1.524, 1.651), ("6", -2.54, 2.9845, 1.524, 1.651),
+            ("2", -1.27, 2.7305, 4.064, 4.191), ("2", 1.27, -2.7305, 4.064, 4.191), ("2", 0.0, 0.0, 6.604, 1.27),
+            *[("2", x, y, 1.016, 1.016) for x, y in holes]]
+    return _FakeLandPattern(ref, pads)
+
+
+def _limiter_spec():
+    chip = {"1": (-0.5, 0.0, 0.6, 0.6), "2": (0.5, 0.0, 0.6, 0.6)}
+    fps = {"A": _FakePart("A", dict(chip)), "U1": _tt1224(), "B": _FakePart("B", dict(chip)), "C": _FakePart("C", dict(chip))}
+    pins = {"A": {"1": "X", "2": "IN"}, "U1": {"1": "IN", "4": "OUT", "2": "GND", "3": "GND", "5": "GND", "6": "GND"},
+            "B": {"1": "OUT", "2": "MID"}, "C": {"1": "MID", "2": "Y"}}
+    nets = {"IN": ["A.2", "U1.1"], "OUT": ["U1.4", "B.1"], "MID": ["B.2", "C.1"], "X": ["A.1"], "Y": ["C.2"],
+            "GND": ["U1.2", "U1.3", "U1.5", "U1.6"]}
+    spec = {"layout": {"axis": "x", "line": 10.0, "start": 2.0}, "pins": pins, "nets": nets,
+            "chain": [["IN", "A.2", "U1.1"], ["OUT", "U1.4", "B.1"], ["MID", "B.2", "C.1"]],
+            "parts": {r: {"value": ""} for r in fps}, "outline": None, "rf_line_width_mm": 0.36, "rf_layout": {}}
+    return fps, spec
+
+
+def test_a_part_with_its_rf_pads_on_opposite_corners_sits_square_with_each_pad_facing_along_the_row(monkeypatch):
+    ops = _fake_placement(monkeypatch)
+    fps, spec = _limiter_spec()
+    # Aimed pad to pad, the TT1224 turns 49.6 degrees, which made cband_element's row overflow its outline.
+    assert ops._rot_for(fps["U1"], "1", "4", (1.0, 0.0)) == pytest.approx(49.6, abs=0.1)
+    # Derived as before, it still does: a board that fits is never changed. Asked for square, as build_board asks when the row overflows.
+    assert {w[0]: w[1] for w in ops._derive_layout(fps, spec)[0][0]}["U1"] == pytest.approx(49.6, abs=0.1)
+    rows, _ = ops._derive_layout(fps, spec, square=True)
+    assert {w[0]: w[1] for w in rows[0]}["U1"] == 90.0
+    # At 90 degrees pad 1 leaves backwards along the row and pad 4 forwards, past nothing of the part's own.
+    nets = spec["pins"]["U1"]
+    assert ops._exit_clear(fps["U1"], 90.0, "1", (-1.0, 0.0), nets, 0.38) and ops._exit_clear(fps["U1"], 90.0, "4", (1.0, 0.0), nets, 0.38)
+    # Pointed the other way, pad 1's line would run straight into ground pad 2.
+    assert not ops._exit_clear(fps["U1"], 180.0, "1", (-1.0, 0.0), nets, 0.38)
+    # At 0 degrees both pads face the row too, but they sit further apart across it, 5.97 mm against 5.08, so 90 ranks first and 0 next.
+    assert ops._exit_clear(fps["U1"], 0.0, "1", (-1.0, 0.0), nets, 0.38) and ops._exit_clear(fps["U1"], 0.0, "4", (1.0, 0.0), nets, 0.38)
+    ranked = [ops._square_rot(fps["U1"], "1", "4", (1.0, 0.0), nets, 0.38, 49.6, k) for k in range(4)]
+    assert ranked == [90.0, 0.0, 0.0, 0.0]
+    # A part with no square rotation that faces both pads along the row keeps its pad-to-pad turn.
+    assert ops._square_rot(fps["U1"], "1", "4", (1.0, 0.0), {**nets, "4": "IN"}, 9.0, 49.6) == 49.6
+
+
+def test_a_part_already_aimed_square_keeps_its_derived_rotation(monkeypatch):
+    # A filter or an LNA with its RF pads on opposite sides, level with each other: nothing changes for it.
+    ops = _fake_placement(monkeypatch)
+    fps, spec = _tap_spec("x", None)
+    before = [list(w) for w in ops._derive_layout(fps, spec)[0][0]]
+    assert all(ops._is_square(w[1]) for w in before)
+    assert [list(w) for w in ops._derive_layout(fps, spec, square=True)[0][0]] == before
+    lines = ops._row_lines(fps, before, {}, 10.0, "x")
+    assert lines == [10.0] * len(before)
+
+
+def test_the_line_jogs_at_a_square_limiter_and_the_longer_stretch_keeps_the_stated_line(monkeypatch):
+    ops = _fake_placement(monkeypatch)
+    fps, spec = _limiter_spec()
+    rows, attach = ops._derive_layout(fps, spec, square=True)
+    walk = rows[0]
+    assert [w[0] for w in walk] == ["A", "U1", "B", "C"]
+    # Pad 4 sits 5.08 mm up the board from pad 1 at 90 degrees. Two parts each side: a tie keeps the first stretch on the line.
+    assert ops._row_lines(fps, walk, attach, 10.0, "x") == [10.0, 10.0, pytest.approx(4.92), pytest.approx(4.92)]
+    # A bias stack off C makes the second stretch the longer, so B and C stay on y = 10 and A and U1 move down the board.
+    lines = ops._row_lines(fps, walk, {"C": [{"ref": "Z"}]}, 10.0, "x")
+    assert lines == [pytest.approx(15.08), pytest.approx(15.08), 10.0, 10.0]
+    ops._solve_row(fps, {**spec["layout"], "walk": walk, "attach": attach, "lines": lines})
+
+    def at(ref, pad):
+        return fps[ref].turned(*fps[ref].local[pad][:2])
+    # Every hop is on its pads' common axis, so rf_path reads it as on axis, and the line between them is straight.
+    for (ra, pa), (rb, pb) in ((("A", "2"), ("U1", "1")), (("U1", "4"), ("B", "1")), (("B", "2"), ("C", "1"))):
+        assert at(ra, pa)[1] == pytest.approx(at(rb, pb)[1], abs=1e-6)
+        assert at(rb, pb)[0] > at(ra, pa)[0]
+
+
+def test_a_row_fits_its_outline_only_inside_the_margin(monkeypatch):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+    # cband_element's first try: the turned limiter took the row to x = 61.87 on a 61.7 mm board.
+    assert not ops.fits((0.90, 61.87, 2.54, 16.48), (61.7, 18))
+    assert ops.fits((0.90, 61.0, 2.54, 16.48), (61.7, 18)) and ops.fits((-5, 500, -5, 500), None)
+
+
+def test_the_keepout_along_a_jogging_line_follows_each_stretch(monkeypatch):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+    boxes = [(0, 9, 2, 11), (3, 6, 13, 14), (14, 9.5, 15, 10.5), (16, 9.5, 17, 10.5)]
+    bands = ops._line_bands(boxes, [12.0, 12.0, 10.0, 10.0], 1.2, "x", 0, 6, 17, 14)
+    # The first stretch from before the row; the second from the part the line jogged at, so that its hop out is covered.
+    assert bands == [(-1, 10.8, 13, 13.2), (3, 8.8, 18, 11.2)]
+
+
+def test_an_rf_hop_leaves_a_corner_pad_past_its_own_part_before_it_bends():
+    from edaloop.route_classes import Obstacles, _seg_rect, _turn_allowed, own_pads, pad_exit, plan_hop
+
+    # A TT1224 at 90 degrees, centred at (15, 10), with pad 4 at its top right corner. The next pad is well below it, as where the line
+    # turns down the board.
+    cx, cy = 15.0, 10.0
+
+    def turned(x, y):
+        return cx + y, cy - x
+    pads = []
+    for number, x, y, w, h in _tt1224().all:
+        px, py = turned(x, y)
+        net = {"1": "IN", "4": "OUT"}.get(number, "GND")
+        pads.append({"name": f"U1.{number}", "net": net, "x": px, "y": py, "hw": h / 2, "hh": w / 2, "fx": cx, "fy": cy, "layers": ["F.Cu"]})
+    out = next(p for p in pads if p["name"] == "U1.4")
+    assert (out["x"], out["y"]) == pytest.approx((17.9845, 7.46))
+    target = {"name": "C1.1", "net": "OUT", "x": 24.0, "y": 20.0, "hw": 0.3, "hh": 0.3, "fx": 24.0, "fy": 20.5, "layers": ["F.Cu"]}
+    courtyards = {(cx, cy): (cx - 5.08, cy - 4.19, cx + 5.08, cy + 4.19)}
+    obstacles = Obstacles(_NoBoard([*pads, target]), "F.Cu", 0.2)
+    # As the RF class laid it, the hop runs straight down the part's right-hand column of ground pads.
+    plain, escaped = plan_hop("OUT", out, target, 0.36, [0.2], obstacles)
+    assert not escaped and any(_seg_rect(s["start"], s["end"], q) < 0.38 for s in plain for q in own_pads(pads, out))
+    # Pad 4 leaves along +x, and runs past the courtyard's edge at x = 20.08 before it may turn.
+    direction, length = pad_exit(out, own_pads(pads, out), courtyards[(cx, cy)], 0.36, 0.2, (6.0, 12.5))
+    assert direction == (1.0, 0.0) and out["x"] + length >= 20.08
+    run, escaped = plan_hop("OUT", out, target, 0.36, [0.2], obstacles, pads=[*pads, target], courtyards=courtyards)
+    assert escaped
+    points = [tuple(run[0]["start"]), *(tuple(s["end"]) for s in run)]
+    assert points[0] == (out["x"], out["y"]) and points[-1] == (24.0, 20.0)
+    assert points[1][1] == pytest.approx(out["y"]) and points[1][0] >= 20.08 - 1e-6
+    assert all(_turn_allowed(*points[i:i + 3]) for i in range(len(points) - 2))
+    for s in run:
+        assert all(_seg_rect(s["start"], s["end"], q) >= 0.2 + s["width"] / 2 for q in own_pads(pads, out))
+
+
+def test_an_rf_hop_that_clears_its_pads_is_laid_as_before():
+    from edaloop.route_classes import Obstacles, _spine, plan_hop
+
+    a = {"name": "A.2", "net": "N", "x": 0.0, "y": 0.0, "hw": 0.3, "hh": 0.3, "fx": -0.5, "fy": 0.0, "layers": ["F.Cu"]}
+    b = {"name": "B.1", "net": "N", "x": 4.0, "y": 1.0, "hw": 0.3, "hh": 0.3, "fx": 4.5, "fy": 1.0, "layers": ["F.Cu"]}
+    others = [{**a, "name": "A.1", "net": "X", "x": -1.0}, {**b, "name": "B.2", "net": "Y", "x": 5.0}]
+    obstacles = Obstacles(_NoBoard([a, b, *others]), "F.Cu", 0.2)
+    run, escaped = plan_hop("N", a, b, 0.36, [0.2], obstacles, pads=[a, b, *others], courtyards={})
+    assert not escaped
+    assert [tuple(s["start"]) for s in run] + [tuple(run[-1]["end"])] == _spine((0.0, 0.0), (4.0, 1.0))
+
+
+def test_a_board_reads_each_courtyard_turned_with_its_footprint(tmp_path):
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text('(kicad_pcb (net 0 "") (footprint "x:y" (at 10 20 90) (property "Reference" "U1")'
+                    ' (fp_rect (start -4.19 -5.08) (end 4.19 5.08) (layer "F.CrtYd"))'
+                    ' (fp_line (start -9 -9) (end 9 9) (layer "F.SilkS"))))')
+    (x1, y1, x2, y2), = Board(path).courtyards().values()
+    assert (x1, y1, x2, y2) == pytest.approx((10 - 5.08, 20 - 4.19, 10 + 5.08, 20 + 4.19))
+
+
 def test_the_project_states_the_tap_rule_only_when_the_description_sets_it():
     import yaml
 
@@ -3036,7 +3211,7 @@ def test_pad_vias_puts_as_many_vias_as_fit_on_a_connector_ground_pad(tmp_path, m
     monkeypatch.setattr(ground, "_load", lambda p: (bench, {}))
     keepout = _ufl_keepout()
     monkeypatch.setattr(ground, "_facts", lambda board, work: {"pads": pads, "outline": [0, 0, 20, 20], "keepouts": [keepout]})
-    monkeypatch.setattr(ground, "_planned_lines", lambda bench, facts: [])
+    monkeypatch.setattr(ground, "_planned_lines", lambda bench, facts, board=None: [])
     monkeypatch.setattr(ground, "_write_vias", lambda board, points, locked, work: written.setdefault("vias", points))
     out = ground.pad_vias(p)
     assert out["short_of_target"] == []

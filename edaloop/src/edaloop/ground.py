@@ -128,14 +128,30 @@ def _stub_clear(field: Field, a: tuple, b: tuple) -> bool:
     return True
 
 
-def _planned_lines(bench: dict, facts: dict) -> list[tuple]:
-    """The straight RF and bias runs the router will lay, and each tap's stub onto them."""
+def _planned_lines(bench: dict, facts: dict, board: Board | None = None) -> list[tuple]:
+    """The straight RF and bias runs the router will lay, and each tap's stub onto them.
+
+    Given the board, an RF hop that `route_classes.plan_hop` must lead out of a pad, past its own part, before it bends is planned as
+    those runs, so that no via lands where the line will go."""
     at = {f"{p['ref']}.{p['pad']}": (p["x"], p["y"]) for p in facts["pads"]}
     hw = bench["rf_line_width_mm"] / 2
     lines = []
+    escapes = {}
+    if board is not None:
+        pads = board.all_pads()
+        by_name = {p["name"]: p for p in pads}
+        obstacles = route_classes.Obstacles(board, "F.Cu", CLEAR)
+        courtyards = board.courtyards()
+        for net, entry, leave in bench["chain"]:
+            if entry in by_name and leave in by_name:
+                run, escaped = route_classes.plan_hop(net, by_name[entry], by_name[leave], 2 * hw, [0.3, 0.25, 0.2], obstacles,
+                                                      pads=pads, courtyards=courtyards, clearance=CLEAR)
+                if escaped:
+                    escapes[(net, entry, leave)] = [(tuple(x["start"]), tuple(x["end"])) for x in run]
     for net, entry, leave in [*bench["chain"], *(bench.get("extra_chains") or [])]:
         a, b = at[entry], at[leave]
-        lines.append((a, b, hw))
+        for start, end in escapes.get((net, entry, leave), [(a, b)]):
+            lines.append((start, end, hw))
         for pin in bench["nets"][net]:
             if pin not in (entry, leave):
                 # A tap beside the line joins it square on, as `route_classes.plan_tap` lays it, at the nearest point of the run.
@@ -210,7 +226,7 @@ def pad_vias(p) -> dict:
     work = p.root / ".edaloop"
     work.mkdir(exist_ok=True)
     facts = _facts(p.board, work)
-    lines = _planned_lines(bench, facts)
+    lines = _planned_lines(bench, facts, Board(p.board))
     field = Field(facts, [], [], lines)
     placed, bare, stubs = [], [], []
     rf_layout = {**rf_rules.DEFAULTS, **p.section("rf_layout")}
