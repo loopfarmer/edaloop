@@ -323,6 +323,44 @@ def tap_voids(pads: list[dict], chain: list, grow_mm: float, line_width_mm: floa
     return out
 
 
+def fill_fence(field: Field, board: Board, facts: dict, nets: set, pitch: float, placed: list, rounds: int = 6) -> int:
+    """Close the fence: put a ground via in each gap and hole wherever one is legal, nearest the fence line first, until nothing changes.
+
+    Sites are searched 0.02 mm apart along the line, since a legal site between two trunks can be 0.03 mm wide, and out from the trace's edge
+    in 0.06 mm steps. One new via can close two gaps, so it runs again. KiCad's DRC still has the last word on each via, in `_prune`.
+    """
+    cfg = rf_rules.DEFAULTS
+    added = 0
+    for _ in range(rounds):
+        extra = [(x, y, RADIUS) for x, y in placed]
+        open_ = rf_rules.fence_gaps(board.tracks, facts["pads"], nets, pitch, float(cfg["fence_band_mm"]), extra) + \
+            rf_rules.fence_holes(board.tracks, facts["pads"], facts["courtyards"], nets, pitch, float(cfg["fence_line_mm"]), extra)
+        progress = False
+        for g in open_:
+            (x1, y1), (ux, uy), side, w = g["start"], g["dir"], g["side"], g["width"]
+            a, c = g["s"]
+            mid = (a + c) / 2
+            sites = []
+            for i in range(201):
+                s = mid + (i // 2) * 0.02 * (1 if i % 2 else -1)
+                if g["kind"] == "gap" and not (a + 0.3 <= s <= c - 0.3):
+                    continue
+                for k in range(16):
+                    lateral = w / 2 + CLEAR + 0.01 + RADIUS + 0.02 + 0.06 * k
+                    sites.append((abs(s - mid) + 0.5 * (lateral - w / 2), x1 + ux * s - uy * lateral * side, y1 + uy * s + ux * lateral * side))
+            for _, x, y in sorted(sites):
+                x, y = round(x, 2), round(y, 2)      # vias are written to 0.01 mm, so a site is judged where it will land
+                if field.clear(x, y):
+                    placed.append((x, y))
+                    field.vias.append((x, y))
+                    added += 1
+                    progress = True
+                    break
+        if not progress:
+            break
+    return added
+
+
 def finish(p) -> dict:
     """Bring the by-class route back, then add the RF fence and stitching around the real copper."""
     bench, cfg = _load(p)
@@ -371,6 +409,7 @@ def finish(p) -> dict:
                         field.vias.append((x, y))
                         break
     fence = len(placed)
+    filled_in = fill_fence(field, board, facts, rf, pitch, placed)
     grid = float(cfg.get("stitch_pitch_mm", 4.0))
     x1, y1, x2, y2 = facts["outline"]
     y = y1 + 1.2
@@ -395,5 +434,10 @@ def finish(p) -> dict:
     filled = work / "filled.kicad_pcb"
     _op("fill_zones", p.board, filled)
     shutil.copy(filled, p.board)
-    return {"fence_vias": fence, "stitch_vias": len(placed) - fence, "ground_vias_now": sum(
+    final = Board(p.board)
+    layout = {**rf_rules.DEFAULTS, **p.section("rf_layout")}
+    still = rf_rules.fence_gaps(final.tracks, facts["pads"], rf, pitch, float(layout["fence_band_mm"])) + \
+        rf_rules.fence_holes(final.tracks, facts["pads"], facts["courtyards"], rf, pitch, float(layout["fence_line_mm"]))
+    return {"fence_vias": fence, "fence_fill_vias": filled_in, "fence_still_open": [{"net": x["net"], "kind": x["kind"], "at": x["at"]} for x in still],
+            "stitch_vias": len(placed) - fence - filled_in, "ground_vias_now": sum(
         1 for t in Board(p.board).tracks if t.kind == "via" and t.net == "GND"), "vias_with_inner_pads_stripped": stripped, "silk_hidden": silk["hidden"], "plane_voids": [v["pad"] for v in voids], **pruned}
