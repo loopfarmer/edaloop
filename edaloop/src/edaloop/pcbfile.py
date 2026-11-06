@@ -154,6 +154,37 @@ class Board:
                             "hw": w / 2, "hh": h / 2, "fx": fx, "fy": fy, "layers": copper})
         return out
 
+    def courtyards(self) -> dict[tuple, tuple]:
+        """Each front footprint's courtyard as a box in board axes, keyed by its origin as `all_pads` gives it in fx, fy.
+
+        The box holds every point of the courtyard's lines, rectangles, polygons and arcs, turned with the footprint. A circle adds its
+        bounding square. A footprint with no courtyard is left out."""
+        out = {}
+        for fp in self.tree:
+            if not (isinstance(fp, list) and fp and fp[0] == "footprint"):
+                continue
+            at = _child(fp, "at")
+            fx, fy = float(at[1]), float(at[2])
+            th = math.radians(float(at[3]) if len(at) > 3 else 0.0)
+            points = []
+            for shape in fp:
+                if not (isinstance(shape, list) and shape and str(shape[0]).startswith("fp_") and _val(shape, "layer") == "F.CrtYd"):
+                    continue
+                for key in ("start", "end", "mid", "center"):
+                    node = _child(shape, key)
+                    if node:
+                        points.append((float(node[1]), float(node[2])))
+                pts = _child(shape, "pts")
+                points += [(float(x[1]), float(x[2])) for x in (pts or [])[1:] if isinstance(x, list) and x[0] == "xy"]
+                if shape[0] == "fp_circle" and _child(shape, "center") and _child(shape, "end"):
+                    (cx, cy), (ex, ey) = (float(v) for v in _child(shape, "center")[1:3]), (float(v) for v in _child(shape, "end")[1:3])
+                    r = math.hypot(ex - cx, ey - cy)
+                    points += [(cx - r, cy - r), (cx + r, cy + r), (cx - r, cy + r), (cx + r, cy - r)]
+            if points:
+                board = [(fx + px * math.cos(th) + py * math.sin(th), fy - px * math.sin(th) + py * math.cos(th)) for px, py in points]
+                out[(fx, fy)] = (min(p[0] for p in board), min(p[1] for p in board), max(p[0] for p in board), max(p[1] for p in board))
+        return out
+
     def net_pads(self, net: str) -> dict[str, tuple]:
         """Pads on a net: "REF.PIN" -> (x, y, half_width, half_height) in board coordinates."""
         return {p["name"]: (p["x"], p["y"], p["hw"], p["hh"]) for p in self.all_pads() if p["net"] == net}

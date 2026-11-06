@@ -270,25 +270,153 @@ def plan_tap(pad: dict, spine: list[tuple], net: str, width: float, necks: list[
     return None
 
 
+def own_pads(pads: list[dict], pad: dict) -> list[dict]:
+    """The other pads of a pad's own part that are on another net: what a line out of it must not cross."""
+    return [q for q in pads if q is not pad and q["net"] != pad["net"] and (q["fx"], q["fy"]) == (pad["fx"], pad["fy"])
+            and q.get("name") != pad.get("name")]
+
+
+def _box_along(q: dict, origin: tuple, d: tuple) -> tuple[float, float, float, float]:
+    """A box's extent along a direction from a point, then across it: (lowest along, highest along, lowest across, highest across)."""
+    corners = [(q["x"] + sx * q["hw"] - origin[0], q["y"] + sy * q["hh"] - origin[1]) for sx in (-1, 1) for sy in (-1, 1)]
+    along = [c[0] * d[0] + c[1] * d[1] for c in corners]
+    across = [-c[0] * d[1] + c[1] * d[0] for c in corners]
+    return min(along), max(along), min(across), max(across)
+
+
+def pad_exit(pad: dict, own: list[dict], courtyard: tuple | None, width: float, clearance: float, toward: tuple) -> tuple | None:
+    """Which way, and how far, a line runs straight out of an RF pad before it may turn: (direction, length from the pad's centre).
+
+    The direction is the axis along which a line of this width, and its clearance, leaves the pad without crossing any of the part's own
+    pads on another net. Of those, the one nearest the way the line is going. The length takes it past all of those pads by the
+    clearance, and past the part's courtyard, so that a bend can't cut back across the part. None if no axis leaves the pad clear.
+    """
+    half = width / 2 + clearance
+    start = (pad["x"], pad["y"])
+    norm = math.hypot(*toward) or 1.0
+    best = None
+    for d in ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+        boxes = [_box_along(q, start, d) for q in own]
+        if any(hi > 0.0 and lo_x < half and hi_x > -half for _lo, hi, lo_x, hi_x in boxes):
+            continue
+        reach = [_box_along(pad, start, d)[1]] + [hi + half for _lo, hi, _a, _b in boxes]
+        if courtyard:
+            box = {"x": (courtyard[0] + courtyard[2]) / 2, "y": (courtyard[1] + courtyard[3]) / 2,
+                   "hw": (courtyard[2] - courtyard[0]) / 2, "hh": (courtyard[3] - courtyard[1]) / 2}
+            reach.append(_box_along(box, start, d)[1])
+        score = (d[0] * toward[0] + d[1] * toward[1]) / norm
+        if best is None or score > best[0] + 1e-9:
+            best = (score, d, round(max(reach), 4))
+    return (best[1], best[2]) if best else None
+
+
+def _octilinear_path(points: list[tuple]) -> list[tuple] | None:
+    """The points without repeats, if every run is octilinear and no corner is sharper than 45 degrees."""
+    points = [x for i, x in enumerate(points) if i == 0 or math.dist(x, points[i - 1]) > 1e-3]
+    if len(points) < 2 or not all(_is_octilinear(a, b) for a, b in zip(points, points[1:])):
+        return None
+    if not all(_turn_allowed(*points[i:i + 3]) for i in range(len(points) - 2)):
+        return None
+    return points
+
+
+def escape_run(net: str, a: dict, b: dict, width: float, necks: list[float], obstacles: Obstacles, exits: dict,
+               layer: str = "F.Cu") -> list[dict] | None:
+    """A hop that leaves each end along its pad's exit, past its own part, before it bends: the shortest that clears.
+
+    `exits` maps "a" and "b" to `pad_exit`'s answer, or None for an end that may be met straight. Each straight run out of a pad may be
+    necked like any run at a pad. Returns None if no path of straight runs and 45-degree bends clears."""
+    pa, pb = (a["x"], a["y"]), (b["x"], b["y"])
+
+    def lengths(exit_):
+        return [0.0] if exit_ is None else [exit_[1] + 0.1 * k for k in range(31)]
+    best, best_score = None, float("inf")
+    for ea in lengths(exits.get("a")):
+        a1 = pa if exits.get("a") is None else (pa[0] + exits["a"][0][0] * ea, pa[1] + exits["a"][0][1] * ea)
+        for eb in lengths(exits.get("b")):
+            b1 = pb if exits.get("b") is None else (pb[0] + exits["b"][0][0] * eb, pb[1] + exits["b"][0][1] * eb)
+            for middle in _spines(a1, b1):
+                points = _octilinear_path([pa, *middle, pb])
+                if points is None:
+                    continue
+                score = sum(math.dist(p, q) for p, q in zip(points, points[1:])) + 0.05 * (len(points) - 2)
+                if score >= best_score:
+                    continue
+                segs = []
+                last = len(points) - 2
+                for i, (p, q) in enumerate(zip(points, points[1:])):
+                    w = width if 0 < i < last or len(points) == 2 else next((n for n in [width, *necks] if obstacles.clear(net, p, q, n)), None)
+                    if w is None or not obstacles.clear(net, p, q, w):
+                        break
+                    segs.append({"net": net, "start": p, "end": q, "width": w, "layer": layer})
+                else:
+                    best, best_score = segs, score
+    return best
+
+
+def _spines(a: tuple, b: tuple) -> list[list[tuple]]:
+    """Ways from a to b of one straight run and one 45-degree run: `_spine`'s, and the diagonal first or last."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    out = [_spine(a, b)]
+    diagonal = min(abs(dx), abs(dy))
+    if diagonal > 1e-3 and abs(abs(dx) - abs(dy)) > 1e-3:
+        sx, sy = math.copysign(1, dx), math.copysign(1, dy)
+        corner = (a[0] + sx * diagonal, a[1] + sy * diagonal)
+        out.append([a, corner, b])
+        out.append([a, (b[0] - sx * diagonal, b[1] - sy * diagonal), b])
+    return out
+
+
+def plan_hop(net: str, a: dict, b: dict, width: float, necks: list[float], obstacles: Obstacles, layer: str = "F.Cu",
+             pads: list[dict] | None = None, courtyards: dict | None = None, clearance: float = 0.2) -> tuple[list[dict], bool]:
+    """The copper for one hop of an RF chain, and whether it had to leave a pad along its exit first.
+
+    The hop is a spine of straight runs and 45-degree bends, necked where it must be at a fine-pitch end. If that would cross a pad of
+    either end's own part on another net, each such end instead leaves its pad straight out, past its part, before it bends: see
+    `escape_run`. If nothing clears that way either, the spine is drawn as it is, and the DRC sensor reports it."""
+    spine = _spine((a["x"], a["y"]), (b["x"], b["y"]))
+    last = len(spine) - 2
+    plain = [seg for i, (p, q) in enumerate(zip(spine, spine[1:]))
+             for seg in necked_run(net, p, q, width, necks, obstacles, layer, neck_start=i == 0, neck_end=i == last)]
+    if pads is None:
+        return plain, False
+    exits, crossing = {}, False
+    for key, pad, other in (("a", a, b), ("b", b, a)):
+        own = own_pads(pads, pad)
+        if any(_seg_rect(s["start"], s["end"], q) < obstacles.clearance + s["width"] / 2 for s in plain for q in own):
+            crossing = True
+            exits[key] = pad_exit(pad, own, (courtyards or {}).get((pad["fx"], pad["fy"])), width, clearance,
+                                  (other["x"] - pad["x"], other["y"] - pad["y"]))
+        else:
+            exits[key] = None
+    if not crossing:
+        return plain, False
+    run = escape_run(net, a, b, width, necks, obstacles, exits, layer)
+    return (run, True) if run else (plain, False)
+
+
 def rf_segments(board: Board, chains: list, width: float, net_width: dict | None = None, layer: str = "F.Cu",
                 clearance: float = 0.2, necks: list[float] | None = None) -> tuple[list[dict], list[str]]:
     """Spines first, then a planned stub from every other pad. Returns segments and the pads no stub could reach."""
     necks = necks if necks is not None else [0.3, 0.25, 0.2]
     obstacles = Obstacles(board, layer, clearance)
-    pads = {p["name"]: p for p in board.all_pads()}
+    all_pads = board.all_pads()
+    courtyards = board.courtyards()
+    pads = {p["name"]: p for p in all_pads}
     out, spines, unreached = [], {}, []
     for net, entry, exit_ in chains:
         a_name, b_name = f"{entry[0]}.{entry[1]}", f"{exit_[0]}.{exit_[1]}"
         if a_name not in pads or b_name not in pads or pads[a_name]["net"] != net or pads[b_name]["net"] != net:
             raise ValueError(f"{net}: pad {a_name} or {b_name} isn't on the net")
         w = (net_width or {}).get(net, width)
-        spine = _spine((pads[a_name]["x"], pads[a_name]["y"]), (pads[b_name]["x"], pads[b_name]["y"]))
+        run, escaped = plan_hop(net, pads[a_name], pads[b_name], w, necks, obstacles, layer, all_pads, courtyards, clearance)
+        # Taps join the copper actually laid, which is the spine unless the hop had to leave a pad first.
+        spine = ([tuple(run[0]["start"]), *(tuple(s["end"]) for s in run)] if escaped
+                 else _spine((pads[a_name]["x"], pads[a_name]["y"]), (pads[b_name]["x"], pads[b_name]["y"])))
         spines[net] = (spine, w, a_name, b_name)
-        last = len(spine) - 2
-        for i, (p, q) in enumerate(zip(spine, spine[1:])):
-            for seg in necked_run(net, p, q, w, necks, obstacles, layer, neck_start=i == 0, neck_end=i == last):
-                out.append(seg)
-                obstacles.add(seg)
+        for seg in run:
+            out.append(seg)
+            obstacles.add(seg)
     for net, (spine, w, a_name, b_name) in spines.items():
         for name, pad in pads.items():
             if pad["net"] != net or name in (a_name, b_name):
