@@ -1,0 +1,27 @@
+#!/bin/sh
+# Runs a KiCad tool inside KiCad's Docker image, so a machine without KiCad can still use it.
+# Link or copy this file as kicad-cli, kicad-python or ngspice: the name it's called by picks the tool.
+# Paths line up inside and out: $HOME, /tmp, the current folder and this checkout are mounted at the same place, so
+# the files edaloop passes, and the models they include, are found. EDALOOP_DOCKER_MOUNTS adds more folders, colon-separated. EDALOOP_KICAD_IMAGE picks
+# the image; the default is the one CI uses.
+set -e
+image="${EDALOOP_KICAD_IMAGE:-kicad/kicad:10.0.8@sha256:3f4a01786dfbe803a65f345c3342b765db9add913f5e9448f8356793714ddc34}"
+case "$(basename "$0")" in
+  kicad-cli) tool=kicad-cli ;;
+  kicad-python) tool=python3 ;;
+  ngspice) tool=ngspice ;;
+  *) echo "kicad-docker: call this as kicad-cli, kicad-python or ngspice, not $(basename "$0")" >&2; exit 2 ;;
+esac
+set -- "$tool" "$@"
+checkout="$(cd "$(dirname "$0")/../../.." && pwd)"
+mounts=""
+for dir in "$HOME" /tmp "$PWD" "$checkout" $(printf '%s' "${EDALOOP_DOCKER_MOUNTS:-}" | tr ':' ' '); do
+  [ -d "$dir" ] || continue
+  case " $mounts " in *" $dir "*) continue ;; esac
+  mounts="$mounts $dir"
+done
+args=""
+for dir in $mounts; do args="$args -v $dir:$dir"; done
+# As your own user, so what it writes is yours. HOME is kept so KiCad finds a writable place for its settings.
+# shellcheck disable=SC2086
+exec docker run --rm -i --user "$(id -u):$(id -g)" -e HOME="$HOME" $args -w "$PWD" "$image" "$@"
