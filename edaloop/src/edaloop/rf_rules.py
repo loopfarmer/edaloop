@@ -32,7 +32,7 @@ FILTER = re.compile(r"^FL\d|(high|low|band)pass|^(HFCN|LFCN|BFCN)-", re.I)
 SERIES_L_NH = {"0201": 0.25, "0402": 0.35, "0603": 0.45, "0805": 0.6}      # a chip capacitor's own inductance, typical
 VIA_L_NH = 0.25             # a bypass's via to the plane
 
-DEFAULTS = {"fence_factor": 1.25, "fence_reach_mm": 1.3, "coverage_warn": 1.0, "coverage_error": 0.9, "parallel_gap_mm": 1.0, "parallel_max_mm": 3.0,
+DEFAULTS = {"fence_band_mm": 1.5, "fence_line_mm": 0.58, "coverage_warn": 1.0, "coverage_error": 0.9, "parallel_gap_mm": 1.0, "parallel_max_mm": 3.0,
             "top_run_max_mm": 5.0, "tap_max_mm": 3.0, "bypass_max_mm": 3.0, "series_rl_min_db": 20.0, "bypass_max_ohm": 25.0,
             # An RF connector's ground pads: "fill" places as many vias as fit, or give a number. Fewer than the minimum is reported.
             "connector_ground_vias": "fill", "connector_ground_min_vias": 2,
@@ -176,28 +176,71 @@ def longest_top_run(tracks: list, net: str, layer: str = "F.Cu") -> tuple[float,
     return round(total, 2), round(max(sums.values(), default=0.0), 2)
 
 
-def fence_stretches(tracks: list, vias: list, nets: set, reach_mm: float, min_len: float = 0.5) -> dict[str, float]:
-    """Each RF net's longest run along a track, on either side, between ground vias. A via's reach is measured from the track's centre."""
-    out: dict[str, float] = {}
-    for t in tracks:
-        if t.kind == "via" or t.net not in nets:
-            continue
-        lx, ly = t.end[0] - t.start[0], t.end[1] - t.start[1]
-        run = math.hypot(lx, ly)
-        if run < min_len:
-            continue
-        ux, uy = lx / run, ly / run
-        for side in (1, -1):
-            stops = [0.0, run]
-            for vx, vy in vias:
-                along = (vx - t.start[0]) * ux + (vy - t.start[1]) * uy
-                across = -(vx - t.start[0]) * uy + (vy - t.start[1]) * ux
-                if 0 <= along <= run and 0 < side * across <= reach_mm:
-                    stops.append(along)
-            stops.sort()
-            out[t.net] = max(out.get(t.net, 0.0), max(b - a for a, b in zip(stops, stops[1:])))
-    return {k: round(v, 2) for k, v in out.items()}
+def _ground_points(tracks: list, pads: list, extra_vias: list | None = None) -> tuple[list, list]:
+    """What ties the coplanar ground down beside a line: GND vias, and GND pads on the top layer, whose own vias take them to the plane."""
+    vias = [(t.start[0], t.start[1], t.width / 2) for t in tracks if t.kind == "via" and t.net == "GND"]
+    vias += [(x, y, r) for x, y, r in (extra_vias or [])]
+    return vias, [p for p in pads if p["net"] == "GND" and p.get("front", True)]
 
+
+def _rf_segments(tracks: list, nets: set) -> list:
+    return [t for t in tracks if t.kind != "via" and t.layer == "F.Cu" and t.net in nets and math.dist(t.start, t.end) >= 0.05]
+
+
+def fence_gaps(tracks: list, pads: list, nets: set, pitch: float, band: float, extra_vias: list | None = None) -> list[dict]:
+    """Along each side of each top-layer RF segment, the runs between ground connections longer than two pitches.
+
+    A ground connection is a GND via, or a GND pad whose edge lies within `band` of the trace's edge, since a part's ground pad beside the line
+    ties the coplanar ground as well as a via does. A segment shorter than two pitches can't hold a gap, so `fence_holes` covers those.
+    """
+    vias, ground_pads = _ground_points(tracks, pads, extra_vias)
+    points = vias + [(p["x"], p["y"], min(p["w"], p["h"]) / 2) for p in ground_pads]
+    out = []
+    for t in _rf_segments(tracks, nets):
+        (x1, y1), (x2, y2) = t.start, t.end
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < 2 * pitch:
+            continue
+        ux, uy = (x2 - x1) / length, (y2 - y1) / length
+        for side in (1, -1):
+            stops = [0.0, length]
+            for vx, vy, r in points:
+                along = (vx - x1) * ux + (vy - y1) * uy
+                lateral = ((vx - x1) * -uy + (vy - y1) * ux) * side
+                if -0.5 <= along <= length + 0.5 and 0 < lateral - r < t.width / 2 + band:
+                    stops.append(min(max(along, 0.0), length))
+            stops.sort()
+            for a, c in zip(stops, stops[1:]):
+                if c - a > 2 * pitch:
+                    out.append({"net": t.net, "side": side, "kind": "gap", "length_mm": round(c - a, 2), "s": (a, c), "start": (x1, y1), "dir": (ux, uy),
+                                "width": t.width, "at": (round(x1 + ux * (a + c) / 2, 3), round(y1 + uy * (a + c) / 2, 3))})
+    return out
+
+
+def fence_holes(tracks: list, pads: list, courtyards: list, nets: set, pitch: float, line_mm: float, extra_vias: list | None = None) -> list[dict]:
+    """Points on the fence line, at the trace's edge plus `line_mm`, more than one pitch from any ground connection. Walked in 0.2 mm steps on
+    segments of any length, so it catches what the gap test misses on short hops between parts. A point inside a part's courtyard is the part's own
+    business and is skipped. One hole per side per segment, since one via there closes it."""
+    vias, ground_pads = _ground_points(tracks, pads, extra_vias)
+    yards = [c for c in courtyards if "x1" in c and not c.get("back")]
+    out = []
+    for t in _rf_segments(tracks, nets):
+        (x1, y1), (x2, y2) = t.start, t.end
+        length = math.hypot(x2 - x1, y2 - y1)
+        ux, uy = (x2 - x1) / length, (y2 - y1) / length
+        off = t.width / 2 + line_mm
+        for side in (1, -1):
+            for k in range(int(length / 0.2) + 1):
+                s = k * 0.2
+                x, y = x1 + ux * s - uy * off * side, y1 + uy * s + ux * off * side
+                if any(c["x1"] <= x <= c["x2"] and c["y1"] <= y <= c["y2"] for c in yards):
+                    continue
+                near = min([math.hypot(x - vx, y - vy) for vx, vy, _ in vias] + [_pad_edge_distance(p, x, y) for p in ground_pads] + [99.0])
+                if near > pitch:
+                    out.append({"net": t.net, "side": side, "kind": "hole", "length_mm": 0.0, "s": (s - 1.2, s + 1.2), "start": (x1, y1), "dir": (ux, uy),
+                                "width": t.width, "at": (round(x, 3), round(y, 3))})
+                    break
+    return out
 
 def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, band_ghz: tuple, reference: str, coverage: dict, copper_layers: int, cfg: dict | None = None) -> tuple[dict, list[tuple]]:
     """Measure a board against the rules. Returns metrics, and findings as (id, message, severity)."""
@@ -224,11 +267,18 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
 
     # Via fence
     pitch = float(c.get("fence_pitch_mm") or fence_pitch(band_ghz[1], float(c.get("eps_eff", 3.25))))
-    stretches = fence_stretches(tracks, ground_vias, rf_nets, float(c["fence_reach_mm"]))
-    long_ones = {k: v for k, v in stretches.items() if v > pitch * float(c["fence_factor"])}
-    metrics["fence"] = {"pitch_mm": round(pitch, 3), "longest_mm": max(stretches.values(), default=0.0), "nets_over_pitch": len(long_ones), "nets": len(stretches)}
-    for net, length in long_ones.items():
-        findings.append((f"rf_layout:fence:{net}", f"{net}: {length} mm of line without a ground via on one side, against a {pitch:.2f} mm fence. The stretch can be at a part's own pads, where a via can't go", "warning"))
+    # Read as a reviewer reads it: gaps over two pitches between ground connections, and fence-line points over one pitch from any.
+    gaps = fence_gaps(tracks, pads, rf_nets, pitch, float(c["fence_band_mm"]))
+    holes = fence_holes(tracks, pads, facts.get("courtyards") or [], rf_nets, pitch, float(c["fence_line_mm"]))
+    metrics["fence"] = {"pitch_mm": round(pitch, 3), "gaps": len(gaps), "holes": len(holes), "longest_gap_mm": max((g["length_mm"] for g in gaps), default=0.0),
+                        "open_at": [{"net": g["net"], "kind": g["kind"], "at": g["at"]} for g in (gaps + holes)[:12]]}
+    for net in sorted({g["net"] for g in gaps + holes}):
+        mine = [g for g in gaps + holes if g["net"] == net]
+        worst = max((g["length_mm"] for g in mine if g["kind"] == "gap"), default=None)
+        what = ", ".join(x for x in (f"{sum(g['kind'] == 'gap' for g in mine)} gap(s) up to {worst} mm" if worst else "",
+                                     f"{sum(g['kind'] == 'hole' for g in mine)} hole(s)" if any(g["kind"] == "hole" for g in mine) else "") if x)
+        findings.append((f"rf_layout:fence:{net}", f"{net}: {what} in the ground-via fence, against a {pitch:.2f} mm pitch, first near ({mine[0]['at'][0]}, {mine[0]['at'][1]}). "
+                         "A gap is over two pitches between ground connections, and a hole is a fence-line point over one pitch from any", "warning"))
 
     # The plane under the line
     if coverage:

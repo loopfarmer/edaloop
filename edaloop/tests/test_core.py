@@ -2163,16 +2163,66 @@ def test_a_real_capacitor_has_inductance():
     assert rf_rules.series_rl_db(0.0) > 100 and rf_rules.series_rl_db(50.0) < 10
 
 
-def test_fence_stretch_is_measured_per_side():
+def test_fence_gaps_are_judged_at_two_pitches_and_count_ground_pads():
     from edaloop import rf_rules
 
     line = _track("RF", (0.0, 0.0), (10.0, 0.0))
-    both = [(x, s * 0.8) for x in (2.0, 4.0, 6.0, 8.0) for s in (1, -1)]
-    assert rf_rules.fence_stretches([line], both, {"RF"}, 1.3)["RF"] == 2.0
-    one_side = [(x, 0.8) for x in (2.0, 4.0, 6.0, 8.0)]
-    assert rf_rules.fence_stretches([line], one_side, {"RF"}, 1.3)["RF"] == 10.0
-    assert rf_rules.fence_stretches([line], [(5.0, 3.0)], {"RF"}, 1.3)["RF"] == 10.0      # too far off to fence the line
+    via = lambda x, y: _track("GND", (x, y), (x, y), 0.6, kind="via")
+    both_sides = [via(x, s * 0.9) for x in (2.0, 4.0, 6.0, 8.0) for s in (1, -1)]
+    assert rf_rules.fence_gaps([line, *both_sides], [], {"RF"}, 1.778, 1.5) == []
+    # One side bare: a single 10 mm gap there, and none on the other.
+    one_side = [via(x, 0.9) for x in (2.0, 4.0, 6.0, 8.0)]
+    gaps = rf_rules.fence_gaps([line, *one_side], [], {"RF"}, 1.778, 1.5)
+    assert [(g["side"], g["length_mm"]) for g in gaps] == [(-1, 10.0)]
+    # A ground pad beside the line ties the ground down as a via does.
+    pads = [_pad("U9", str(i), "GND", x, -1.0, 0.6, 0.6) for i, x in enumerate((2.0, 4.0, 6.0, 8.0))]
+    assert rf_rules.fence_gaps([line, *one_side], pads, {"RF"}, 1.778, 1.5) == []
+    # A gap under two pitches isn't one, and a via further off than the band doesn't count.
+    assert rf_rules.fence_gaps([line, via(3.3, 0.9), via(6.6, 0.9), via(3.3, -0.9), via(6.6, -0.9)], [], {"RF"}, 1.778, 1.5) == []
+    far = [via(x, s * 3.0) for x in (2.0, 4.0, 6.0, 8.0) for s in (1, -1)]
+    assert len(rf_rules.fence_gaps([line, *far], [], {"RF"}, 1.778, 1.5)) == 2
 
+
+def test_fence_holes_catch_short_hops_and_skip_courtyards():
+    from edaloop import rf_rules
+
+    hop = _track("RF", (0.0, 0.0), (3.0, 0.0))          # shorter than two pitches, so the gap test can't see it
+    assert rf_rules.fence_gaps([hop], [], {"RF"}, 1.778, 1.5) == []
+    holes = rf_rules.fence_holes([hop], [], [], {"RF"}, 1.778, 0.58)
+    assert sorted(h["side"] for h in holes) == [-1, 1]
+    # A part's courtyard over the fence line is the part's business.
+    yard = {"ref": "U1", "x1": -1.0, "y1": -2.0, "x2": 4.0, "y2": 2.0, "back": False}
+    assert rf_rules.fence_holes([hop], [], [yard], {"RF"}, 1.778, 0.58) == []
+    vias = [_track("GND", (x, s * 0.9), (x, s * 0.9), 0.6, kind="via") for x in (0.5, 2.5) for s in (1, -1)]
+    assert rf_rules.fence_holes([hop, *vias], [], [], {"RF"}, 1.778, 0.58) == []
+
+
+def test_fill_closes_the_fence_where_a_via_is_legal_and_reports_the_rest():
+    from types import SimpleNamespace
+
+    from edaloop import ground, rf_rules
+
+    def filled(extra_tracks, field_tracks):
+        line = _track("RF", (2.0, 5.0), (14.0, 5.0))
+        board = SimpleNamespace(tracks=[line, *extra_tracks])
+        facts = {"pads": [], "courtyards": [], "outline": [0.0, 0.0, 16.0, 10.0]}
+        field = ground.Field(facts, [((2.0, 5.0), (14.0, 5.0), 0.15), *field_tracks], [], [])
+        placed = []
+        added = ground.fill_fence(field, board, facts, {"RF"}, 1.778, placed)
+        extra = [(x, y, ground.RADIUS) for x, y in placed]
+        left = rf_rules.fence_gaps(board.tracks, [], {"RF"}, 1.778, 1.5, extra) + rf_rules.fence_holes(board.tracks, [], [], {"RF"}, 1.778, 0.58, extra)
+        return added, placed, left
+
+    # A bare line: every gap and hole closes, and each via sits where it was judged legal.
+    added, placed, left = filled([], [])
+    assert added == len(placed) > 0 and left == []
+    # Another net beside one side leaves no legal site there at any distance inside the band. That stretch stays open and is
+    # reported, as the project's method says: fill what can be filled, then move copper where a fill can't reach.
+    blocker = _track("SIG", (6.0, 4.0), (10.0, 4.0), 0.2)
+    added, placed, left = filled([blocker], [((6.0, 4.0), (10.0, 4.0), 0.1)])
+    assert left and {g["side"] for g in left} == {-1}
+    assert all(5.0 <= g["at"][0] <= 11.0 for g in left)
+    assert all(ground._seg_gap((x, y), (6.0, 4.0), (10.0, 4.0)) >= ground.RADIUS + ground.CLEAR + 0.1 for x, y in placed)
 
 def test_parallel_run_and_top_layer_run():
     from edaloop import rf_rules
@@ -2204,7 +2254,8 @@ def test_audit_finds_what_drc_cannot(tmp_path):
     assert "rf_layout:pad_gap:L1" in ids and "rf_layout:limiter:U1" in ids and "rf_layout:tap:L1.1" in ids
     assert "rf_layout:bypass_far:L1" in ids and "rf_layout:bypass_order:L1" in ids
     assert "rf_layout:ground_pattern" in ids and metrics["ground_pattern_short"]
-    clean, none = rf_rules.audit([_track("A", (0.0, 0.0), (1.0, 0.0))], {"pads": [_pad("J1", "1", "A", 0.0, 0.0), _pad("J2", "1", "A", 1.0, 0.0)]}, [("A", "J1.1", "J2.1")], [], {}, (1.0, 2.0), "In1.Cu", {"A": {"coverage": 1.0, "at": [0, 0]}}, 4)
+    fenced = [_track("GND", (x, s * 0.9), (x, s * 0.9), 0.6, kind="via") for x in (0.0, 1.0) for s in (1, -1)]
+    clean, none = rf_rules.audit([_track("A", (0.0, 0.0), (1.0, 0.0)), *fenced], {"pads": [_pad("J1", "1", "A", 0.0, 0.0), _pad("J2", "1", "A", 1.0, 0.0)]}, [("A", "J1.1", "J2.1")], [], {}, (1.0, 2.0), "In1.Cu", {"A": {"coverage": 1.0, "at": [0, 0]}}, 4)
     assert none == [] and clean["plane_coverage_min"] == 1.0
 
 
