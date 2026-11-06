@@ -243,7 +243,7 @@ No real board files are stored here. [Evaluation boards](edaloop/evaluation/READ
 ## Known limits
 
 - **The placer isn't general.** It lays out RF cascades with taps and bias rails, one row per channel, and packs other parts on a shelf for the router.
-- **Two test benches need your own land patterns.** `lband_element` and `cband_element` run through `bench`, but they can't be built without footprints for their custom RF parts. `gain_block_demo` uses only KiCad's standard ones.
+- **Two test benches build on stand-in land patterns.** `lband_element` and `cband_element` name custom RF footprints that aren't in this repository. Without your own library in `--footprints`, they build on bundled stand-ins copied from KiCad's library, two of which guess the package. The build says so, and `project_files` holds a guessed package back from release. See [the stand-ins' README](edaloop/src/edaloop/data/footprints/README.md). `gain_block_demo` uses only KiCad's standard footprints.
 - **Readings aren't measurements.** Part heat is an upper estimate, and stackups and heights are assumed unless you state them. Nothing has been held against a bench.
 - **openEMS reads high on narrow coplanar lines.** Refining its grid doesn't close the gap, and the cause is unknown. See [openems-coupon-bias.md](edaloop/docs/openems-coupon-bias.md).
 - **Some layout rules are measured, not enforced.** The router isn't forbidden from an RF part's pad gap, a limiter's pad field or a run alongside an RF line, though `rf_layout` reports each.

@@ -139,7 +139,6 @@ jobs:
           EOF
       # Two skips remain, both for inputs that aren't freely available:
       #  - "no pcbparts database": a local copy of the pcbparts parts catalogue, not redistributable here.
-      #  - "set EDALOOP_FOOTPRINTS": custom RF land patterns (RFLib_FP.pretty) that aren't in this repository.
       - name: pytest with KiCad
         working-directory: edaloop
         run: uv run pytest -rs
@@ -186,6 +185,29 @@ jobs:
           print(f"DRC objections to ground vias: {len(bad)}")
           if bad:
               sys.exit("\n".join(bad[:20]))
+          EOF
+      # The element testbenches name RF land patterns that aren't in this repository. They must build on the bundled stand-ins,
+      # say so, and be held back from release by project_files: an error for each guessed package, a warning for each copy.
+      - name: Element testbenches on the stand-in footprints
+        working-directory: edaloop
+        run: |
+          for bench in lband_element cband_element; do
+            uv run edaloop --json build "testbenches/$bench.yaml" -o "$RUNNER_TEMP/$bench" > "$RUNNER_TEMP/$bench.json" 2> "$RUNNER_TEMP/$bench.err"
+            grep "stand-ins were used" "$RUNNER_TEMP/$bench.err"
+            uv run edaloop -C "$RUNNER_TEMP/$bench" run project_files || true
+          done
+          uv run python - "$RUNNER_TEMP" <<'EOF'
+          import json, sys
+          from pathlib import Path
+          want = {"lband_element": set(), "cband_element": {"U2", "U3"}}
+          for bench, guessed in want.items():
+              built = json.load(open(Path(sys.argv[1]) / f"{bench}.json"))
+              listed = {x["ref"] for x in built["stand_in_footprints"] if x["assumed"]}
+              rows = [json.loads(x) for x in (Path(sys.argv[1]) / bench / ".edaloop/ledger.jsonl").read_text().splitlines()]
+              errors = {f["id"].rsplit(":", 1)[1] for f in rows[-1]["findings"] if f["id"].startswith("project_files:stand_in:") and f["severity"] == "error"}
+              print(bench, "guessed:", sorted(listed), "blocked:", sorted(errors))
+              if listed != guessed or errors != guessed:
+                  sys.exit(f"{bench}: expected {sorted(guessed)} guessed and blocked, got {sorted(listed)} and {sorted(errors)}")
           EOF
       - name: KiCad checks on gain_block_demo
         working-directory: edaloop

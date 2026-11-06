@@ -149,7 +149,32 @@ def project_files(p: Project) -> Outcome:
         findings.append(Finding("project_files:no_fp_lib_table",
                                 "no project fp-lib-table: library checks may report false footprint issues",
                                 "warning"))
-    return Outcome(_files(p, p.board, p.project_file, lib), findings=findings)
+    found = stand_in_footprints(p.board) if p.board.exists() else []
+    for part in found:
+        if part["assumed"]:
+            findings.append(Finding(f"project_files:stand_in:{part['ref']}",
+                                    f"{part['ref']} is placed on edaloop's stand-in {part['footprint']}, a guessed package and not the maker's land pattern. "
+                                    "Rebuild with the real library in --footprints, or have a person waive this with a name and a reason"))
+        else:
+            findings.append(Finding(f"project_files:stand_in:{part['ref']}",
+                                    f"{part['ref']} is placed on edaloop's stand-in {part['footprint']}, copied from KiCad's library and not checked "
+                                    "against the maker's drawing", "warning"))
+    return Outcome(_files(p, p.board, p.project_file, lib), {"stand_in_footprints": found}, findings=findings)
+
+
+def stand_in_footprints(board_path: Path) -> list[dict]:
+    """Footprints on a board that came from edaloop's bundled stand-ins, read from the descr each carries onto the board."""
+    from .boardgen import STAND_IN
+    out = []
+    for node in Board(board_path).tree:
+        if not (isinstance(node, list) and node and node[0] == "footprint"):
+            continue
+        descr = next((str(x[1]) for x in node if isinstance(x, list) and len(x) > 1 and x[0] == "descr"), "")
+        if not descr.startswith(STAND_IN):
+            continue
+        ref = next((str(x[2]) for x in node if isinstance(x, list) and len(x) > 2 and x[0] == "property" and x[1] == "Reference"), "?")
+        out.append({"ref": ref, "footprint": str(node[1]), "assumed": "ASSUMED" in descr})
+    return sorted(out, key=lambda x: x["ref"])
 
 
 @check("drc", "verify")

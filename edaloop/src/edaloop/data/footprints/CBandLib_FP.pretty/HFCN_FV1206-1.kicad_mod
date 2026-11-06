@@ -3,7 +3,7 @@
 	(generator "pcbnew")
 	(generator_version "10.0")
 	(layer "F.Cu")
-	(descr "From KiCad Filter:Filter_Mini-Circuits_FV1206-1, KiCad library CC-BY-SA 4.0. Unchanged. Not checked against Mini-Circuits' drawing. Original: Mini-Circuits Filter SMD 1206 https://ww2.minicircuits.com/case_style/FV1206-1.pdf")
+	(descr "edaloop stand-in. From KiCad Filter:Filter_Mini-Circuits_FV1206-1, KiCad library CC-BY-SA 4.0. Unchanged. Not checked against Mini-Circuits' drawing. Original: Mini-Circuits Filter SMD 1206 https://ww2.minicircuits.com/case_style/FV1206-1.pdf")
 	(tags "Mini-Circuits Filter SMD 1206")
 	(property "Reference" "REF**"
 		(at 0 -2.67 0)

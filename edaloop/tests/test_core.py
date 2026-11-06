@@ -992,13 +992,56 @@ def test_demo_board_puts_its_chokes_beside_the_line_when_asked(tmp_path):
 
 
 def test_placer_finds_the_diagonal_parts_angles(tmp_path):
-    # The custom land patterns aren't in the repo. Name the folder holding them to run this.
+    # EDALOOP_FOOTPRINTS names a folder with the real land patterns. Without it, the bundled stand-ins place the same way,
+    # since they keep the real parts' pads, and the build must say it used them.
     pretty = Path(os.environ.get("EDALOOP_FOOTPRINTS", "/nonexistent"))
-    if not (pretty / "RFLib_FP.pretty").is_dir():
-        pytest.skip("set EDALOOP_FOOTPRINTS to run this")
-    result = _built("cband_element", tmp_path, [pretty])
+    real = (pretty / "RFLib_FP.pretty").is_dir()
+    result = _built("cband_element", tmp_path, [pretty] if real else [])
     assert result["positions"]["U1"][2] == pytest.approx(49.6, abs=0.05)
     assert result["positions"]["U2"][1] == pytest.approx(9.75, abs=0.01)       # half a pitch off the row
+    standing_in = {x["ref"]: x["assumed"] for x in result["stand_in_footprints"]}
+    if not real:
+        assert standing_in == {"FL1": False, "FL2": False, "FL3": False, "U1": False, "U2": True, "U3": True}
+
+
+def test_every_bundled_footprint_says_it_is_a_stand_in():
+    from edaloop import boardgen
+
+    files = sorted(boardgen.BUNDLED_FOOTPRINTS.glob("*.pretty/*.kicad_mod"))
+    assert len(files) == 5
+    for f in files:
+        text = f.read_text()
+        assert f'(descr "{boardgen.STAND_IN}. From KiCad ' in text, f.name
+    # A guessed package says so, and only those two.
+    assumed = {f.stem for f in files if "ASSUMED" in f.read_text()}
+    assert assumed == {"MC1631-1", "DQ1225"}
+
+
+def test_stand_ins_are_named_by_where_the_library_came_from(tmp_path):
+    from edaloop import boardgen
+
+    bench = {"layout": {"footprints": {"U1": "RFLib_FP:RLM_TT1224", "U2": "CBandLib_FP:MC1631-1", "C1": "Capacitor_SMD:C_0402_1005Metric"}}}
+    got = boardgen.stand_ins(bench, {"RFLib_FP": boardgen.BUNDLED_FOOTPRINTS, "CBandLib_FP": boardgen.BUNDLED_FOOTPRINTS})
+    assert got == [{"ref": "U1", "footprint": "RFLib_FP:RLM_TT1224", "assumed": False}, {"ref": "U2", "footprint": "CBandLib_FP:MC1631-1", "assumed": True}]
+    # A real library of the same name, found first, is not a stand-in.
+    assert boardgen.stand_ins(bench, {"RFLib_FP": tmp_path, "CBandLib_FP": tmp_path}) == []
+
+
+def test_project_files_holds_a_guessed_package_back_from_release(tmp_path):
+    p = make(tmp_path)
+    p.board.write_text("""(kicad_pcb (version 20260206) (generator "pcbnew")
+  (footprint "CBandLib_FP:MC1631-1" (layer "F.Cu") (descr "edaloop stand-in. From KiCad DFN-8. ASSUMED: a generic package")
+    (property "Reference" "U2" (at 0 0 0) (layer "F.SilkS")))
+  (footprint "RFLib_FP:RLM_TT1224" (layer "F.Cu") (descr "edaloop stand-in. From KiCad TT1224. Unchanged")
+    (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS")))
+  (footprint "Capacitor_SMD:C_0402_1005Metric" (layer "F.Cu") (descr "Capacitor SMD 0402")
+    (property "Reference" "C1" (at 0 0 0) (layer "F.SilkS"))))
+""")
+    ev = checks.run_check(p, "project_files")
+    by_id = {f["id"]: f["severity"] for f in ev.findings}
+    assert by_id["project_files:stand_in:U2"] == "error" and by_id["project_files:stand_in:U1"] == "warning"
+    assert "project_files:stand_in:C1" not in by_id and ev.status == "fail"
+    assert [x["ref"] for x in ev.metrics["stand_in_footprints"]] == ["U1", "U2"]
 
 
 def test_build_refuses_a_folder_with_a_board_in_it(tmp_path):

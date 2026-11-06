@@ -2,7 +2,7 @@
 	(version 20260206)
 	(generator "kicad-footprint-generator")
 	(layer "F.Cu")
-	(descr "From KiCad Package_DFN_QFN:DFN-8-1EP_2x2mm_P0.5mm_EP0.9x1.6mm, KiCad library CC-BY-SA 4.0. ASSUMED: a generic 2x2 mm 8-lead DFN standing in for Mini-Circuits case MC1631-1 (PMA2-63LN+), chosen because the description's RF pins 3 and 6 sit on opposite sides and pad 9 is the paddle. Package and paddle size are not from Mini-Circuits' drawing. Original: DFN, 8 Pin (https://www.st.com/resource/en/datasheet/lm2903.pdf#page=16)")
+	(descr "edaloop stand-in. From KiCad Package_DFN_QFN:DFN-8-1EP_2x2mm_P0.5mm_EP0.9x1.6mm, KiCad library CC-BY-SA 4.0. ASSUMED: a generic 2x2 mm 8-lead DFN standing in for Mini-Circuits case MC1631-1 (PMA2-63LN+), chosen because the description's RF pins 3 and 6 sit on opposite sides and pad 9 is the paddle. Package and paddle size are not from Mini-Circuits' drawing. Original: DFN, 8 Pin (https://www.st.com/resource/en/datasheet/lm2903.pdf#page=16)")
 	(tags "DFN NoLead")
 	(property "Reference" "REF**"
 		(at 0 -1.95 0)

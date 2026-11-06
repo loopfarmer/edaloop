@@ -73,5 +73,6 @@ If it changes what the figures show, redraw them with `docs/figures/build_figure
 - **A check:** add it with `@check` in `checks.py`, add it to the gate in `boardgen.project_yaml` if it should block release, and give `controller.REMEDY` an entry. Then say why it's the authority in `docs/AUTHORITY.md`.
 - **An RF layout rule:** add it to `rf_rules.py`, build to it in `ground.py` or `route_classes.py`, and list it in `docs/rf-layout-rules.md`. Every limit must be changeable under `rf_layout:` in `edaloop.yaml`.
 - **An export format:** add it to `export.py`. Read every file back through an independent reader where one exists, compare nets as well as positions, and fail loudly. Limits go in `docs/exports.md`.
+- **A bundled stand-in footprint:** put it in `src/edaloop/data/footprints/`, begin its `descr` with `edaloop stand-in.`, say where it was copied from, and write `ASSUMED` if the package is a guess. `project_files` reads those words on the board, so a guessed package can't reach release unseen.
 - **A part's ground-via pattern:** add it to `LAND_PATTERNS` in `rf_rules.py`, from the maker's own drawing.
 - **An evaluation board:** pin a commit in `evaluation/samples.yaml` and name its licence. Never copy the board into this repository.
