@@ -112,7 +112,7 @@ Each RF hop is solved as routed, with its pads. Three solvers then read the same
 
 ![Return loss for each RF hop, and the line's impedance in three solvers.](edaloop/docs/figures/step-9-simulate.svg)
 
-Here openEMS reads about 7% above the other two, and the 2D reference backs the other two. Refining its grid doesn't close the gap. See [openems-coupon-bias.md](edaloop/docs/openems-coupon-bias.md).
+Here openEMS reads about 7% above the other two, and the 2D reference backs the other two. Refining its grid doesn't close the gap. See [openems-coupon-bias.md](edaloop/docs/openems-coupon-bias.md). So a board's default `em.solvers` is now EMerge and Palace, which agree within 0.04% on gain_block_demo. A board can list openEMS again.
 
 ### 10. Evaluate
 

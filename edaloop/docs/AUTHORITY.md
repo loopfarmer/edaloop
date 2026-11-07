@@ -10,7 +10,7 @@ Each question has one authority. Each entry records the evidence behind the choi
 | RF path quality | `rf_path`, using `scripts/rf_path.py` | DRC has no view of jogs, detours or vias in a cascade. |
 | RF layout: fence, plane across a trace's width, pad gaps, supply on top, bias order | `rf_layout`, with the rules in `rf-layout-rules.md` | DRC passes all of these. Each one moved a real board in review. |
 | Line impedance on real copper | circuitRF `impedance` | Quick and specific. The dips it reports are priced as return loss at the top of band. |
-| Field-solver truth | At least two different solvers, ideally openEMS, Palace and EMerge | One Palace Draft run read 36.2 ohm on a 49 ohm line with no warning. |
+| Field-solver truth | At least two different solvers: EMerge and Palace by default. openEMS reads high on narrow coplanar lines, so it isn't a default | One Palace Draft run read 36.2 ohm on a 49 ohm line with no warning. |
 | Autorouting | KiCadRoutingTools, pinned to the project's rules | With rules pinned it beat Freerouting on 4 of 7 boards and tied on 2, and both timed out on a full reroute of an 8-layer, 788-net board. Unpinned, it rewrites the project's rules so its copper passes. PCBWorld and OrthoRoute's own README steer ordinary boards away from OrthoRoute. |
 | Design rules during routing | The original `.kicad_pro`, restored after each router call | KiCadRoutingTools lowered one test board's minimum via from 0.56 to 0.25 mm in the file beside its output. |
 | Parts | The local pcbparts catalogue | atopile's hosted API no longer resolves. |
