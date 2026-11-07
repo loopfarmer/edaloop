@@ -104,7 +104,11 @@ def em_solvers_missing(kinds) -> list[str]:
         raise ToolMissing(f"circuitRF is not built at {exe}. Run edaloop doctor for how to build it")
     r = run([exe, "solver", "list"], env=circuitrf_env())
     listed = r.stdout if r.returncode == 0 else ""
-    return [k for k in kinds if not solver_listed(listed, EM_SOLVER_NAMES.get(k, k))]
+    missing = [k for k in kinds if not solver_listed(listed, EM_SOLVER_NAMES.get(k, k))]
+    # Palace solves on a mesh it doesn't make: without Gmsh, circuitRF refuses the run after the other solvers have spent theirs.
+    if "palace" in kinds and not solver_listed(listed, "Gmsh"):
+        missing.append("gmsh")
+    return missing
 
 
 def solver_listed(listing: str, name: str) -> bool:

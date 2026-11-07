@@ -199,6 +199,19 @@ def test_a_solver_circuitrf_finds_on_path_counts_as_installed():
     assert not toolchain.solver_listed(listing, "Elmer")
 
 
+
+def test_palace_without_gmsh_is_refused_before_solving(tmp_path, monkeypatch):
+    import subprocess
+    exe = tmp_path / "circuitrf"
+    exe.write_text("")
+    real = {**toolchain.paths(), "circuitrf": str(exe)}
+    monkeypatch.setattr(toolchain, "paths", lambda: real)
+    listing = "Palace: found\nGmsh: not found\nEMerge: installed by circuitRF\n"
+    monkeypatch.setattr(toolchain, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, listing, ""))
+    assert toolchain.em_solvers_missing(["emerge", "palace"]) == ["gmsh"]
+    assert toolchain.em_solvers_missing(["emerge"]) == []
+
+
 def test_friis_matches_hand_calculation():
     stages = [{"loss_db": [[1, 1.0]]},
               {"gain_db": [[1, 20.0]], "nf_db": [[1, 1.0]], "oip3_dbm": [[1, 30.0]]},
