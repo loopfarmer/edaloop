@@ -35,6 +35,18 @@ Other runs:
 - Which part of the remaining 3% comes from the grid, the port or the extraction.
 - Whether a thirds rule on the copper's top and bottom faces would close it.
 
+## Three solvers on gain_block_demo
+
+Run on 2026-11-07 with circuitRF 1.7.0 on gain_block_demo's 0.36 mm coupon at 3 GHz. Palace 0.18.1 was built through Spack and openEMS was 0.37.0:
+
+| Solver | Z0 | eps_eff | Against the 2D reference (49.7 ohm) |
+|---|---:|---:|---:|
+| Palace, Standard | 49.15 ohm | 3.319 | -1.1% |
+| EMerge, Accurate | 49.17 ohm | 3.228 | -1.1% |
+| openEMS, 40 cells per wavelength | 52.81 ohm | 3.194 | +6.3% |
+
+Palace and EMerge agree within 0.04%, and the 2D reference backs both. `em_crosscheck` names openEMS as the outlier (+7.4% in Zc) and still fails, as its 2% spread limit says it should. The Palace solve took 29 minutes on 4 cores.
+
 ## In edaloop
 
 The cross-check reports each solver against the 2D reference, and still fails when solvers differ by more than the limit. A person decides whether to waive that.

@@ -188,6 +188,30 @@ def test_em_crosscheck_refuses_a_missing_solver_before_solving(tmp_path, monkeyp
     assert calls == [[str(exe), "solver", "list"]]
 
 
+def test_a_solver_circuitrf_finds_on_path_counts_as_installed():
+    # circuitRF writes "found" for a solver on PATH, such as a Palace built outside it. em_crosscheck read only "installed", and
+    # refused a validated Palace as missing.
+    listing = ("Palace: found\n  0.18.1, validated. Found at /usr/local/bin/palace (on PATH).\n"
+               "Gmsh: not found\n  Not found: nothing named gmsh installed\n"
+               "openEMS: installed by circuitRF\nEMerge: not installed\n")
+    assert toolchain.solver_listed(listing, "Palace") and toolchain.solver_listed(listing, "openEMS")
+    assert not toolchain.solver_listed(listing, "Gmsh") and not toolchain.solver_listed(listing, "EMerge")
+    assert not toolchain.solver_listed(listing, "Elmer")
+
+
+
+def test_palace_without_gmsh_is_refused_before_solving(tmp_path, monkeypatch):
+    import subprocess
+    exe = tmp_path / "circuitrf"
+    exe.write_text("")
+    real = {**toolchain.paths(), "circuitrf": str(exe)}
+    monkeypatch.setattr(toolchain, "paths", lambda: real)
+    listing = "Palace: found\nGmsh: not found\nEMerge: installed by circuitRF\n"
+    monkeypatch.setattr(toolchain, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, listing, ""))
+    assert toolchain.em_solvers_missing(["emerge", "palace"]) == ["gmsh"]
+    assert toolchain.em_solvers_missing(["emerge"]) == []
+
+
 def test_friis_matches_hand_calculation():
     stages = [{"loss_db": [[1, 1.0]]},
               {"gain_db": [[1, 20.0]], "nf_db": [[1, 1.0]], "oip3_dbm": [[1, 30.0]]},

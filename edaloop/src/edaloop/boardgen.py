@@ -149,8 +149,9 @@ def project_yaml(bench: dict, name: str, chains: str) -> dict:
                    "width_um": int(bench["rf_line_width_mm"] * 1000), "fmin_ghz": 1, "fmax_ghz": 5, "at_ghz": 3,
                    "target_ohm": 50, "tol_pct": 10, "max_spread_pct": 2,
                    "fast": {"solver": "emerge", "quality": "Draft", "adaptive_mesh": 4},
+                   # Two independent solvers that agree, backed by the 2D reference. openEMS was dropped by the project owner: it reads
+                   # 6 to 8% high on these coplanar coupons however its grid is refined (docs/openems-coupon-bias.md). A board can add it back.
                    "solvers": [{"solver": "emerge", "quality": "Accurate"},
-                               {"solver": "openems", "cells_per_wavelength": 40, "min_cell_um": 8},
                                {"solver": "palace", "quality": "Standard"}],
                    **(cfg.get("em") or {})},
             "power": {"max_rise_c": 10, "rails": cfg["rails"]},
