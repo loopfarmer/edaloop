@@ -3493,3 +3493,15 @@ def test_shipped_testbenches_find_their_land_patterns_with_nothing_fetched():
     # The FV1206's plated ground holes keep a 0.178 mm ring on their 0.61 mm pads.
     fv = (boardgen.BUNDLED_FOOTPRINTS / "RFLib_FP.pretty" / "LFCN_FV1206.kicad_mod").read_text()
     assert re.findall(r"\(drill ([0-9.]+)\)", fv) == ["0.254", "0.254"]
+
+
+def test_a_description_can_set_em_hops_settings():
+    import yaml
+
+    from edaloop import boardgen
+    bench = yaml.safe_load((Path(__file__).parents[1] / "testbenches" / "cband_element.yaml").read_text())
+    hops = boardgen.project_yaml(bench, "cband_element", "chains_cband_element.yaml")["em_hops"]
+    assert hops["solver"] == {"solver": "emerge", "quality": "Standard"}
+    assert hops["min_rl_db"] == 15 and hops["nets"]
+    demo = yaml.safe_load((Path(__file__).parents[1] / "testbenches" / "gain_block_demo.yaml").read_text())
+    assert boardgen.project_yaml(demo, "gain_block_demo", "chains_gain_block_demo.yaml")["em_hops"]["solver"]["quality"] == "Accurate"

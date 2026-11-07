@@ -188,5 +188,10 @@ project:
   eps_eff: 3.25
   line_loss_db_per_mm: 0     # the stage table already counts its copper
   em: {at_ghz: 3.92, fmax_ghz: 6}
+  # The project owner's choice: hops IS3 and LNA2OUT need more than the 10.8 GB a solve may use on a 16 GB machine at
+  # Accurate, so cband's hops solve at Standard. On this board Standard read every hop 2.5 to 20 dB worse in return loss
+  # than Accurate (ANT 41.1 -> 30.2, HPF2LIM 47.7 -> 28.0, COAX 20.1 -> 16.7): treat its readings as pessimistic
+  # estimates. Set it back to Accurate on a machine with the memory.
+  em_hops: {solver: {solver: emerge, quality: Standard}}
   rails:
     - {net: VDD, source: L4.2, loads: {R1.1: 0.044, R3.1: 0.060, RT1.1: 0.00156}, max_drop_mv: 50}
