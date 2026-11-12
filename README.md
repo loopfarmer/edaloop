@@ -16,7 +16,7 @@ A clean DRC says a board is connected and meets its clearances. It says nothing 
 - **Nets are routed by class.** RF goes first, then power, then signals. See [routing-classes.md](edaloop/docs/routing-classes.md).
 - **RF review lessons are built in.** That covers welded ground vias, makers' via patterns, a 70 mil fence and supply on an inner layer. See [rf-layout-rules.md](edaloop/docs/rf-layout-rules.md).
 - **Solvers check each other.** With three EM solvers, an outlier is named, and its error pattern suggests the setup fault.
-- **People own the decisions.** Requirements and waivers can't be changed through the agent tools, and a waiver needs a name and a reason.
+- **People own the decisions.** Requirements and waivers can't be changed through the agent tools, and a waiver needs a name and a reason. It names one check, and is bound to the reading it accepted unless it says it accepts any.
 
 ## How data moves
 

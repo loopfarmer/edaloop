@@ -6,7 +6,6 @@ else. See docs/AUTHORITY.md for why each choice was made.
 from __future__ import annotations
 
 import collections
-import fnmatch
 import json
 import math
 import re
@@ -31,11 +30,43 @@ from .project import Project, ProjectError
 REGISTRY = {}
 
 
-def check(name, stage, needs_board=True):
+def check(name, stage, needs_board=True, version=1, tools=()):
+    """Register a check. Raise `version` whenever a change could turn an old result's verdict over, so that evidence the
+    old logic wrote goes stale rather than standing for the new one. `tools` names the toolchain keys the check runs.
+    """
     def deco(fn):
-        REGISTRY[name] = dict(fn=fn, stage=stage, needs_board=needs_board, doc=(fn.__doc__ or "").strip())
+        REGISTRY[name] = dict(fn=fn, stage=stage, needs_board=needs_board, doc=(fn.__doc__ or "").strip(),
+                              version=int(version), tools=tuple(tools))
         return fn
     return deco
+
+
+# Inputs that aren't the design: which logic wrote the evidence, and which installed tools it ran. They start with "@",
+# which no relative file path does.
+CHECK_KEY = "@check"
+TOOL_KEY = "@tool:"
+
+
+def tool_identity(key: str) -> str:
+    """The installed tool's resolved path, size and modification time. Reinstalling or upgrading it changes this.
+
+    A stat, not a version probe, because the gate reads it on every status. It can't tell two builds apart that
+    share all three, which a reinstall from a package manager doesn't do.
+    """
+    where = str(toolchain.paths().get(key) or "")
+    found = shutil.which(where) or where
+    path = Path(found).expanduser() if found else None
+    if not path or not path.exists():
+        return ABSENT
+    path = path.resolve()
+    st = path.stat()
+    return _digest([str(path), st.st_size, st.st_mtime_ns])
+
+
+def check_identity(name: str) -> dict[str, str]:
+    """The non-design inputs every result of `name` records: its logic version and each tool it runs."""
+    spec = REGISTRY[name]
+    return {CHECK_KEY: f"{name} v{spec['version']}", **{TOOL_KEY + t: tool_identity(t) for t in spec["tools"]}}
 
 
 class Outcome:
@@ -94,7 +125,8 @@ def run_check(p: Project, name: str) -> Evidence:
     try:
         o = spec["fn"](p)
     except Exception as e:  # noqa: BLE001 - a tool crash is evidence too, never a pass
-        ev = Evidence(name, ERROR, f"{type(e).__name__}: {e}"[:400], {}, seconds=round(time.time() - start, 1))
+        # It read no design input it can name, but it ran this logic on these tools: a new version or a reinstalled tool is worth a retry.
+        ev = Evidence(name, ERROR, f"{type(e).__name__}: {e}"[:400], check_identity(name), seconds=round(time.time() - start, 1))
         return p.ledger.append(ev)
     # Errors first, so that whoever reads the top of the list reads what's wrong rather than a note on the way to it.
     findings = sorted(p.apply_waivers(o.findings), key=lambda f: f.severity != "error")
@@ -104,14 +136,14 @@ def run_check(p: Project, name: str) -> Evidence:
     status = FAIL if errors else WARN if warnings else PASS
     summary = o.summary or (f"{len(errors)} error(s), {len(warnings)} warning(s), "
                             f"{len(findings) - len(live)} waived")
-    ev = Evidence(name, status, summary, o.inputs, o.metrics, [asdict(f) for f in findings],
+    ev = Evidence(name, status, summary, {**o.inputs, **check_identity(name)}, o.metrics, [asdict(f) for f in findings],
                   o.tools, o.artifacts, round(time.time() - start, 1))
     return p.ledger.append(ev)
 
 
 # ---------------------------------------------------------------- capture
 
-@check("capture", "capture")
+@check("capture", "capture", tools=("ato",))
 def capture(p: Project) -> Outcome:
     """Compile the atopile source into the KiCad board, when the design is written in ato."""
     cfg = p.section("capture")
@@ -177,7 +209,7 @@ def stand_in_footprints(board_path: Path) -> list[dict]:
     return sorted(out, key=lambda x: x["ref"])
 
 
-@check("drc", "verify")
+@check("drc", "verify", tools=("kicad_cli",))
 def drc(p: Project) -> Outcome:
     """KiCad DRC. kicad-cli is the only DRC authority: circuitRF's import carries no rules."""
     out = p.work / "drc.json"
@@ -256,7 +288,7 @@ def rf_reference(p: Project) -> Outcome:
                    {"crossings": len(findings), "non_ground_on_reference_mm": round(other, 2)}, findings)
 
 
-@check("rf_layout", "verify", needs_board=True)
+@check("rf_layout", "verify", needs_board=True, tools=("kicad_python",))
 def rf_layout(p: Project) -> Outcome:
     """What RF reviews keep finding and DRC can't: the fence, the plane across a trace's width, pad gaps, limiter ground, supply on top, taps and bypass order."""
     from . import ground, rf_rules
@@ -290,7 +322,7 @@ def rf_layout(p: Project) -> Outcome:
                    metrics, [Finding(*f) for f in found])
 
 
-@check("erc", "verify")
+@check("erc", "verify", tools=("kicad_cli",))
 def erc(p: Project) -> Outcome:
     """KiCad ERC over the whole schematic hierarchy."""
     if not p.schematic:
@@ -488,7 +520,7 @@ def _pad_land(p: Project, net: str, x_um: float, y_um: float, within_mm: float =
     return f", on the land of {min(near)[1]}" if near else ""
 
 
-@check("impedance", "verify")
+@check("impedance", "verify", tools=("circuitrf",))
 def impedance(p: Project) -> Outcome:
     """circuitRF cross-section Z0 on the real copper; each local dip is priced as return loss at the top of band."""
     cfg = p.section("rf")
@@ -615,7 +647,7 @@ def power_rails(p: Project) -> Outcome:
     return Outcome({**_files(p, p.board), "power_config": _config(p, "power_config")}, metrics, findings)
 
 
-@check("thermal_field", "verify")
+@check("thermal_field", "verify", tools=("kicad_python", "boardfield"))
 def thermal_field(p: Project) -> Outcome:
     """Current and temperature solved on the real copper, pours included, for each rail in `power`. A failed solve can't pass."""
     cfg = p.section("thermal")
@@ -688,7 +720,7 @@ def thermal_field(p: Project) -> Outcome:
     return Outcome(inputs, metrics, findings, {"boardfield": o["device"]}, [str(x.relative_to(p.root)) for x in (png, *svgs) if x.exists()])
 
 
-@check("em_fast", "route")
+@check("em_fast", "route", tools=("circuitrf",))
 def em_fast(p: Project) -> Outcome:
     """A quick field-solver read for routing iterations: one solver, light mesh, refined where its error estimate asks.
 
@@ -710,7 +742,7 @@ def em_fast(p: Project) -> Outcome:
     return Outcome(inputs, {"zc_ohm": round(zc, 2), "eps_eff": round(eff, 3), "seconds": seconds}, findings, {"solver": fast["solver"]})
 
 
-@check("em_hops", "simulate", needs_board=True)
+@check("em_hops", "simulate", needs_board=True, tools=("circuitrf",))
 def em_hops(p: Project) -> Outcome:
     """Each RF hop as routed, solved as a 2-port with its own pours and vias: what the copper adds, without the parts."""
     from . import em_hops as hops
@@ -969,7 +1001,7 @@ def _em_run(p: Project, cfg: dict, ws: Path, label: str, layout: str, s: dict) -
 REFERENCE_AGREES_PCT = 2.0
 
 
-@check("em_crosscheck", "simulate")
+@check("em_crosscheck", "simulate", tools=("circuitrf",))
 def em_crosscheck(p: Project) -> Outcome:
     """Independent field solvers on a coupon of the board's own line, with disagreement diagnosed. One solver's number is not evidence."""
     cfg = p.section("em")
@@ -1159,7 +1191,7 @@ def cascade(p: Project) -> Outcome:
                             ("per-mm estimate" if routed else "stage table only")}, findings)
 
 
-@check("spice", "simulate")
+@check("spice", "simulate", tools=("kicad_cli", "ngspice"))
 def spice_benches(p: Project) -> Outcome:
     """DC, transient and noise benches on the schematic's own netlist. A part with no model fails the bench."""
     cfg = p.section("spice")
@@ -1186,7 +1218,7 @@ def spice_benches(p: Project) -> Outcome:
     files = [*p.schematic.parent.glob("*.kicad_sch")]
     # Worked out from the models already resolved, so the netlist isn't exported twice. _spice_digest repeats it.
     return Outcome({**_files(p, *files), "spice_config": _spice_models_digest(cfg, models.values())},
-                   metrics, findings, {"ngspice": "47"}, artifacts)
+                   metrics, findings, {}, artifacts)
 
 
 # ---------------------------------------------------------------- evaluate
@@ -1257,8 +1289,18 @@ def _config(p: Project, key: str) -> str:
 
 
 def current_inputs(p: Project, ev: Evidence) -> bool:
-    """True while every input the evidence read still has the same content."""
+    """True while every input the evidence read still has the same content, and the same logic and tools would produce it."""
+    if ev.check in REGISTRY:
+        try:
+            expected = check_identity(ev.check)
+        except Exception:  # noqa: BLE001 - a toolchain that can't be read now can't vouch for the old result
+            return False
+        # Evidence from before identities were recorded has none, so it's stale too: nothing says which logic wrote it.
+        if any(ev.inputs.get(k) != v for k, v in expected.items()):
+            return False
     for key, digest in ev.inputs.items():
+        if key.startswith("@"):
+            continue
         if key in CONFIG_DIGESTS:
             try:
                 if _config(p, key) != digest:
@@ -1278,6 +1320,11 @@ def current_inputs(p: Project, ev: Evidence) -> bool:
         elif digest != ABSENT:
             return False
     return True
+
+
+def requirement_message(req: dict, value) -> str:
+    """A missed requirement's finding text. A waiver bound to a reading quotes it, so it's built in one place."""
+    return f"{req['id']}: {req['metric']} = {value}, limit [{req.get('min')}, {req.get('max')}]"
 
 
 @check("requirements", "evaluate")
@@ -1309,8 +1356,7 @@ def requirements(p: Project) -> Outcome:
         ok = (low is None or value >= low) and (high is None or value <= high)
         row["state"] = "met" if ok else "missed"
         if not ok:
-            findings.append(Finding(f"requirements:{req['id']}",
-                                    f"{req['id']}: {req['metric']} = {value}, limit [{low}, {high}]"))
+            findings.append(Finding(f"requirements:{req['id']}", requirement_message(req, value)))
     inputs = {"requirements": _config(p, "requirements"), **_files(p, p.cfg_path)}
     return Outcome(inputs, {"rows": rows, "met": sum(r["state"] == "met" for r in rows), "total": len(rows)}, findings)
 
@@ -1318,9 +1364,9 @@ def requirements(p: Project) -> Outcome:
 # ---------------------------------------------------------------- release
 
 def withdrawn_waivers(p: Project, ev: Evidence) -> list[dict]:
-    """Findings this evidence counted as waived, whose waiver is no longer in the project. The result can't stand without it."""
+    """Findings this evidence counted as waived, whose waiver is no longer in the project, or has lapsed. The result can't stand without it."""
     waivers = p.waivers()
-    return [f for f in ev.findings if f.get("waived_by") and not any(fnmatch.fnmatch(f["id"], w.match) for w in waivers)]
+    return [f for f in ev.findings if f.get("waived_by") and not any(w.applies(f["id"], f["message"]) for w in waivers)]
 
 
 def gate_state(p: Project) -> list[dict]:

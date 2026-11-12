@@ -62,15 +62,15 @@ If it changes what the figures show, redraw them with `docs/figures/build_figure
 
 1. **Never commit a real board.** No private board files, paths, project names or credentials. `.gitignore` blocks KiCad and fabrication files, and `gain_block_demo` is the board to use in examples. Search your diff for your own paths before committing.
 2. **Commit and push only when asked.**
-3. **Requirements and waivers belong to a person.** Don't add a tool, default or shortcut that changes them. A waiver needs a name and a reason.
+3. **Requirements and waivers belong to a person.** Don't add a tool, default or shortcut that changes them. A waiver needs a name and a reason, names one check exactly, and is bound to the finding's message or says `any_reading: true`. Waivers the controller suggests quote the message, so keep it that way.
 4. **A crash is an error, never a pass.** A check that can't run must say so, and an unavailable reading must never look like a clean one.
-5. **Evidence is tied to bytes.** If a check reads a new input, add it to the check's `inputs` so that changing it makes the result stale. A key that isn't a file goes in `checks.CONFIG_DIGESTS` and is recorded through `_config`, so the check and `current_inputs` work it out the same way. A file that isn't there is recorded as absent, so creating it makes the result stale.
+5. **Evidence is tied to bytes.** If a check reads a new input, add it to the check's `inputs` so that changing it makes the result stale. A key that isn't a file goes in `checks.CONFIG_DIGESTS` and is recorded through `_config`, so the check and `current_inputs` work it out the same way. A file that isn't there is recorded as absent, so creating it makes the result stale. Each result also records its check's `version` and the tools it ran: list a check's toolchain keys in `@check(tools=...)`.
 6. **Routers work on copies.** Nothing may move locked RF copper or lose a ground via without the gate seeing it.
 7. **Say what a number is.** Mark assumptions and estimates, in code and in reports. Don't claim agreement with a reference you haven't compared against, and don't tune a setting until a result passes.
 
 ## Adding things
 
-- **A check:** add it with `@check` in `checks.py`, add it to the gate in `boardgen.project_yaml` if it should block release, and give `controller.REMEDY` an entry. Then say why it's the authority in `docs/AUTHORITY.md`.
+- **A check:** add it with `@check` in `checks.py`, with the toolchain keys it runs in `tools=`. Raise its `version` whenever a change could turn an old result over, such as a new rule, limit or default, so evidence from the old logic goes stale. Add it to the gate in `boardgen.project_yaml` if it should block release, and give `controller.REMEDY` an entry. Then say why it's the authority in `docs/AUTHORITY.md`.
 - **An RF layout rule:** add it to `rf_rules.py`, build to it in `ground.py` or `route_classes.py`, and list it in `docs/rf-layout-rules.md`. Every limit must be changeable under `rf_layout:` in `edaloop.yaml`.
 - **An export format:** add it to `export.py`. Read every file back through an independent reader where one exists, compare nets as well as positions, and fail loudly. Limits go in `docs/exports.md`.
 - **A bundled stand-in footprint:** put it in `src/edaloop/data/footprints/`, begin its `descr` with `edaloop stand-in.`, say where it was copied from, and write `ASSUMED` if the package is a guess. `project_files` reads those words on the board, so a guessed package can't reach release unseen.

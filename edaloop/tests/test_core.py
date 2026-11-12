@@ -103,7 +103,7 @@ def test_waiver_needs_name_and_reason(tmp_path):
 
 
 def test_waived_finding_passes_but_stays_on_record(tmp_path):
-    p = make(tmp_path, "waivers:\n  - {match: 'project_files:*', by: Pat, reason: reviewed}\n")
+    p = make(tmp_path, "waivers:\n  - {match: 'project_files:*', any_reading: true, by: Pat, reason: reviewed}\n")
     ev = checks.run_check(p, "project_files")
     assert ev.status == "pass"
     assert ev.findings and all(f["waived_by"] == "Pat" for f in ev.findings)
@@ -232,7 +232,7 @@ def test_requirement_on_stale_evidence_fails(tmp_path):
     p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": "0" * 64}, {"x": 0}))
     ev = checks.run_check(p, "requirements")
     assert ev.status == "fail" and ev.metrics["rows"][0]["state"] == "stale"
-    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb")}, {"x": 0}))
+    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb"), **checks.check_identity("project_files")}, {"x": 0}))
     ev = checks.run_check(p, "requirements")
     assert ev.status == "pass" and ev.metrics["rows"][0]["state"] == "met"
 
@@ -1090,7 +1090,7 @@ def test_a_backed_outlier_goes_to_a_person_not_round_again(tmp_path):
     project = type("P", (), {"section": lambda self, name: {"max_spread_pct": 2}})()
     ev = type("E", (), {"metrics": {"spread_pct": 7.4, "reference": {"z0_ohm": 50.1, "backs": ["a", "b"]},
                                     "diagnosis": {"verdict": "outlier", "outliers": ["c"], "agreeing": ["a", "b"]}}})()
-    step = controller._needs_person(project, "em_crosscheck", ev, [{"id": "em_crosscheck:c:outlier"}])
+    step = controller._needs_person(project, "em_crosscheck", ev, [{"id": "em_crosscheck:c:outlier", "message": "c reads 54 ohm"}])
     assert step["action"] == "ask_person" and "c disagrees" in step["question"]
     assert step["if_waived"]["add_to_edaloop_yaml"]["waivers"][0]["by"] == "YOUR NAME"
     ev.metrics["reference"]["backs"] = ["a"]       # the reference only half backs them: still the agent's to work on
@@ -2048,7 +2048,7 @@ def test_fritzing_part_round_trip_and_agreement(tmp_path):
 
 
 def test_withdrawn_waiver_makes_evidence_stale(tmp_path):
-    p = make(tmp_path, "waivers:\n  - {match: 'project_files:*', by: Pat, reason: reviewed}\n")
+    p = make(tmp_path, "waivers:\n  - {match: 'project_files:*', any_reading: true, by: Pat, reason: reviewed}\n")
     p.cfg["gate"] = ["project_files"]
     ev = checks.run_check(p, "project_files")
     assert ev.status == "pass" and ev.findings
@@ -2457,7 +2457,7 @@ def test_deleted_rf_baseline_is_not_quietly_re_recorded(tmp_path):
         ev = checks.run_check(p, "rf_preserved")
         assert ev.status == "fail" and any(f["id"] == "rf_preserved:baseline_changed" for f in ev.findings)
     # A person can accept the new baseline, on the record.
-    p.cfg["waivers"] = [{"match": "rf_preserved:baseline_changed", "by": "Pat", "reason": "re-laid the output match"}]
+    p.cfg["waivers"] = [{"match": "rf_preserved:baseline_changed", "any_reading": True, "by": "Pat", "reason": "re-laid the output match"}]
     assert checks.run_check(p, "rf_preserved").status == "pass"
 
 
@@ -2473,7 +2473,7 @@ def test_an_input_that_appears_later_makes_evidence_stale(tmp_path):
 
 def test_drc_settings_are_inputs(tmp_path):
     p = make(tmp_path)
-    ev = Evidence("drc", "pass", "", {"drc_config": checks._config(p, "drc_config")})
+    ev = Evidence("drc", "pass", "", {"drc_config": checks._config(p, "drc_config"), **checks.check_identity("drc")})
     assert checks.current_inputs(p, ev)
     p.cfg["drc"] = {"refill_zones": False}
     assert not checks.current_inputs(p, ev)
@@ -2495,10 +2495,10 @@ def test_every_config_digest_can_be_worked_out(tmp_path):
 
 def test_requirement_goes_stale_when_its_evidence_does(tmp_path):
     p = make(tmp_path, "requirements:\n  - {id: R1, metric: project_files.x, max: 1}\n")
-    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb")}, {"x": 0}))
+    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb"), **checks.check_identity("project_files")}, {"x": 0}))
     ev = checks.run_check(p, "requirements")
     assert ev.status == "pass" and checks.current_inputs(p, ev)
-    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb")}, {"x": 5}))
+    p.ledger.append(Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb"), **checks.check_identity("project_files")}, {"x": 5}))
     assert not checks.current_inputs(p, ev)     # newer evidence for the metric
     ev = checks.run_check(p, "requirements")
     assert ev.status == "fail"
@@ -3073,7 +3073,7 @@ def test_each_check_goes_stale_when_any_file_it_recorded_changes(offline_project
     assert ev.status != "error", ev.summary           # the list above must keep running without tools
     # Recording and recomputing agree, so fresh evidence reads as current.
     assert checks.current_inputs(p, ev)
-    files = [k for k in ev.inputs if k not in checks.CONFIG_DIGESTS]
+    files = [k for k in ev.inputs if k not in checks.CONFIG_DIGESTS and not k.startswith("@")]
     # cascade with no line loss reads only its stage table, so it records no file.
     assert files or name == "cascade", f"{name} recorded no files"
     for key in files:
@@ -3505,3 +3505,104 @@ def test_a_description_can_set_em_hops_settings():
     assert hops["min_rl_db"] == 15 and hops["nets"]
     demo = yaml.safe_load((Path(__file__).parents[1] / "testbenches" / "gain_block_demo.yaml").read_text())
     assert boardgen.project_yaml(demo, "gain_block_demo", "chains_gain_block_demo.yaml")["em_hops"]["solver"]["quality"] == "Accurate"
+
+
+# ---------------------------------------------------------------- what evidence is tied to, beyond the design
+
+def test_evidence_without_a_check_identity_is_stale(tmp_path):
+    # Written before identities were recorded, or by hand: nothing says which logic produced it.
+    p = make(tmp_path)
+    ev = Evidence("project_files", "pass", "", {"b.kicad_pcb": sha_file(tmp_path / "b.kicad_pcb")})
+    assert not checks.current_inputs(p, ev)
+    ev.inputs.update(checks.check_identity("project_files"))
+    assert checks.current_inputs(p, ev)
+
+
+def test_a_new_check_version_makes_its_old_evidence_stale(tmp_path, monkeypatch):
+    p = make(tmp_path)
+    ev = checks.run_check(p, "project_files")
+    assert ev.inputs[checks.CHECK_KEY] == "project_files v1" and checks.current_inputs(p, ev)
+    monkeypatch.setitem(checks.REGISTRY["project_files"], "version", 2)
+    assert not checks.current_inputs(p, ev)
+    assert checks.gate_state(p)[0]["state"] == "stale"
+
+
+def test_a_reinstalled_or_new_tool_makes_evidence_stale(tmp_path, monkeypatch):
+    p = make(tmp_path)
+    tool = tmp_path / "kicad-cli"
+    monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": str(tool)})
+    ev = Evidence("drc", "pass", "", {"drc_config": checks._config(p, "drc_config"), **checks.check_identity("drc")})
+    assert ev.inputs[checks.TOOL_KEY + "kicad_cli"] == checks.ABSENT and checks.current_inputs(p, ev)
+    tool.write_text("v10")                              # installed since
+    assert not checks.current_inputs(p, ev)
+    ev.inputs.update(checks.check_identity("drc"))
+    assert checks.current_inputs(p, ev)
+    os.utime(tool, ns=(1, 1))                           # upgraded in place
+    assert not checks.current_inputs(p, ev)
+
+
+def test_a_crash_stays_an_error_to_fix_not_a_stale_result_to_rerun(tmp_path, monkeypatch):
+    p = make(tmp_path)
+    def boom(_):
+        raise RuntimeError("tool fell over")
+    monkeypatch.setitem(checks.REGISTRY["project_files"], "fn", boom)
+    assert checks.run_check(p, "project_files").status == "error"
+    assert checks.gate_state(p)[0]["state"] == "error"
+    assert controller.next_action(p)["action"] == "fix"
+
+
+def test_every_check_tells_an_agent_what_to_do_about_it():
+    assert sorted(set(checks.REGISTRY) - set(controller.REMEDY)) == []
+    assert all(controller.REMEDY[name].strip() for name in checks.REGISTRY)
+
+
+# ---------------------------------------------------------------- waivers
+
+@pytest.mark.parametrize("match", ["*", "*:x", "rf_*:fence", "no_such_check:x", "drc", "drc:"])
+def test_a_waiver_must_name_one_real_check(tmp_path, match):
+    p = make(tmp_path, f"waivers:\n  - {{match: '{match}', any_reading: true, by: Pat, reason: reviewed}}\n")
+    with pytest.raises(ProjectError, match="exact name"):
+        p.waivers()
+
+
+@pytest.mark.parametrize("binding", ["", "message: x, any_reading: true,"])
+def test_a_waiver_is_bound_to_a_reading_or_says_it_accepts_any(tmp_path, binding):
+    p = make(tmp_path, f"waivers:\n  - {{match: 'project_files:x', {binding} by: Pat, reason: reviewed}}\n")
+    with pytest.raises(ProjectError, match="any_reading"):
+        p.waivers()
+
+
+def test_a_waiver_bound_to_a_reading_lapses_when_the_reading_changes(tmp_path):
+    p = make(tmp_path)
+    found = checks.run_check(p, "project_files").findings[0]
+    p.cfg["waivers"] = [{"match": found["id"], "message": found["message"], "by": "Pat", "reason": "reviewed"}]
+    ev = checks.run_check(p, "project_files")
+    assert ev.findings[0]["waived_by"] == "Pat" and checks.withdrawn_waivers(p, ev) == []
+    ev.findings[0]["message"] += ", and worse"          # what a re-run on a changed board would report
+    assert checks.withdrawn_waivers(p, ev)
+    assert not p.apply_waivers([checks.Finding(found["id"], found["message"] + ", and worse")])[0].waived_by
+
+
+def test_a_dated_waiver_lapses_after_its_date(tmp_path):
+    p = make(tmp_path, "waivers:\n  - {match: 'project_files:*', any_reading: true, until: 2026-01-31, by: Pat, reason: until rev B}\n")
+    w = p.waivers()[0]
+    import datetime
+    assert w.applies("project_files:x", "m", datetime.date(2026, 1, 31))
+    assert not w.applies("project_files:x", "m", datetime.date(2026, 2, 1))
+    ev = checks.run_check(p, "project_files")           # run after the date, so nothing is waived
+    assert not any(f["waived_by"] for f in ev.findings)
+    p.cfg["waivers"][0]["until"] = "next spring"
+    with pytest.raises(ProjectError, match="until must be a date"):
+        p.waivers()
+
+
+def test_a_suggested_waiver_quotes_each_reading_and_the_requirement_it_misses():
+    project = type("P", (), {"section": lambda self, name: {"max_spread_pct": 2},
+                             "cfg": {"requirements": [{"id": "R6", "metric": "em_crosscheck.spread_pct", "max": 2},
+                                                      {"id": "R1", "metric": "drc.errors", "max": 0}]}})()
+    ev = type("E", (), {"metrics": {"spread_pct": 7.4, "reference": {"z0_ohm": 50.1, "backs": ["a", "b"]},
+                                    "diagnosis": {"verdict": "outlier", "outliers": ["c"], "agreeing": ["a", "b"]}}})()
+    step = controller._needs_person(project, "em_crosscheck", ev, [{"id": "em_crosscheck:c:outlier", "message": "c reads 54 ohm"}])
+    waivers = step["if_waived"]["add_to_edaloop_yaml"]["waivers"]
+    assert [(w["match"], w["message"]) for w in waivers] == [("em_crosscheck:c:outlier", "c reads 54 ohm"),
+                                                            ("requirements:R6", "R6: em_crosscheck.spread_pct = 7.4, limit [None, 2]")]

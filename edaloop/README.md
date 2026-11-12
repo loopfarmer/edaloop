@@ -59,11 +59,28 @@ edaloop next
 
 ## The rules that make it hold together
 
-1. **Evidence is tied to bytes.** Saving the board makes every claim about it stale.
+1. **Evidence is tied to bytes.** Saving the board makes every claim about it stale, and so does a new version of the check's logic or a reinstalled tool it runs.
 2. **A tool crash is an error, never a pass.**
 3. **Routers work on copies.** Adoption refuses any result that lost RF copper or ground vias.
 4. **EM needs agreement.** With three solvers, an outlier is named and its error pattern suggests a fix. See `em_diagnose.py`.
 5. **People own requirements and waivers.** A waiver needs a name and a reason, and stays visible on the scorecard.
+
+A waiver in `edaloop.yaml` names one check exactly, and is bound either to the reading it accepts or, on purpose, to any reading. `until` is optional, and the waiver lapses after it:
+
+```yaml
+waivers:
+  - match: "rf_layout:series_cap:C1"
+    message: "C1 (100nF) resonates at 0.02 GHz, so it's an inductor across the band, and some parts have a parasitic resonance there. Check its measured S-parameters"
+    by: A. Person
+    reason: Checked against the maker's S-parameters, 0.1 dB loss in band
+  - match: "drc:silk_over_copper*"
+    any_reading: true
+    until: 2027-03-31
+    by: A. Person
+    reason: Cosmetic, fixed in rev B
+```
+
+`message` is the finding's text exactly as reported, so if the reading changes, the waiver no longer covers it and a person decides again. A bare `*`, or a check name with a wildcard in it, is refused. When a waiver stops applying, the evidence that relied on it goes stale.
 
 See [docs/AUTHORITY.md](docs/AUTHORITY.md) for why each tool has the job it has. `../boardhand/` holds the guarded board-editing MCP server.
 
