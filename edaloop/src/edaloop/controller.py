@@ -12,6 +12,7 @@ REMEDY = {
     "erc": "Edit the schematic with the KiCad MCP or the ato source.",
     "drc": "Move copper with the KiCad MCP, or run `edaloop route`. Waive only with a named reviewer and reason.",
     "rf_path": "off_axis: change placement, since re-routing can't fix it. vias or over_floor: relay that net and lock it.",
+    "placement": "Change placement, not routing: each finding names the part to move. An RF net over its floor has pads in the way or off its line; an escape crossing wants the part beside its own pin, in pin order; a limiter crossing wants the other net's parts moved so it crosses elsewhere. Rerun `edaloop critic` after each move, since it takes seconds.",
     "rf_preserved": "RF copper differs from the recorded baseline, whether a router or a hand edit changed it. Restore it, or discard the router result. If the change is meant, tell a person what it does and check it with impedance and em_hops.",
     "impedance": "A short low section named as a part's land is that pad, and usually a review note. Otherwise change width or gap at the reported location. Check against rf-board-design-lessons.",
     "rf_reference": "Move the named net off the reference layer under the RF line, to another layer or round the line by more than reference_margin_mm. Don't move the RF line to dodge it.",

@@ -428,6 +428,32 @@ def rf_path(p: Project) -> Outcome:
     return Outcome(_files(p, p.board, chains), metrics, findings, {"rf_path": "scripts/rf_path.py"})
 
 
+def placement_critique(p: Project, board_path: Path | None = None):
+    """The placement critic on the project's board, or on another placement of it, with the project's chains and limits."""
+    from . import placement
+    from .scripts.kicad_pcb import Board as GeometryBoard
+    from .scripts.kicad_pcb import load_chains
+    chains, width, net_width = load_chains(p.root / p.section("rf")["chains"])
+    described = p.root / "board_description.yaml"
+    parts = (yaml.safe_load(described.read_text()) or {}).get("parts") or {} if described.exists() else {}
+    route_cfg = p.section("route")
+    layers = len(route_cfg.get("power_layers") or ["F.Cu", "B.Cu"])
+    cfg = {"ground_nets": list(p.section("placement").get("ground_nets") or ["GND"]), **p.section("placement")}
+    return placement.critique(GeometryBoard(str(board_path or p.board)), chains, width, net_width,
+                              max_over_pct=float(p.section("rf").get("max_over_pct", 5.0)), parts=parts, route_layers=layers, cfg=cfg)
+
+
+@check("placement", "place")
+def placement_check(p: Project) -> Outcome:
+    """What a placed board will cost to route, read before routing: each RF net's shortest path around the pads against its
+    floor, dedicated pins whose escapes cross, other nets that must cross an RF line beside a limiter, and RUDY congestion."""
+    c = placement_critique(p)
+    described = p.root / "board_description.yaml"
+    return Outcome({**_files(p, p.board, described), **_chain_files(p), "placement_config": _config(p, "placement_config"),
+                    "rf_config": _config(p, "rf_config"), "route_config": _config(p, "route_config")},
+                   c.metrics, [Finding(*f) for f in c.findings])
+
+
 def rf_baseline_path(p: Project) -> Path:
     """Where RF copper's baseline lives: beside edaloop.yaml, so that it is committed with the project.
 
@@ -1269,6 +1295,7 @@ CONFIG_DIGESTS = {
     "rf_config": lambda p: _digest(p.section("rf")),
     "route_config": lambda p: _digest(p.section("route")),
     "rf_layout_config": lambda p: _digest(p.section("rf_layout")),
+    "placement_config": lambda p: _digest(p.section("placement")),
     "power_config": lambda p: _digest(p.section("power")),
     "thermal_config": lambda p: _digest([p.section("thermal"), p.section("power")]),
     "em_config": lambda p: _digest(p.section("em")),
