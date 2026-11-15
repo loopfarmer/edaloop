@@ -3606,3 +3606,101 @@ def test_a_suggested_waiver_quotes_each_reading_and_the_requirement_it_misses():
     waivers = step["if_waived"]["add_to_edaloop_yaml"]["waivers"]
     assert [(w["match"], w["message"]) for w in waivers] == [("em_crosscheck:c:outlier", "c reads 54 ohm"),
                                                             ("requirements:R6", "R6: em_crosscheck.spread_pct = 7.4, limit [None, 2]")]
+
+
+# ----------------------------------------------------------------------------------------------- placement critic
+
+def _fp(ref, x, y, pads, value=""):
+    """A footprint: pads as (num, dx, dy, w, h, net)."""
+    body = "".join(f' (pad "{n}" smd rect (at {dx} {dy}) (size {w} {h}) (layers "F.Cu") (net "{net}"))' for n, dx, dy, w, h, net in pads)
+    return f' (footprint "x" (at {x} {y}) (property "Reference" "{ref}") (property "Value" "{value}"){body})\n'
+
+
+def _critique(tmp_path, footprints, chains=(), parts=None, **kw):
+    from edaloop.placement import critique
+    from edaloop.scripts.kicad_pcb import Board as Geo
+    (tmp_path / "p.kicad_pcb").write_text("(kicad_pcb (version 20241229)\n" + "".join(footprints) + ")\n")
+    return critique(Geo(str(tmp_path / "p.kicad_pcb")), list(chains), 0.3, {}, parts=parts, **kw)
+
+
+def _ends(a, z):
+    return tuple(a.split(".")), tuple(z.split("."))
+
+
+def test_critic_passes_a_clear_rf_hop_and_reports_one_a_part_blocks(tmp_path):
+    hop = [_fp("U1", 0, 0, [("1", 0, 0, 1, 1, "RF")]), _fp("U2", 10, 0, [("1", 0, 0, 1, 1, "RF")])]
+    clear = _critique(tmp_path, hop, [("RF", *_ends("U1.1", "U2.1"))])
+    assert not clear.findings and clear.metrics["rf_hops_over"] == 0
+    # A 4 mm wide pad on another net square across the line: the shortest way round is well over 5%.
+    blocked = _critique(tmp_path, hop + [_fp("R1", 5, 0, [("1", 0, 0, 1, 4, "X"), ("2", 0, 5, 1, 1, "X")])],
+                        [("RF", *_ends("U1.1", "U2.1"))])
+    over = [f for f in blocked.findings if f[0] == "placement:rf:RF:over_floor"]
+    assert over and over[0][2] == "error" and "in the way" in over[0][1]
+    assert blocked.metrics["rf_estimate_mm"] > 10.5 and blocked.cost > clear.cost
+
+
+def test_critic_routes_a_net_named_on_several_rows_as_one_tree(tmp_path):
+    star = [_fp("A", 0, 0, [("1", 0, 0, 1, 1, "SUM")]), _fp("B", 0, 10, [("1", 0, 0, 1, 1, "SUM")]),
+            _fp("J", 10, 5, [("1", 0, 0, 1, 1, "SUM")])]
+    c = _critique(tmp_path, star, [("SUM", *_ends("A.1", "J.1")), ("SUM", *_ends("B.1", "J.1"))])
+    assert c.metrics["rf_hops"] == 1
+    # The second arm joins the first part way along, as a router would: shorter than two separate arms of
+    # sqrt(125) = 11.2 each, and no shorter than the Steiner tree of the three pads (about 19.3).
+    assert 19.0 < c.metrics["rf_estimate_mm"] < 22.0
+
+
+def _qfn_row(net_of):
+    """Pins 1-4 along the bottom of a 4 mm part at 0.5 mm pitch, pointing down, and a pad on the far side."""
+    pins = [(str(i + 1), -0.75 + 0.5 * i, 2.0, 0.25, 0.8, net_of[i]) for i in range(4)]
+    return pins + [(str(i + 5), -0.75 + 0.5 * i, -2.0, 0.25, 0.8, f"N{i + 5}") for i in range(4)]
+
+
+def test_critic_reports_dedicated_caps_out_of_pin_order(tmp_path):
+    ic = _fp("U1", 0, 0, _qfn_row(["A1", "A2", "A3", "A4"]))
+    in_order = [_fp(f"C{i + 1}", -1.5 + 1.0 * i, 4.0, [("1", 0, -0.4, 0.5, 0.5, f"A{i + 1}"), ("2", 0, 0.4, 0.5, 0.5, "GND")])
+                for i in range(4)]
+    good = _critique(tmp_path, [ic, *in_order])
+    assert good.metrics["escape_problems"] == 0
+    swapped = [_fp("C1", 1.5, 4.0, [("1", 0, -0.4, 0.5, 0.5, "A1"), ("2", 0, 0.4, 0.5, 0.5, "GND")]),
+               *in_order[1:3], _fp("C4", -1.5, 4.0, [("1", 0, -0.4, 0.5, 0.5, "A4"), ("2", 0, 0.4, 0.5, 0.5, "GND")])]
+    bad = _critique(tmp_path, [ic, *swapped])
+    assert bad.metrics["escape_problems"] > 0
+    assert any("out of pin order" in f[1] and "C1" in f[1] and "C4" in f[1] for f in bad.findings)
+    # A cap on the far side of the part: its escape has to cross the part's other pins.
+    far = _critique(tmp_path, [ic, _fp("C9", 0.6, -4.0, [("1", 0, 0.4, 0.5, 0.5, "A1"), ("2", 0, -0.4, 0.5, 0.5, "GND")])])
+    assert any(f[0] == "placement:escape:U1.1" for f in far.findings)
+
+
+def test_critic_reports_a_net_crossing_an_rf_line_beside_a_limiter(tmp_path):
+    rf = [_fp("J1", 0, 0, [("1", 0, 0, 1, 1, "RF")]), _fp("U7", 10, 0, [("1", 0, 0, 1, 1, "RF"), ("2", 0, 1.5, 1, 1, "GND")])]
+    crossing = [_fp("R1", 9.0, -4, [("1", 0, 0, 0.6, 0.6, "SDA"), ("2", 1, 0, 0.6, 0.6, "Y")]),
+                _fp("R2", 9.0, 4, [("1", 0, 0, 0.6, 0.6, "SDA"), ("2", 1, 0, 0.6, 0.6, "Z")])]
+    chains = [("RF", *_ends("J1.1", "U7.1"))]
+    c = _critique(tmp_path, rf + crossing, chains, parts={"U7": {"value": "RLM-33+ limiter"}})
+    assert c.metrics["rf_crossings"] >= 1 and c.metrics["limiter_crossings"] == 1
+    assert any(f[0] == "placement:limiter:U7:SDA" for f in c.findings)
+    away = [_fp(r[0], 2.0, y, [("1", 0, 0, 0.6, 0.6, "SDA"), ("2", 1, 0, 0.6, 0.6, r[1])]) for r, y in ((("R1", "Y"), -4), (("R2", "Z"), 4))]
+    assert _critique(tmp_path, rf + away, chains, parts={"U7": {"value": "RLM-33+ limiter"}}).metrics["limiter_crossings"] == 0
+
+
+def test_critic_congestion_reads_demand_against_supply(tmp_path):
+    # Forty nets each spanning the same 2 mm box: 40 mm of wire per 4 mm2 against a 1-layer supply of 2.5 mm per mm2.
+    crowd = [_fp(f"R{i}", 0, 0, [("1", 0, 0, 0.1, 0.1, f"N{i}"), ("2", 2, 2, 0.1, 0.1, f"N{i}")]) for i in range(40)]
+    c = _critique(tmp_path, crowd, route_layers=1)
+    assert c.metrics["peak_utilisation"] > 1 and c.metrics["overflow"] > 0
+    assert any(f[0].startswith("placement:congestion") for f in c.findings)
+    assert _critique(tmp_path, crowd[:2], route_layers=1).metrics["overflow"] == 0
+
+
+def test_placement_check_runs_in_the_place_stage_and_goes_stale_with_its_config(tmp_path):
+    (tmp_path / "b.kicad_pcb").write_text("(kicad_pcb (version 20241229)\n" + _fp("U1", 0, 0, [("1", 0, 0, 1, 1, "RF")])
+                                          + _fp("U2", 10, 0, [("1", 0, 0, 1, 1, "RF")]) + ")\n")
+    (tmp_path / "c.yaml").write_text("chains:\n  - {net: RF, entry: U1.1, exit: U2.1}\n")
+    (tmp_path / "edaloop.yaml").write_text("name: t\nboard: b.kicad_pcb\ngate: [placement]\nrf: {chains: c.yaml}\n")
+    p = Project(tmp_path)
+    assert checks.REGISTRY["placement"]["stage"] == "place"
+    ev = checks.run_check(p, "placement")
+    assert ev.status == "pass" and "placement_config" in ev.inputs and ev.metrics["rf_hops"] == 1
+    assert checks.current_inputs(p, ev)
+    p.cfg["placement"] = {"clearance_mm": 0.3}
+    assert not checks.current_inputs(p, ev)

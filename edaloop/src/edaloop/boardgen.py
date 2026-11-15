@@ -160,7 +160,7 @@ def project_yaml(bench: dict, name: str, chains: str) -> dict:
                       # Supply and control run under whole ground, not across the RF layer, so a board with an inner layer to spare uses it.
                       **({"power_layers": ["F.Cu", "In2.Cu", "B.Cu"], "layer_costs": {"F.Cu": 6.0, "In2.Cu": 1.0, "B.Cu": 1.5}}
                          if len(bench["stackup"]["copper_um"]) > 2 else {"power_layers": ["F.Cu", "B.Cu"]})},
-            "stages": {"place": ["rf_path"], "rf": ["rf_path", "rf_preserved", "rf_reference", "impedance", "em_fast"],
+            "stages": {"place": ["placement", "rf_path"], "rf": ["rf_path", "rf_preserved", "rf_reference", "impedance", "em_fast"],
                        "power": ["power", "thermal_field", "drc"], "signal": ["drc", "rf_preserved"]},
             **({"rules": {"pack": str(pack), "profile": "manufacture/summit_standard.yaml"}} if has_rules else {}),
             "em_hops": {"band_ghz": [low / 1000, high / 1000], "nets": [c[0] for c in bench["chain"]],
