@@ -46,6 +46,8 @@ def main(argv=None):
     rep = sub.add_parser("report", help="write the HTML scorecard")
     rep.add_argument("-o", "--output", default="scorecard.html")
     sub.add_parser("checks", help="list the available checks")
+    cr = sub.add_parser("critic", help="read a placement for what it will cost to route, without routing it or writing the ledger")
+    cr.add_argument("--board", type=Path, help="another placement of this project's board (default: the project's board)")
     sub.add_parser("init", help="wire this folder into the loop: project file, MCP servers, hook, skill")
     sub.add_parser("hook", help="for the Claude Code hook: report what a design edit made stale")
     tb = sub.add_parser("bench", help="run the written test benches, or the ones named, with no KiCad files")
@@ -182,6 +184,13 @@ def main(argv=None):
             from . import ground
             _out(ground.finish(p), True, str)
             return 0
+        if args.cmd == "critic":
+            c = checks.placement_critique(p, args.board)
+            data = {"cost": c.cost, "metrics": c.metrics, "findings": [{"id": i, "message": m, "severity": s} for i, m, s in c.findings]}
+            _out(data, args.json, lambda x: f"cost {x['cost']}\n" + "\n".join(
+                f"{k}: {v}" for k, v in x["metrics"].items() if not isinstance(v, (dict, str))) + "".join(
+                f"\n  {f['severity']}: {f['message']}" for f in x["findings"]))
+            return 1 if any(f["severity"] == "error" for f in data["findings"]) else 0
         if args.cmd == "status":
             data = controller.status(p)
             _out(data, args.json, lambda x: _table(x["gate"], ["check", "stage", "state", "summary"])
