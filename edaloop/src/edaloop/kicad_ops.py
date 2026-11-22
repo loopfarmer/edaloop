@@ -120,6 +120,8 @@ def _hit(fp, others, gap):
 
 
 def _load_footprint(fpid, dirs):
+    if ":" not in fpid:
+        raise SystemExit("footprint %s has no library: write it as library:name" % fpid)
     lib, name = fpid.split(":", 1)
     for root in dirs:
         path = os.path.join(root, lib + ".pretty")

@@ -40,6 +40,48 @@ def stand_ins(bench: dict, libs_from: dict[str, Path]) -> list[dict]:
         text = path.read_text() if path.exists() else ""
         out.append({"ref": ref, "footprint": footprint, "assumed": "ASSUMED" in text})
     return out
+
+
+def unresolved_footprints(bench: dict, footprint_dirs: list[Path]) -> list[dict]:
+    """Each part whose footprint the placer couldn't load, as {ref, footprint, why}. `why` is `none` (no footprint named),
+    `no_library` (no `library:` prefix), `no_such_library` (no such .pretty in any folder searched) or `not_in_library`.
+    Searched as the placer searches: the --footprints folders, edaloop's stand-ins, then KiCad's own libraries."""
+    roots = [Path(x) for x in [*footprint_dirs, BUNDLED_FOOTPRINTS, *STANDARD_LIBS]]
+    given = (bench.get("layout") or {}).get("footprints") or {}
+    out = []
+    for ref in sorted(bench.get("parts") or {}, key=lambda r: (re.sub(r"\d", "", r), int(re.sub(r"\D", "", r) or 0), r)):
+        footprint = str(given.get(ref) or "")
+        lib, sep, name = footprint.partition(":")
+        if not footprint:
+            why = "none"
+        elif not sep or not lib or not name:
+            why = "no_library"
+        else:
+            libs = [r / f"{lib}.pretty" for r in roots if (r / f"{lib}.pretty").is_dir()]
+            why = "no_such_library" if not libs else None if any((x / f"{name}.kicad_mod").is_file() for x in libs) else "not_in_library"
+        if why:
+            out.append({"ref": ref, "footprint": footprint, "why": why})
+    return out
+
+
+_WHY = {"none": "have no footprint under layout.footprints", "no_library": "name a footprint with no library, where library:name is needed",
+        "no_such_library": "name a library that isn't in any folder searched", "not_in_library": "name a footprint their library doesn't have"}
+
+
+def _unresolved_message(problems: list[dict]) -> str:
+    parts = []
+    for why, text in _WHY.items():
+        these = [x for x in problems if x["why"] == why]
+        if these:
+            listed = ", ".join(f"{x['ref']} ({x['footprint']})" if x["footprint"] else x["ref"] for x in these[:10])
+            parts.append(f"{len(these)} {text}: {listed}{f' and {len(these) - 10} more' if len(these) > 10 else ''}")
+    hint = "Give the folders holding their .pretty libraries with --footprints"
+    if any(x["why"] == "no_library" for x in problems):
+        hint += (". A board imported from EAGLE names its footprints with no library: export them into a .pretty folder and "
+                 "prefix each name with it")
+    return "footprints can't be found. " + "; ".join(parts) + ". " + hint
+
+
 NS = uuid.UUID("6f2a6c1e-0b5e-4d0a-9f55-0d3b7d1f7a10")
 
 RULES = {"min_clearance": 0.0, "min_connection": 0.0, "min_copper_edge_clearance": 0.5, "min_hole_clearance": 0.25,
@@ -281,6 +323,10 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
 
 
 def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
+    unresolved = unresolved_footprints(bench, footprint_dirs)
+    if unresolved:
+        # Before anything is placed: the placer would stop at the first of these, with a traceback or a bare name.
+        raise BuildError(_unresolved_message(unresolved), {"error": "unresolved_footprints", "parts": unresolved})
     footprint_dirs = [*footprint_dirs, BUNDLED_FOOTPRINTS]
     libs = {f.split(":")[0] for f in bench["layout"]["footprints"].values()}
     table = []
