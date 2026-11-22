@@ -291,13 +291,16 @@ def critique(board: Board, chains: list, width: float = 0.3, net_width: dict | N
         hop = _net_paths(board, net, rows, w, cfg, layer_pads, laid)
         for pts in hop.get("paths") or []:
             laid += [(pts[i], pts[i + 1], w) for i in range(len(pts) - 1)]
+        # The parts a fix would move or turn: every part with a pad on the hop. Named here so that no reader has to map net to parts.
+        hop["parts"] = sorted({ref for pair in rows for ref, _pin in pair})
         out.hops.append(hop)
         if hop.get("missing"):
             out.findings.append((f"placement:rf:{net}:missing", f"{net}: pad {hop['missing']} not on the board", "error"))
             continue
         if hop.get("blocked"):
             out.findings.append((f"placement:rf:{net}:blocked",
-                                 f"{net}: no path on {cfg['rf_layer']} between its pads, around the other pads and the shorter RF lines laid first", "error"))
+                                 f"{net}: no path on {cfg['rf_layer']} between its pads, around the other pads and the shorter RF lines laid first "
+                                 f"(parts {', '.join(hop['parts'])})", "error"))
             excess_total += 10 * hop["floor"]
             continue
         over = 100 * (hop["estimate"] / hop["floor"] - 1) if hop["floor"] > 0 else 0.0
@@ -309,7 +312,7 @@ def critique(board: Board, chains: list, width: float = 0.3, net_width: dict | N
                 f"other pads are in the way: it bends {hop['bends']} time(s)"
             out.findings.append((f"placement:rf:{net}:over_floor",
                                  f"{net}: shortest path on {cfg['rf_layer']} is about {hop['estimate']:.2f} mm, {over:.0f}% over its "
-                                 f"floor of {hop['floor']:.2f} mm ({why})", "error"))
+                                 f"floor of {hop['floor']:.2f} mm ({why}; parts {', '.join(hop['parts'])})", "error"))
 
     # The RF lines as laid out above: what the other nets have to cross.
     rf_lines = []
@@ -445,6 +448,8 @@ def critique(board: Board, chains: list, width: float = 0.3, net_width: dict | N
         "rf_hops": len(out.hops),
         "rf_hops_over": sum(f[0].endswith(":over_floor") for f in out.findings),
         "rf_hops_blocked": sum(f[0].endswith(":blocked") for f in out.findings),
+        "rf_parts_by_net": {h["net"]: h["parts"] for h in out.hops if any(f[0] in (f"placement:rf:{h['net']}:over_floor",
+                                                                                     f"placement:rf:{h['net']}:blocked") for f in out.findings)},
         "rf_floor_mm": round(sum(h["floor"] for h in ok), 2),
         "rf_estimate_mm": round(sum(h["estimate"] for h in ok), 2),
         "rf_excess_mm": round(excess_total, 2),

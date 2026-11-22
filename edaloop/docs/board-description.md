@@ -47,6 +47,18 @@ All of these go under `layout`, and all are optional except `footprints`.
 
 The RF layout rules' limits go under `project.rf_layout`, which the build copies to `rf_layout:` in `edaloop.yaml`, so that placement builds to the same numbers the `rf_layout` check measures. Placement reads `tap_stub_mm` from it. Unset, a shunt tap's RF pad goes on the line. Set, it sits beside the line, that far from the line's edge, on a stub. That measured worse on gain_block_demo: see [Taps beside the line](rf-layout-rules.md#taps-beside-the-line).
 
+## When the parts don't fit
+
+A build that can't fit the parts inside the outline, 0.5 mm in from its edge, stops and says by how much and what to change. The data comes first:
+
+```
+edaloop --json build description.yaml -o out
+```
+
+exits 2 and prints `{"error": ..., "detail": {...}}`. `detail.error` is `outline_overflow`, and `detail` holds the parts' span, the outline, `over_mm` (how far past each edge), the row's length along `layout.axis` (`row_mm`) and its width across, the parts set square, and `hint`. When the row is too long for the board along its axis but would fit turned, `fits_on_axis` names the other axis and the hint says to set it. Otherwise the hint names the side to move `layout.line` away from, or how much to shorten the row. The same hint ends the error line people see.
+
+A build that fails leaves its output folder as it found it, so the next build can go into the same folder. A folder that already holds files is still refused.
+
 ## Limits
 
 - Placement handles straight RF rows. It doesn't fold a path, avoid an obstacle or fit a fixed outline with a cut-out.

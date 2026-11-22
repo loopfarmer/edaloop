@@ -24,6 +24,7 @@ import os
 import sys
 
 import channel_groups
+import outline_fit
 import pcbnew
 
 
@@ -792,9 +793,11 @@ def build_board(seed, spec_path, dst):
         left, right, top, bottom = left + dx, right + dx, top + dy, bottom + dy
         spec["outline"] = [round(right + side + 0.05, 1), round(bottom + side + 0.05, 1)]
     w, h = spec["outline"]
-    if left < 0.5 or top < 0.5 or right > w - 0.5 or bottom > h - 0.5:
-        raise SystemExit("parts span x %.2f..%.2f, y %.2f..%.2f, outside the %g x %g mm outline with a 0.5 mm margin%s"
-                         % (left, right, top, bottom, w, h, ", with %s set square" % ", ".join(squared) if squared else ""))
+    over = outline_fit.overflow((left, right, top, bottom), (w, h), layout["axis"], squared)
+    if over:
+        # As data on stdout for scripts and agents (boardgen reads it into BuildError.detail), and as one line on stderr for people.
+        print(json.dumps(over), flush=True)
+        raise SystemExit(outline_fit.message(over))
     _outline(board, 0, 0, w, h)
     inset = 0.6
     ground = nets["GND"]

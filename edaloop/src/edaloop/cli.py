@@ -248,6 +248,9 @@ def main(argv=None):
         return 0
     except (ProjectError, ChainSpecError, FileExistsError, toolchain.ToolMissing) as e:
         print(f"edaloop: {e}", file=sys.stderr)
+        if args.json and getattr(e, "detail", None):
+            # A refusal with data behind it, such as a build's outline overflow, gives scripts the numbers rather than the prose.
+            _out({"error": str(e), "detail": e.detail}, True, str)
         return 2
 
 

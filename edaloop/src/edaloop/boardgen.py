@@ -8,6 +8,7 @@ change the description and build again.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import time
@@ -51,7 +52,30 @@ SEVERITIES = {"silk_overlap": "warning", "silk_over_copper": "warning", "silk_ed
 
 
 class BuildError(ProjectError):
-    pass
+    """A build that stopped. `detail` holds what it stopped on as data, where there is any: an outline overflow's numbers, say."""
+
+    def __init__(self, message: str, detail: dict | None = None):
+        super().__init__(message)
+        self.detail = detail or {}
+
+
+# What KiCad's Python prints on its own account when pcbnew loads outside an app. It is never why a build failed.
+_KICAD_NOISE = re.compile(r"assert .* failed in .*: create wxApp before calling this|^\S+\.cpp\(\d+\): assert ")
+
+
+def _placement_failure(stdout: str, stderr: str) -> BuildError:
+    """The placer's own reason, first, and its data. KiCad's wx asserts are dropped, and so are the JSON lines, which go in `detail`."""
+    detail = {}
+    for line in stdout.splitlines():
+        if line.startswith("{"):
+            try:
+                x = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(x, dict) and "error" in x:
+                detail = x
+    said = [x for x in (stdout + "\n" + stderr).splitlines() if x.strip() and not _KICAD_NOISE.search(x) and not x.startswith("{")]
+    return BuildError("placement failed: " + ("\n".join(said).strip()[-600:] or "the placer stopped without saying why"), detail)
 
 
 def _uid(*parts: str) -> str:
@@ -205,7 +229,7 @@ def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = 
     try:
         built = build(bench_path, out, footprint_dirs)
     except BuildError as e:
-        return {"made": False, "stopped_at": "build", "refused": str(e)}
+        return {"made": False, "stopped_at": "build", "refused": str(e), **({"detail": e.detail} if e.detail else {})}
     p = Project(out)
     say("ground")
     steps = {"build": {k: built[k] for k in ("parts", "span_mm", "outline_mm", "unlisted_pads", "stand_in_footprints")}, "ground": ground.pad_vias(p)}
@@ -240,9 +264,23 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     needed = [f"project.rails: {x['net']} load at {k}" for x in bench["project"]["rails"] for k, v in x["loads"].items() if not isinstance(v, (int, float))]
     if needed:
         raise BuildError("the description still needs these currents, in amps: " + "; ".join(needed))
+    out = Path(out)
+    existed = out.exists()
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise BuildError(f"{out} isn't empty. Build into a new folder, so that no routed board is overwritten")
+    try:
+        return _write(bench, name, bench_path, out, footprint_dirs)
+    except BaseException:
+        # Everything in the folder is this build's, since it was empty. Left behind, it would only make the next build refuse.
+        for x in out.iterdir():
+            shutil.rmtree(x) if x.is_dir() and not x.is_symlink() else x.unlink()
+        if not existed:
+            out.rmdir()
+        raise
+
+
+def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     footprint_dirs = [*footprint_dirs, BUNDLED_FOOTPRINTS]
     libs = {f.split(":")[0] for f in bench["layout"]["footprints"].values()}
     table = []
@@ -301,5 +339,5 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
     spec.unlink(missing_ok=True)
     lines = [x for x in r.stdout.splitlines() if x.startswith("{")]
     if r.returncode != 0 or not lines:
-        raise BuildError(f"placement failed: {(r.stdout + r.stderr).strip()[-600:]}")
+        raise _placement_failure(r.stdout, r.stderr)
     return {**json.loads(lines[-1]), "stand_in_footprints": standing_in}
