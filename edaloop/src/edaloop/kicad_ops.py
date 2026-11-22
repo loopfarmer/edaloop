@@ -502,6 +502,18 @@ def _extent(group, axis):
     return min(pcbnew.ToMM(b.GetTop()) for b in boxes), max(pcbnew.ToMM(b.GetBottom()) for b in boxes)
 
 
+def _offset(fps, placed, offsets):
+    """`layout.place`: move named parts by [dx, dy] mm from where placement put them. For what the rules can't place, such as a
+    part whose RF pads sit on one side with other pins between, where a hop has to leave its pad across the row. All the moves
+    are made, then each moved part is checked against every other, so that two parts moved together can't land on each other."""
+    for ref, (dx, dy) in sorted(offsets.items()):
+        _shift([fps[ref]], float(dx), float(dy))
+    for ref in sorted(offsets):
+        hit = _hit(fps[ref], [x for x in placed if x is not fps[ref]], 0)
+        if hit:
+            raise SystemExit("layout.place moves %s onto %s: their courtyards overlap. Change the offset, or move %s too" % (ref, hit, hit))
+
+
 def _shift(group, dx, dy):
     for fp in group:
         q = fp.GetPosition()
@@ -758,6 +770,7 @@ def build_board(seed, spec_path, dst):
         placed = _place_rows(fps, layout, rows, attach, spec)
         extras = [x for x in fps.values() if x not in placed]
         placed += _shelf(extras, placed, layout)
+        _offset(fps, placed, layout.get("place") or {})
         boxes = [_courtyard(fp, 0).BBox() for fp in placed]
         return rows, placed, (min(pcbnew.ToMM(b.GetLeft()) for b in boxes), max(pcbnew.ToMM(b.GetRight()) for b in boxes),
                               min(pcbnew.ToMM(b.GetTop()) for b in boxes), max(pcbnew.ToMM(b.GetBottom()) for b in boxes))

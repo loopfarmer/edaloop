@@ -993,6 +993,37 @@ def test_demo_board_builds_from_standard_footprints_with_rf_pads_on_the_line(tmp
         assert at[pin]["y"] == pytest.approx(12.0, abs=0.002), pin
 
 
+def test_layout_place_is_checked_before_anything_is_placed():
+    from edaloop import boardgen
+    bench = {"parts": {"U1": {}, "C1": {}}, "layout": {"place": {"U1": [2, 0], "C1": [0, 1.5]}}}
+    assert boardgen.place_problems(bench) == [] and boardgen.place_problems({"layout": {}}) == []
+    bench["layout"]["place"] = {"U9": [1, 0], "C1": [1], "U1": ["1", 0]}
+    problems = boardgen.place_problems(bench)
+    assert len(problems) == 3 and "U9, which isn't a part" in problems[0] and "[dx, dy]" in problems[1]
+    assert boardgen.place_problems({"layout": {"place": [1, 2]}}) == ["layout.place must map part references to [dx, dy] in mm"]
+
+
+def test_layout_place_moves_a_part_from_where_placement_put_it(tmp_path):
+    import yaml
+
+    from edaloop import boardgen, testbench
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    before = boardgen.build(testbench.BENCHES / "gain_block_demo.yaml", tmp_path / "a", [])["positions"]
+    bench["layout"]["place"] = {"C1": [0, 3]}
+    (tmp_path / "moved.yaml").write_text(yaml.safe_dump(bench))
+    after = boardgen.build(tmp_path / "moved.yaml", tmp_path / "b", [])["positions"]
+    assert after["C1"][1] == pytest.approx(before["C1"][1] + 3, abs=0.002) and after["C1"][0] == pytest.approx(before["C1"][0], abs=0.002)
+    assert all(after[r] == pytest.approx(before[r], abs=0.002) for r in before if r != "C1")
+    # A move onto another part is refused, with both named, and leaves nothing behind.
+    bench["layout"]["place"] = {"C1": [before["U1"][0] - before["C1"][0], 0]}
+    (tmp_path / "onto.yaml").write_text(yaml.safe_dump(bench))
+    with pytest.raises(boardgen.BuildError, match="layout.place moves C1 onto"):
+        boardgen.build(tmp_path / "onto.yaml", tmp_path / "c", [])
+    assert not (tmp_path / "c").exists()
+
+
 def test_demo_board_puts_its_chokes_beside_the_line_when_asked(tmp_path):
     import yaml
 
