@@ -31,6 +31,24 @@ def make(tmp_path, extra=""):
     return Project(tmp_path)
 
 
+def test_critic_says_what_is_missing_instead_of_a_traceback(tmp_path, capsys):
+    from edaloop import checks
+    from edaloop.cli import main
+    make(tmp_path)
+    assert main(["-C", str(tmp_path), "critic"]) == 2
+    assert "names no RF chains (rf.chains)" in capsys.readouterr().err
+    (tmp_path / "edaloop.yaml").write_text("name: t\nboard: b.kicad_pcb\ngate: [project_files]\nrf:\n  chains: chains.yaml\n")
+    assert main(["-C", str(tmp_path), "critic"]) == 2
+    assert "chains.yaml named in edaloop.yaml isn't there" in capsys.readouterr().err
+    (tmp_path / "chains.yaml").write_text("chains:\n  - {net: A, entry: J1.1, exit: U1.1}\n")
+    (tmp_path / "b.kicad_pcb").unlink()
+    assert main(["-C", str(tmp_path), "critic"]) == 2
+    assert "b.kicad_pcb isn't there" in capsys.readouterr().err
+    # As a check it's an error, with the same words, never a pass.
+    ev = checks.run_check(Project(tmp_path), "placement")
+    assert ev.status == "error" and "b.kicad_pcb isn't there" in ev.summary
+
+
 def test_sexpr_handles_quotes_and_escapes():
     assert parse_sexpr('(a "b \\" c" (d 1))') == ["a", 'b " c', ["d", "1"]]
 
