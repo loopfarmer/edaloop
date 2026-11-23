@@ -606,6 +606,27 @@ def test_describe_leaves_footprints_that_resolve_alone(tmp_path):
     assert set(yaml.safe_load((tmp_path / "d.yaml").read_text())["layout"]["footprints"].values()) == {name}
 
 
+def test_describe_takes_the_spacing_between_rf_parts_from_the_board(tmp_path):
+    """gain_block_demo built with its RF parts 0.2 mm apart, courtyard to courtyard, describes with gap_mm 0.2, and says where it came
+    from. Built at the 0.5 mm default, it describes with the default and no note: the board never makes the spacing looser."""
+    import yaml
+
+    from edaloop import boardgen, testbench
+    from edaloop import describe as described
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    found = {}
+    for gap in (0.2, 0.5):
+        bench["layout"]["gap_mm"] = gap
+        (tmp_path / f"g{gap}.yaml").write_text(yaml.safe_dump(bench, sort_keys=False))
+        boardgen.build(tmp_path / f"g{gap}.yaml", tmp_path / f"b{gap}", [])
+        d = described.describe(tmp_path / f"b{gap}" / "gain_block_demo.kicad_pcb", "x", [900, 1500])
+        found[gap] = (d["layout"]["gap_mm"], [a for a in d["assumed"] if a.startswith("layout: gap_mm")])
+    assert found[0.2][0] == 0.2 and found[0.2][1] and "courtyard to courtyard" in found[0.2][1][0]
+    assert found[0.5] == (0.5, [])
+
+
 def test_ipc2221_matches_published_shape_and_round_trips():
     rise = power.ipc2221_rise_c(1.0, 0.3, 35, True)
     assert 10 < rise < 40                 # 1 A on 12 mil 1 oz outer is known to be warm

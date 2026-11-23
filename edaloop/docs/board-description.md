@@ -2,7 +2,7 @@
 
 A description is one YAML file with a board's parts, nets, RF path and stackup. `testbenches/` holds examples. `edaloop describe` writes one from a schematic or a board, and marks with `REQUIRED` what the source can't say, such as a load's current. A build refuses until a person fills those in.
 
-`assumed` lists defaults it used, such as the stackup when reading a schematic, and anything it left out or guessed about the RF path. `likely_rails` lists nets that look like supplies but have no currents yet. They aren't checked until you add them under `project.rails` with their source and load currents, and until then the power check fails rather than passing with nothing to check.
+`assumed` lists defaults it used, such as the stackup when reading a schematic, and anything it left out or guessed about the RF path. From a board, it also reads the stackup, the RF track width, and `layout.gap_mm`: the closest two neighbouring parts on the RF path sit on the board, courtyard to courtyard, rounded down to 0.05 mm. That's never looser than the 0.5 mm default, and a pair whose courtyards overlap, as one covering a two-SMA kit's whole footprint does, isn't counted. A footprint with no courtyard is measured by the box `describe` gives its copy, its pads and 0.25 mm. `assumed` says which pair set it. `likely_rails` lists nets that look like supplies but have no currents yet. They aren't checked until you add them under `project.rails` with their source and load currents, and until then the power check fails rather than passing with nothing to check.
 
 ### Boards with many connectors
 

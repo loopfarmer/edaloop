@@ -6,6 +6,7 @@ refuses until a person supplies it.
 """
 from __future__ import annotations
 
+import math
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -116,7 +117,8 @@ def likely_rails(nets: dict, chain: list, known: list[str]) -> list[str]:
 
 
 def board_facts(path: Path, chain: list) -> dict:
-    """What a board can say that a schematic can't: its stackup and its RF track width. Leaves out what it doesn't hold."""
+    """What a board can say that a schematic can't: its stackup, its RF track width, and how close its designer set neighbouring
+    parts on the RF path. Leaves out what it doesn't hold."""
     from .pcbfile import Board, _child, _val
     from .thermal import _stack
 
@@ -137,7 +139,43 @@ def board_facts(path: Path, chain: list) -> dict:
             lengths[t.width] = lengths.get(t.width, 0.0) + abs(t.end[0] - t.start[0]) + abs(t.end[1] - t.start[1])
     if lengths:
         facts["rf_line_width_mm"] = max(lengths, key=lengths.get)
+    tight = _row_gaps(board, chain)
+    if tight:
+        facts["row_gap"] = min(tight)
     return facts
+
+
+def _row_gaps(board, chain: list) -> list[tuple[float, str, str]]:
+    """How far apart neighbouring parts on the RF path sit, courtyard to courtyard, in mm, as the placer's `gap_mm` measures it:
+    (gap, part, part) for each hop between two parts. A footprint with no courtyard gets the one export_footprints would give it,
+    its pads' box and 0.25 mm. Pairs whose courtyards overlap are left out: one of the two covers more than its part, as a two-SMA
+    kit's single box does."""
+    pads = board.all_pads()
+    yards = board.courtyards()
+    box: dict = {}
+    origin = {}
+    for q in pads:
+        ref = q["name"].split(".")[0]
+        x0, y0, x1, y1 = q["x"] - q["hw"], q["y"] - q["hh"], q["x"] + q["hw"], q["y"] + q["hh"]
+        o = box.get(ref)
+        box[ref] = (min(o[0], x0), min(o[1], y0), max(o[2], x1), max(o[3], y1)) if o else (x0, y0, x1, y1)
+        origin[ref] = (q["fx"], q["fy"])
+
+    def yard(ref):
+        if origin.get(ref) in yards:
+            return yards[origin[ref]]
+        a = box[ref]
+        return (a[0] - 0.25, a[1] - 0.25, a[2] + 0.25, a[3] + 0.25)
+    out = []
+    for _net, a, z in chain:
+        ra, rz = a.split(".")[0], z.split(".")[0]
+        if ra == rz or ra not in box or rz not in box:
+            continue
+        A, Z = yard(ra), yard(rz)
+        gap = max(Z[0] - A[2], A[0] - Z[2], Z[1] - A[3], A[1] - Z[3])
+        if gap >= 0:
+            out.append((round(gap, 3), ra, rz))
+    return out
 
 
 def _blocks_rf(ref: str, part: dict, pins: dict[str, str]) -> bool:
@@ -366,11 +404,24 @@ def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "", 
         "spice": {"models": models, "bench": {"name": "bias", "stimulus": [f"Vcable {chain[-1][0]} 0 DC 5"],
                                                "measure": [".control", "op", "let i_total_ma = -i(vcable)*1000", "print i_total_ma", "quit", ".endc"]},
                   "expect": {}},
-        "layout": {"axis": "x", "line": 30.0, "gap_mm": 0.5, "pour_clearance_mm": 0.3, "footprints": footprints,
+        "layout": {"axis": "x", "line": 30.0, "gap_mm": DEFAULT_GAP_MM, "pour_clearance_mm": 0.3, "footprints": footprints,
                    "ground": {"fence_pitch_mm": 4.0, "stitch_pitch_mm": 4.0}},
         "project": {"eps_eff": 3.25, "rails": rails},
     }
+    if facts.get("row_gap"):
+        gap, a, z = facts["row_gap"]
+        # The tightest the board's designer set two neighbours on the path, rounded down to 0.05 mm, and never looser than the default.
+        measured = min(DEFAULT_GAP_MM, math.floor(gap / 0.05 + 1e-9) * 0.05)
+        if measured < DEFAULT_GAP_MM:
+            description["layout"]["gap_mm"] = round(measured, 2)
+            assumed.append(f"layout: gap_mm {measured:.2f} from the board, where the tightest neighbours on the RF path, {a} and {z}, sit "
+                           f"{gap:.2f} mm apart, courtyard to courtyard")
     return description
+
+
+DEFAULT_GAP_MM = 0.5      # courtyard to courtyard between neighbours on the RF path, unless the board shows a tighter one
+
+
 
 
 IMPORTED = "imported"
