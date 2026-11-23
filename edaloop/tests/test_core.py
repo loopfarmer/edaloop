@@ -1283,6 +1283,58 @@ def test_describe_finds_the_rf_path_and_leaves_out_the_taps(tmp_path):
     assert d["project"]["rails"][0]["loads"] == {"R1.1": describe.NEEDED}
 
 
+def _three_ports():
+    """J1 into an amplifier U1 that feeds J2 directly and J3 through a second stage U2."""
+    parts = {r: {"value": v} for r, v in {"J1": "in", "C1": "100pF", "U1": "LNA", "C2": "100pF", "J2": "out", "C3": "100pF",
+                                          "U2": "AMP", "C4": "100pF", "J3": "out2"}.items()}
+    nets = {"A": ["J1.1", "C1.1"], "B": ["C1.2", "U1.1"], "C": ["U1.3", "C2.1"], "D": ["C2.2", "J2.1"], "E": ["U1.4", "C3.1"],
+            "F": ["C3.2", "U2.1"], "G": ["U2.3", "C4.1"], "H": ["C4.2", "J3.1"], "GND": ["J1.2", "J2.2", "J3.2", "U1.2", "U2.2"]}
+    return parts, nets
+
+
+def _chain_ends(chains):
+    return [(c[0][1].split(".")[0], c[-1][2].split(".")[0]) for c in chains]
+
+
+def test_a_chains_hint_ends_each_path_at_its_partner():
+    from edaloop import describe
+    parts, nets = _three_ports()
+    assert _chain_ends(describe.find_chains(parts, nets)) == [("J1", "J3")]            # the longest path, unhinted
+    notes: list = []
+    assert _chain_ends(describe.find_chains(parts, nets, [["J1", "J2"]], notes)) == [("J1", "J2")]
+    assert notes == []
+    with pytest.raises(describe.DescribeError, match="J9, which aren't parts"):
+        describe.find_chains(parts, nets, [["J1", "J9"]])
+
+
+def test_too_many_routes_names_the_pairs_or_takes_the_hinted_pairs_most_direct_route(monkeypatch):
+    from edaloop import describe
+    parts, nets = _three_ports()
+    monkeypatch.setattr(describe, "SEARCH_LIMIT", 3)
+    with pytest.raises(describe.DescribeError, match=r"--chains-hint.*J1-J2 \(4 hops\); J1-J3 \(6 hops\)"):
+        describe.find_chains(parts, nets)
+    notes: list = []
+    chains = describe.find_chains(parts, nets, [["J1", "J3"]], notes)
+    assert [row[1:] for row in chains[0]] == [["J1.1", "C1.1"], ["C1.2", "U1.1"], ["U1.4", "C3.1"], ["C3.2", "U2.1"], ["U2.3", "C4.1"], ["C4.2", "J3.1"]]
+    assert notes == ["chains: J1 to J3 is the most direct route, as there were too many routes to try every one"]
+    # A hinted pair that loses its parts to another path is named, not dropped.
+    notes = []
+    assert [set(e) for e in _chain_ends(describe.find_chains(parts, nets, [["J1", "J3"], ["J1", "J2"]], notes))] == [{"J1", "J3"}]
+    assert "no path for the hinted pair J1-J2" in notes[-1]
+
+
+def test_a_chains_hint_file_is_a_list_of_pairs(tmp_path):
+    from edaloop import describe
+    (tmp_path / "h.yaml").write_text("[[J1, J2], [J3, J4]]\n")
+    assert describe.load_pairs(tmp_path / "h.yaml") == [["J1", "J2"], ["J3", "J4"]]
+    (tmp_path / "h.yaml").write_text("pairs: [[J1, J2]]\n")
+    assert describe.load_pairs(tmp_path / "h.yaml") == [["J1", "J2"]]
+    for bad in ["[J1, J2]\n", "[[J1, J1]]\n", "[]\n", "[[J1, J2, J3]]\n"]:
+        (tmp_path / "h.yaml").write_text(bad)
+        with pytest.raises(describe.DescribeError, match="list of connector pairs"):
+            describe.load_pairs(tmp_path / "h.yaml")
+
+
 def test_describe_follows_a_path_between_two_ports_of_one_footprint(tmp_path):
     from edaloop import describe
     # An in-line amplifier: one footprint holds the plug at one end and the jack at the other, so its two signal pins are both RF ports.
@@ -1386,6 +1438,23 @@ def test_pad_on_no_net_is_visible(tmp_path):
     names = {x["name"]: x["net"] for x in Board(f).all_pads()}
     assert names["U1.7"] == ""
     assert sorted(n for n, net in names.items() if not net and not n.endswith(".")) == ["U1.7"]
+
+
+def test_describe_leaves_out_footprints_that_share_a_reference(tmp_path):
+    from edaloop import describe
+
+    def fp(ref, pads):
+        body = "".join(f'(pad "{n}" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net {i}))' for n, i in pads)
+        return f'(footprint "Lib:{ref}" (at 0 0) (property "Reference" "{ref}") (property "Value" "x") {body})'
+    f = tmp_path / "b.kicad_pcb"
+    # Stitching vias drawn as footprints, all called GND_VIA, on different nets.
+    f.write_text('(kicad_pcb (version 20241229) (net 0 "") (net 1 "A") (net 2 "B") (net 3 "GND") '
+                 + fp("J1", [("1", 1), ("2", 3)]) + fp("U1", [("1", 1), ("2", 2), ("3", 3)]) + fp("J2", [("1", 2), ("2", 3)])
+                 + fp("GND_VIA", [("1", 3)]) + fp("GND_VIA", [("1", 1)]) + fp("GND_VIA", [("1", 2)]) + ')')
+    shared: dict = {}
+    parts, nets = describe.read_board(f, shared)
+    assert set(parts) == {"J1", "U1", "J2"} and shared == {"GND_VIA": 3}
+    assert not any(m.startswith("GND_VIA") for ms in nets.values() for m in ms)
 
 
 def test_describe_reads_a_board_with_no_schematic(tmp_path):
