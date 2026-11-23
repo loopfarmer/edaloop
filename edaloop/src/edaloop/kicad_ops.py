@@ -204,6 +204,20 @@ def _pad_reach(fp, rot, pad, direction):
     return max((x - px) * direction[0] + (y - py) * direction[1] for x, y in corners)
 
 
+class NoFold(SystemExit):
+    """A row between a loop-through part's ports that neither fits straight nor folds."""
+
+
+FOLD_TAP_STUB_MM = 0.1      # the stub a fold gives a tap it sets beside the line, when the description gives none: rf_rules' 0.1 mm
+
+
+def tap_stub(stub, ref):
+    """`rf_layout.tap_stub_mm` for one tap: one number for every tap, or {REF: mm} for the taps named, the rest on the line."""
+    if isinstance(stub, dict):
+        return stub.get(ref)
+    return stub
+
+
 def tap_offset(half_line, stub, pad_reach):
     """How far a tap's RF pad centre sits off the line's centre: the line's half width, the stub from its edge, then the pad's own reach
     back toward the line. None leaves the pad on the line."""
@@ -477,7 +491,24 @@ def _derive_layout(fps, spec, square=False, choice=0):
             side = down if grounded else up
             rot = _rot_for(fps[ref], pin, far, side) if far else 0.0
             half_line = float(widths.get(net, spec.get("rf_line_width_mm") or 0.0)) / 2
-            off = tap_offset(half_line, stub, _pad_reach(fps[ref], rot, pin, (-side[0], -side[1]))) if far else 0.0
+            mm = tap_stub(stub, ref)
+            if mm is None and spec.get("fold_taps") and far:
+                # A row that only fits folded, with its taps beside the line: see build_board. The stub is the shortest that takes
+                # the tap's courtyard clear of its neighbours on the line, by the row's gap, so that it takes no length along the row.
+                # The tap goes on after the part before it, so only the part after it can sit beside it. That part's turn isn't known
+                # yet: a two-pad part lies along the row, and anything else may lie either way.
+                back_to_line = (-side[0], -side[1])
+                # On the last hop of a row that returns to its first part, the part after is that part's return port, whose
+                # courtyard is the connector's: the part before is the neighbour then.
+                nxt = fps[leave.split(".")[0] if leave.split(".")[0] != walk[0][0] else entry.split(".")[0]]
+                nbox = _courtyard(nxt, 0).BBox()
+                w, h = pcbnew.ToMM(nbox.GetWidth()), pcbnew.ToMM(nbox.GetHeight())
+                reach = (min(w, h) if len(list(nxt.Pads())) == 2 else max(w, h)) / 2
+                needed = (reach + float(layout.get("gap_mm", 0.1)) + _reach(fps[ref], rot, pin, back_to_line) - half_line
+                          - _pad_reach(fps[ref], rot, pin, back_to_line))
+                mm = round(max(FOLD_TAP_STUB_MM, needed), 2)
+                spec.setdefault("taps_beside", {})[ref] = mm
+            off = tap_offset(half_line, mm, _pad_reach(fps[ref], rot, pin, (-side[0], -side[1]))) if far else 0.0
             walk.append([ref, rot, pin, pin, [round(side[0] * off, 4), round(side[1] * off, 4)]])
             if far and not grounded:
                 fps[ref].SetOrientationDegrees(rot)
@@ -514,10 +545,11 @@ def _derive_layout(fps, spec, square=False, choice=0):
     return rows, attach
 
 
-def _solve_row(fps, layout):
+def _solve_row(fps, layout, trace=None):
     """Walk the cascade along its line: each input pad goes on the line as close as the courtyards allow.
 
-    `lines`, from `_row_lines`, gives the line at each part where it jogs. Left out, the line is straight."""
+    `lines`, from `_row_lines`, gives the line at each part where it jogs. Left out, the line is straight. A row folded to fit
+    between a loop-through part's ports adds its line's segments, as point pairs, to `trace`."""
     axis = 1 if layout["axis"] == "y" else 0
     line, start = layout["line"], layout["start"]
     lines = layout.get("lines") or [line] * len(layout["walk"])
@@ -531,6 +563,7 @@ def _solve_row(fps, layout):
     walk = layout["walk"]
     first = walk[0][0]
     short, away = None, []
+    records = []
     limit = origin = span = 0.0
     last_ref = last_pad = None
     # A row that returns to its first part, through another port, is placed between the two ports and ends at the second.
@@ -539,11 +572,17 @@ def _solve_row(fps, layout):
         ref, rot, entry, leave = row[:4]
         if back is not None and ref == first and previous is not None:
             if short:
-                raise SystemExit("the row doesn't fit between %s's ports: %s.%s and %s.%s are %.2f mm apart, but the row from %s.%s to "
-                                 "%s.%s runs %.2f mm along the line, with %s the first part past %s.%s. The placer lays a row out "
-                                 "along one line, and can't fold it to fit" % (
-                                     first, first, walk[0][3], first, back, span, first, walk[0][3], last_ref, last_pad,
-                                     abs(previous - origin), short, first, back))
+                travel = (0.0, 1.0) if axis else (1.0, 0.0)
+                folded = _fold_between(fps[first], walk[0][3], back, records, travel, gap, layout.get("fold_side"),
+                                       _hop_judge(fps, layout.get("hops")))
+                if folded is None:
+                    raise NoFold("the row doesn't fit between %s's ports: %s.%s and %s.%s are %.2f mm apart, but the row from %s.%s "
+                                     "to %s.%s runs %.2f mm along the line, with %s the first part past %s.%s, and no fold of it into "
+                                     "a U between the ports fits either" % (
+                                         first, first, walk[0][3], first, back, span, first, walk[0][3], last_ref, last_pad,
+                                         abs(previous - origin), short, first, back))
+                if trace is not None:
+                    trace.extend(folded)
             break
         # A tap's pad sits off the line, beside it, by this much.
         ox, oy = row[4] if len(row) > 4 else (0.0, 0.0)
@@ -581,9 +620,271 @@ def _solve_row(fps, layout):
             span = abs(limit - origin)
         placed += group + [fp]
         inline.append(fp)
-        previous = _pad_xy(fp, leave)[axis] if leave else None
+        if previous is not None:
+            here = point(s)
+            beside = (ox, oy) != (0.0, 0.0)
+            records.append({"ref": ref, "main": fp, "units": group + [fp], "in": here, "beside": beside,
+                            "out": here if beside or entry == leave or leave is None else _pad_xy(fp, leave)})
+        # A tap set beside the line (rf_layout.tap_stub_mm) takes no length along it: the next part starts from the part before
+        # the tap, and goes past the tap only if their courtyards would touch.
+        if not (previous is not None and (ox, oy) != (0.0, 0.0)):
+            previous = _pad_xy(fp, leave)[axis] if leave else None
         last_ref, last_pad = ref, leave
     return placed
+
+
+HOP_LIMIT = 0.05            # the critic's limit on an RF hop's path over its floor
+HOP_CLEARANCE_MM = 0.2
+
+
+def _spanning(points):
+    """The length of the shortest tree joining points: Prim's, for the few pads on one net."""
+    if len(points) < 2:
+        return 0.0
+    total = 0.0
+    best = {i: math.dist(points[0], points[i]) for i in range(1, len(points))}
+    while best:
+        i = min(best, key=best.get)
+        total += best.pop(i)
+        for j in best:
+            best[j] = min(best[j], math.dist(points[i], points[j]))
+    return total
+
+
+def _to_segment(p, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy or 1.0)))
+    return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
+
+
+def _hop_judge(fps, hops):
+    """A stand-in, for the placer, for the critic's RF hop reading (placement.rf_hops): each hop's straight line from entry to
+    exit pad plus a stub to each of its other pads, against its floor, the shortest tree over its own pads. Where the straight line
+    passes within half the line, the clearance and most of a pad's own half size of another net's pad, the path would go round, so it
+    counts 30% over. These are rough: the critic's own reading is a grid search, too slow to run per candidate. Returns a
+    function of the parts placed so far that gives (hops over the critic's limit, mm over it), or None without the chain."""
+    if not hops:
+        return None
+    pins, chain = hops["pins"], hops["chain"]
+
+    def judge(placed):
+        on = {fp.GetReference() for fp in placed}
+        pads = []
+        for fp in placed:
+            for pad in fp.Pads():
+                if pad.IsOnLayer(pcbnew.F_Cu):
+                    b = pad.GetBoundingBox()
+                    pads.append((pins.get(fp.GetReference(), {}).get(pad.GetNumber()), fp.GetReference() + "." + pad.GetNumber(),
+                                 (pcbnew.ToMM(b.GetLeft()), pcbnew.ToMM(b.GetTop()), pcbnew.ToMM(b.GetRight()), pcbnew.ToMM(b.GetBottom()))))
+        where = {name: ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2) for _net, name, box in pads}
+        over, excess = 0, 0.0
+        for net, a, z in chain:
+            if a.split(".")[0] not in on or z.split(".")[0] not in on or a not in where or z not in where:
+                continue
+            pa, pz = where[a], where[z]
+            own = [where[name] for n, name, _box in pads if n == net]
+            floor = _spanning(own) if len(own) > 2 else math.dist(pa, pz)
+            if floor <= 0:
+                continue
+            estimate = math.dist(pa, pz) + sum(_to_segment(p, pa, pz) for p in own if p not in (pa, pz))
+            half = float(hops["net_width"].get(net, hops["width"])) / 2 + HOP_CLEARANCE_MM
+            for n, _name, box in pads:
+                if n == net:
+                    continue
+                c = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+                if _to_segment(c, pa, pz) < half + max(box[2] - box[0], box[3] - box[1]) / 2 * 0.7:
+                    estimate *= 1.3
+                    break
+            if estimate > floor * (1 + HOP_LIMIT):
+                over += 1
+                excess += estimate - floor * (1 + HOP_LIMIT)
+        return over, round(excess, 3)
+    return judge
+
+
+FOLD_STEP_MM = 0.1
+FOLD_TRIES = 60          # turn choices tried, best first, on each side
+
+
+def _angle(d):
+    """KiCad's rotation, in degrees counter-clockwise on the board, that takes travel along +x to direction d."""
+    return {(1, 0): 0.0, (0, -1): 90.0, (-1, 0): 180.0, (0, 1): 270.0}[(round(d[0]), round(d[1]))]
+
+
+def _turned(p, pivot, degrees):
+    """A point turned about a pivot as KiCad turns a footprint: counter-clockwise on the board, where y runs down."""
+    a = math.radians(degrees)
+    x, y = p[0] - pivot[0], p[1] - pivot[1]
+    return (pivot[0] + x * math.cos(a) + y * math.sin(a), pivot[1] - x * math.sin(a) + y * math.cos(a))
+
+
+def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judge=None):
+    """Fold a row that's too long for the gap between a loop-through part's ports into a U: along the row, across it, along, back
+    across, and along into the return port, the way lna915's released board snakes its amplifier between its two SMAs.
+
+    `records` is the row as placed straight, past the return port: each part with its bias stack, and the line's points where it
+    enters and leaves. The line turns only at a corner part, a two-pad part on the line, turned to stand along the new heading, so
+    that no hop bends. Each part and its stack turn together, as one piece, and every hop keeps at least its straight length,
+    growing in FOLD_STEP_MM steps where a part would touch another. The two legs across must come out equal, so a straight hop in
+    the shorter one grows to match. A tap set beside the line takes no length along it, and hangs off the next part's input pad.
+
+    The turn choices that can fit, by the row's straight lengths, are tried best first, the legs across nearest equal, on each side
+    of the line (`side`, +1 or -1 across, tries one only). Of the folds that fit, the one `judge` scores best wins: fewest hops over
+    the critic's limit, then least excess, then the shortest line. Returns the line's segments, or None when no fold fits."""
+    n = len(records)
+    if n < 2:
+        return None
+    across = (-travel[1], travel[0]) if travel[1] else (0.0, 1.0)
+    along = lambda p: p[0] * travel[0] + p[1] * travel[1]
+    cross = lambda p: p[0] * across[0] + p[1] * across[1]
+    start, finish = _pad_xy(port, out_pad), _pad_xy(port, back_pad)
+    room = along(finish) - along(start)
+    saved = [[(fp, fp.GetPosition(), fp.GetOrientationDegrees()) for fp in r["units"]] for r in records]
+    # Each record's hop from the line point before it: the last part's exit, passing over taps set beside the line.
+    straight = []
+    last = start
+    for r in records:
+        straight.append(along(r["in"]) - along(last))
+        if not r.get("beside"):
+            last = r["out"]
+    # Each part's length along the straight row, hop included before it, to rank the turn choices.
+    s_in = [along(r["in"]) for r in records]
+    s_out = [along(r["out"]) for r in records]
+
+    def leg(a, b):                     # the straight row's length from the hop into part a to the hop into part b
+        return (s_in[b] if b < n else s_out[-1]) - (s_out[a - 1] if a > 0 else along(start))
+
+    # The line turns only at a two-pad part on the line, never at a tap or at a part with more pads, whose other pins would sit
+    # in the way of a line arriving from the side.
+    corners = {i for i, r in enumerate(records) if r["in"] != r["out"] and len(list(r["main"].Pads())) == 2}
+    choices = []
+    for t1 in range(0, n):
+        for t2 in range(t1 + 1, n):
+            for t3 in range(t2 + 1, n):
+                for t4 in range(t3 + 1, n):
+                    if not corners.issuperset((t1, t2, t3, t4)):
+                        continue
+                    flat = leg(0, t1) + leg(t2, t3) + leg(t4, n)
+                    if flat > room:
+                        continue
+                    choices.append((abs(leg(t1, t2) - leg(t3, t4)) + flat / room, (t1, t2, t3, t4)))
+    choices.sort()
+
+    def restore():
+        for group in saved:
+            for fp, pos, rot in group:
+                fp.SetOrientationDegrees(rot)
+                fp.SetPosition(pos)
+
+    def attempt(turns, sign, extra):
+        """Place the row along the U; None if a part finds no room within 30 mm, else (miss across, room left, segments)."""
+        restore()
+        heads = [travel, (sign * across[0], sign * across[1]), travel, (-sign * across[0], -sign * across[1]), travel]
+        here, heading, done, segments = start, travel, [port], []
+        at = {}                                     # each record's point on the line, and the way the hop into it runs
+        for i, r in enumerate(records):
+            new = heads[sum(1 for t in turns if t <= i)]
+            degrees = _angle(new) - _angle(travel)
+            pivot = r["in"]
+            for fp in r["units"]:
+                fp.Rotate(pcbnew.VECTOR2I(pcbnew.FromMM(pivot[0]), pcbnew.FromMM(pivot[1])), pcbnew.EDA_ANGLE(degrees, pcbnew.DEGREES_T))
+            out = _turned(r["out"], pivot, degrees)
+            turning = new != heading
+            main = r["main"]
+            moved = [0.0, 0.0]
+
+            def put(target, pivot=pivot, moved=moved, r=r, main=main):
+                dx, dy = target[0] - pivot[0] - moved[0], target[1] - pivot[1] - moved[1]
+                _shift(r["units"], dx, dy)
+                moved[0] += dx
+                moved[1] += dy
+                return _hit(main, done, gap) or next(
+                    (h for h in (_hit(u, done + [o for o in r["units"] if o is not u], 0.1) for u in r["units"] if u is not main) if h), None)
+
+            # A corner part, where the line turns, is a two-pad part such as a coupling capacitor, turned to stand along the new
+            # heading. The hop into it arrives straight along the old heading at the side of its first pad, and the line leaves its
+            # second pad along the new one, so no hop bends. That's how lna915's released board turns at C5.
+            way = heading if turning else new
+            hop = straight[i]
+            while put((here[0] + hop * way[0], here[1] + hop * way[1])) and hop <= 30.0:
+                hop += FOLD_STEP_MM
+            # Extra length, to even the legs, goes on after the hop has found room, so that it always lengthens the line.
+            hop += extra.get(i, 0.0)
+            while True:
+                target = (here[0] + hop * way[0], here[1] + hop * way[1])
+                clash = put(target)
+                if not clash:
+                    break
+                hop += FOLD_STEP_MM
+                if hop > 30.0:
+                    return None
+            segments.append((here, target))
+            at[i] = (target, way)
+            if r.get("beside"):
+                # A tap beside the line: the line runs on from where it was, and the tap's stub isn't part of it.
+                segments.pop()
+                done.extend(r["units"])
+                continue
+            here = (out[0] + moved[0], out[1] + moved[1])
+            if r["in"] != r["out"]:
+                segments.append((target, here))
+            heading = new
+            done.extend(r["units"])
+        segments.append((here, finish))
+        # A tap beside the line hangs off the next part's input pad, as lna915's released board hangs L2 off P1.3: its stub then
+        # joins the line where a pad already is, which adds nothing to the hop's path over its floor. Where it would touch something
+        # there, it slides back along the line toward where it was placed.
+        for i, r in enumerate(records):
+            if not r.get("beside"):
+                continue
+            j = next((k for k in range(i + 1, n) if not records[k].get("beside")), None)
+            goal = at[j][0] if j is not None else finish
+            point, way = at[i]
+            reach = (goal[0] - point[0]) * way[0] + (goal[1] - point[1]) * way[1]
+            others = [fp for fp in done if fp not in r["units"]]
+            spot = point
+            for k in range(int(max(reach, 0.0) / FOLD_STEP_MM) + 1):
+                d = reach - k * FOLD_STEP_MM
+                try_at = (point[0] + d * way[0], point[1] + d * way[1])
+                _shift(r["units"], try_at[0] - spot[0], try_at[1] - spot[1])
+                spot = try_at
+                if not (_hit(r["main"], others, gap) or any(_hit(u, others, 0.1) for u in r["units"] if u is not r["main"])):
+                    break
+            else:
+                _shift(r["units"], point[0] - spot[0], point[1] - spot[1])
+        return cross(finish) - cross(here), along(finish) - along(here), segments, done
+
+    sides = [side] if side in (1, -1) else [-1, 1]
+    best = None
+    for _score, turns in choices[:FOLD_TRIES]:
+        for sign in sides:
+            extra = {}
+            for _ in range(6):
+                got = attempt(turns, sign, extra)
+                if got is None:
+                    break
+                miss, left, segments, done = got
+                if abs(miss) < 0.01:
+                    # The last hop runs straight into the return port, and its part mustn't touch the port.
+                    if left >= 0.3 and not _hit(records[-1]["main"], [port], gap):
+                        length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in segments)
+                        score = (*(judge(done) if judge else (0, 0.0)), round(length, 2))
+                        if best is None or score < best[0]:
+                            best = (score, turns, sign, dict(extra))
+                    break
+                # Lengthen the across leg that falls short: the first if the row comes back past the port's line, else the second.
+                # The hop that grows is a straight one inside that leg, into a part on the line, so that it stays straight and the
+                # line grows with it; a leg with no such hop can't be evened.
+                a, b = (turns[0], turns[1]) if miss * sign > 0 else (turns[2], turns[3])
+                grow = next((k for k in range(a + 1, b) if not records[k].get("beside")), None)
+                if grow is None:
+                    break
+                extra[grow] = extra.get(grow, 0.0) + abs(miss)
+    if best is None:
+        restore()
+        return None
+    # The best fold, placed again.
+    return attempt(best[1], best[2], best[3])[2]
 
 
 def _extent(group, axis):
@@ -633,8 +934,9 @@ def _line_bands(boxes, lines, band, axis, x0, y0, x1, y1):
     return out
 
 
-def _seat_channel_parts(fps, row, refs, spec, attach, walk, lines=None):
-    """Put a channel's own support parts in and beside its row, keeping off the RF line and the bias stacks."""
+def _seat_channel_parts(fps, row, refs, spec, attach, walk, lines=None, folded=None):
+    """Put a channel's own support parts in and beside its row, keeping off the RF line and the bias stacks. A folded row's line
+    is its segments, each kept clear by the band."""
     layout, pins = spec["layout"], spec["pins"]
     axis, line = layout["axis"], float(layout["line"])
     boxes = [_box_mm(fp) for fp in row]
@@ -643,7 +945,9 @@ def _seat_channel_parts(fps, row, refs, spec, attach, walk, lines=None):
     margin = 12.0
     # The RF line and everything between a stack and the line stay clear, for the line itself and for its via fence.
     band = float(layout.get("rf_keepout_mm", 1.2))
-    if lines and len(set(lines)) > 1:
+    if folded:
+        obstacles = [(min(a[0], b[0]) - band, min(a[1], b[1]) - band, max(a[0], b[0]) + band, max(a[1], b[1]) + band) for a, b in folded]
+    elif lines and len(set(lines)) > 1:
         inline = [_box_mm(fps[w[0]]) for w in walk]
         obstacles = _line_bands(inline, lines, band, axis, x0, y0, x1, y1)
     else:
@@ -654,6 +958,10 @@ def _seat_channel_parts(fps, row, refs, spec, attach, walk, lines=None):
     for walk_row, at in zip(walk, lines or [line] * len(walk)):
         for item in attach.get(walk_row[0], []):
             b = _box_mm(fps[item["ref"]], 0.4)
+            if folded:
+                # A folded row's stacks don't rise from one line, so each keeps clear only of its own box.
+                obstacles.append(b)
+                continue
             obstacles.append((b[0], min(b[1], at), b[2], max(b[3], at)) if axis == "x" else (min(b[0], at), b[1], max(b[2], at), b[3]))
     net_pads = {}
 
@@ -720,10 +1028,23 @@ def _place_rows(fps, layout, rows, attach, spec=None):
         box = _courtyard(first, 0).BBox()
         low = pcbnew.ToMM(box.GetTop() if layout["axis"] == "y" else box.GetLeft())
         lines = _row_lines(fps, walk, attach, layout["line"], layout["axis"], float(layout.get("gap_mm", 0.1)))
-        row = _solve_row(fps, {**layout, "walk": walk, "attach": attach, "start": layout.get("start", 0.9 - low), "lines": lines})
+        folded = []
+        hops = {"chain": spec["chain"], "pins": spec["pins"], "width": float(spec.get("rf_line_width_mm") or 0.3),
+                "net_width": spec.get("net_width") or {}} if spec else None
+        row = _solve_row(fps, {**layout, "walk": walk, "attach": attach, "start": layout.get("start", 0.9 - low), "lines": lines,
+                               "hops": hops}, folded)
+        if folded:
+            # A fold's legs can reach behind its connector, which the row's start is set from: move the row along so that nothing
+            # sits before where its first part's courtyard begins, as it would in a straight row.
+            begin = _extent(row, "y" if layout["axis"] == "x" else "x")[0]
+            behind = (0.9 if "start" not in layout else begin) - begin
+            if behind > 0:
+                _shift(row, behind, 0) if layout["axis"] == "x" else _shift(row, 0, behind)
+                folded[:] = [((a[0] + behind, a[1]), (b[0] + behind, b[1])) if layout["axis"] == "x" else
+                             ((a[0], a[1] + behind), (b[0], b[1] + behind)) for a, b in folded]
         if by_row.get(index):
             # A part that finds no room goes to the shelf with the shared ones rather than failing the board.
-            row += _seat_channel_parts(fps, row, by_row[index], spec, attach, walk, lines)[0]
+            row += _seat_channel_parts(fps, row, by_row[index], spec, attach, walk, lines, folded)[0]
         across, stack = ("y", "x") if layout["axis"] == "x" else ("x", "y")
         if index == 0:
             home, first_top = _extent(row, across)[0], _extent(row, stack)[0]
@@ -866,7 +1187,20 @@ def build_board(seed, spec_path, dst):
         return rows, placed, (min(pcbnew.ToMM(b.GetLeft()) for b in boxes), max(pcbnew.ToMM(b.GetRight()) for b in boxes),
                               min(pcbnew.ToMM(b.GetTop()) for b in boxes), max(pcbnew.ToMM(b.GetBottom()) for b in boxes))
 
-    rows, placed, span = place(False)
+    try:
+        rows, placed, span = place(False)
+    except NoFold as refused:
+        # A row between a loop-through part's ports that won't fold with its taps on the line gets one more try with them beside it,
+        # where they take no length along the row. Taps beside the line measured worse on gain_block_demo, so that's never the first
+        # choice, and the build says which it moved.
+        spec["fold_taps"] = True
+        spec["taps_beside"] = {}
+        try:
+            rows, placed, span = place(False)
+        except NoFold:
+            raise SystemExit(str(refused.code) + ", even with its taps beside the line") from None
+        if not spec["taps_beside"]:
+            raise SystemExit(str(refused.code)) from None
     squared = []
     if not fits(span, spec["outline"]):
         # A part turned to an odd angle to put two corner pads on the line is longer along the row than it is square. Where the row
@@ -911,7 +1245,7 @@ def build_board(seed, spec_path, dst):
         _pour(board, ground, layer, inset, inset, w - inset, h - inset, layout.get("pour_clearance_mm", 0.3))
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     pcbnew.SaveBoard(dst, board)
-    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
+    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "taps_beside": spec.get("taps_beside") or {}, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
                       "outline_mm": [w, h], "positions": {r: [round(pcbnew.ToMM(f.GetPosition().x), 3),
                                                               round(pcbnew.ToMM(f.GetPosition().y), 3),
                                                               f.GetOrientationDegrees()] for r, f in fps.items()}}))

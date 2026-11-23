@@ -406,4 +406,18 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
     lines = [x for x in r.stdout.splitlines() if x.startswith("{")]
     if r.returncode != 0 or not lines:
         raise _placement_failure(r.stdout, r.stderr)
-    return {**json.loads(lines[-1]), "stand_in_footprints": standing_in}
+    result = json.loads(lines[-1])
+    moved = result.get("taps_beside") or {}
+    if moved:
+        # The placer set these taps beside the line to fold a row that wouldn't fit otherwise. edaloop.yaml says so, so that the
+        # rf_layout check measures them against what was built, and the build's caller hears it.
+        project = yaml.safe_load((out / "edaloop.yaml").read_text())
+        given = (project.get("rf_layout") or {}).get("tap_stub_mm")
+        stubs = {**({} if given is None else (given if isinstance(given, dict) else {}))}
+        if not isinstance(given, (int, float)):
+            stubs.update(moved)
+            project.setdefault("rf_layout", {})["tap_stub_mm"] = stubs
+            (out / "edaloop.yaml").write_text(yaml.safe_dump(project, sort_keys=False, width=120))
+        print(f"  build: the RF path only fits folded between its connector's ports with {len(moved)} tap(s) beside the line "
+              f"({', '.join(sorted(moved))}), which measured worse than on it on gain_block_demo", file=sys.stderr)
+    return {**result, "stand_in_footprints": standing_in}

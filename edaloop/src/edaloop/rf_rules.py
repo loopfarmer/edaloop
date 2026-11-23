@@ -37,6 +37,7 @@ DEFAULTS = {"fence_band_mm": 1.5, "fence_line_mm": 0.58, "coverage_warn": 1.0, "
             # An RF connector's ground pads: "fill" places as many vias as fit, or give a number. Fewer than the minimum is reported.
             "connector_ground_vias": "fill", "connector_ground_min_vias": 2,
             # A number puts a shunt tap's RF pad beside the line, this far from the line's edge to the pad's edge, on a stub of the line.
+            # {REF: mm} does it for the taps named only, as `describe` writes for a board with some taps beside the line and some on it.
             # 0.1 mm is a common fabricator's minimum solder-mask web, which keeps the land's opening off the line: an assumption, so check
             # yours. Off by default: on gain_block_demo it lowered the choke hops' return loss from 28.7 to 25.0 dB in em_hops, since the
             # whole land then loads the line, where on it the line's own copper is part of the land. See docs/rf-layout-rules.md.
@@ -357,9 +358,10 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
             if shunt and line_through_land(p, tracks, "F.Cu" if p.get("front", True) else "B.Cu"):
                 through_land.append(name)
                 # A measurement either way. Only a board that was asked for taps beside the line and didn't get one is reported.
-                if c["tap_stub_mm"] is not None:
+                asked = c["tap_stub_mm"].get(p["ref"]) if isinstance(c["tap_stub_mm"], dict) else c["tap_stub_mm"]
+                if asked is not None:
                     findings.append((f"rf_layout:tap_land:{name}", f"{net} runs through the land of {name}, though rf_layout.tap_stub_mm asks for "
-                                     f"the pad beside the line, {c['tap_stub_mm']} mm from its edge", "warning"))
+                                     f"the pad beside the line, {asked} mm from its edge", "warning"))
             if p["ref"].startswith("L") and len(by_ref[p["ref"]]) == 2:
                 cold = next(q for q in by_ref[p["ref"]] if q is not p)
                 caps = []

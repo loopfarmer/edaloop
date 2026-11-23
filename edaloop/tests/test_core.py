@@ -1103,6 +1103,104 @@ def test_a_row_that_returns_to_its_first_part_is_placed_between_its_ports(tmp_pa
         boardgen.build(_kit_bench(tmp_path / "short", 5.0), tmp_path / "c", [tmp_path / "short"])
 
 
+def _fold_bench(tmp_path, apart, taps=()):
+    """Six 0603 capacitors in series between the two ports of a two-SMA kit `apart` mm apart, each `taps` part a choke to ground on
+    the second net onward. About 21 mm of row, or 25 with two taps, straight."""
+    import yaml
+
+    from edaloop import testbench
+    b = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    fp = b["layout"]["footprints"]
+    refs = [f"C{i}" for i in range(1, 7)]
+    pins = ["P1.3"] + [x for r in refs for x in (r + ".1", r + ".2")] + ["P1.1"]
+    nets = {f"N{i}": [pins[2 * i], pins[2 * i + 1]] for i in range(7)}
+    parts = {"P1": {"value": "SMA kit"}, **{r: {"value": "100pF"} for r in refs}}
+    footprints = {"P1": "kit:KIT", **{r: fp["C1"] for r in refs}}
+    ground = ["P1.2", "P1.4"]
+    for k, tap in enumerate(taps):
+        parts[tap] = {"value": "1nH"}
+        footprints[tap] = fp["L1"]
+        nets[f"N{k + 2}"].append(tap + ".1")
+        ground.append(tap + ".2")
+    nets["GND"] = ground
+    b.update({"name": "kit", "parts": parts, "nets": nets, "chain": [[f"N{i}", pins[2 * i], pins[2 * i + 1]] for i in range(7)],
+              "project": {**b["project"], "rails": []},
+              "spice": {"models": {}, "bench": {"name": "bias", "stimulus": ["Vcable N6 0 DC 5"], "measure": [".control", "op", "quit", ".endc"]},
+                        "expect": {}}})
+    b["layout"]["footprints"] = footprints
+    b["outline_mm"] = [60, 40]
+    for k in ("stages", "band_expect"):
+        b.pop(k, None)
+    _kit(tmp_path / "kit.pretty", apart)
+    (tmp_path / "kit.yaml").write_text(yaml.safe_dump(b, sort_keys=False))
+    return tmp_path / "kit.yaml"
+
+
+def test_a_row_too_long_for_its_ports_folds_into_a_u(tmp_path, monkeypatch):
+    """21 mm of row between ports 12 mm apart: the row folds, turning only at capacitors that stand across it, so no hop bends and the
+    critic finds no hop over. Between ports 10 mm apart no fold fits, and the refusal says so."""
+    import yaml
+
+    from edaloop import boardgen
+    from edaloop.scripts.kicad_pcb import Board as GeometryBoard
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda netlist, bench: [])
+    built = boardgen.build(_fold_bench(tmp_path, 12.0), tmp_path / "b", [tmp_path])
+    assert built["taps_beside"] == {}
+    board = GeometryBoard(str(tmp_path / "b" / "kit.kicad_pcb"))
+    xy = {str(p).split("@")[0]: tuple(float(v) for v in str(p).split("@(")[1].rstrip(")").split(",")) for p in board.pads}
+    lo, hi = xy["P1.3"][0], xy["P1.1"][0]
+    assert hi - lo == pytest.approx(12.0, abs=0.01)
+    assert all(lo < xy[f"C{i}.{n}"][0] < hi for i in range(1, 7) for n in (1, 2))
+    # Folded: some capacitors stand across the row, and the row leaves the ports' line.
+    assert any(abs(xy[f"C{i}.1"][0] - xy[f"C{i}.2"][0]) < 0.01 for i in range(1, 7))
+    assert max(abs(xy[f"C{i}.1"][1] - xy["P1.3"][1]) for i in range(1, 7)) > 2.0
+    critique = checks.placement_critique(Project(tmp_path / "b"))
+    assert critique.metrics["rf_hops_over"] == 0, critique.findings
+    assert yaml.safe_load((tmp_path / "b" / "edaloop.yaml").read_text()).get("rf_layout", {}).get("tap_stub_mm") is None
+    with pytest.raises(boardgen.BuildError, match="10.00 mm apart.*no fold of it into a U between the ports fits either"):
+        boardgen.build(_fold_bench(tmp_path / "short", 10.0), tmp_path / "c", [tmp_path / "short"])
+
+
+def test_a_fold_sets_taps_beside_the_line_only_when_it_needs_to(tmp_path, monkeypatch):
+    """Two chokes on the line make the row 25 mm, too long to fold between ports 12 mm apart. The build tries again with them beside
+    the line, where they take no length, and folds; it says which it moved, and edaloop.yaml records them for the rf_layout check."""
+    import yaml
+
+    from edaloop import boardgen
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda netlist, bench: [])
+    built = boardgen.build(_fold_bench(tmp_path, 12.0, ("L1", "L2")), tmp_path / "b", [tmp_path])
+    assert sorted(built["taps_beside"]) == ["L1", "L2"] and all(v >= 0.1 for v in built["taps_beside"].values())
+    stubs = yaml.safe_load((tmp_path / "b" / "edaloop.yaml").read_text())["rf_layout"]["tap_stub_mm"]
+    assert stubs == built["taps_beside"]
+    critique = checks.placement_critique(Project(tmp_path / "b"))
+    assert critique.metrics["rf_hops_over"] == 0, critique.findings
+
+
+def test_tap_stub_mm_can_name_the_taps_it_sets_beside_the_line(tmp_path):
+    """rf_layout.tap_stub_mm as {REF: mm}: the chokes named sit beside the line, and the rest stay on it."""
+    import yaml
+
+    from edaloop import boardgen, ground, testbench
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    bench["project"]["rf_layout"] = {"tap_stub_mm": {"L1": 0.1}}
+    described = tmp_path / "gain_block_demo.yaml"
+    described.write_text(yaml.safe_dump(bench, sort_keys=False))
+    built = boardgen.build(described, tmp_path / "board", [])
+    assert built["taps_beside"] == {}
+    at = {f"{p['ref']}.{p['pad']}": p for p in ground._facts(tmp_path / "board" / "gain_block_demo.kicad_pcb", tmp_path)["pads"]}
+    pad = at["L1.1"]
+    edge = pad["y"] + (pad["h"] if pad["rot"] % 180 == 0 else pad["w"]) / 2
+    assert 12.0 - 0.18 - edge == pytest.approx(0.1, abs=0.002)
+    for pin in ("L2.1", "L3.1"):
+        assert at[pin]["y"] == pytest.approx(12.0, abs=0.002), pin
+
+
 def test_exported_footprints_get_a_courtyard_per_group_of_pads_only_where_the_board_shows_the_gap_is_free(tmp_path):
     """export_footprints adds a courtyard to a footprint that has none. A two-SMA kit with the amplifier between its ends gets a box
     round each end; the same kit with nothing between them gets one box round it all, as an IC with a row of pins each side does."""
