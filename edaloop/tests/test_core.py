@@ -1165,6 +1165,42 @@ def test_describe_finds_the_rf_path_and_leaves_out_the_taps(tmp_path):
     assert d["project"]["rails"][0]["loads"] == {"R1.1": describe.NEEDED}
 
 
+def _loop_through(tmp_path):
+    """An in-line amplifier whose input and output SMAs are one footprint, P1: the path leaves and returns through it."""
+    from edaloop import describe
+    parts = {"P1": "SMA-KIT-1.5MF", "C1": "100pF", "U1": "LNA", "C2": "100pF", "L1": "39nH"}
+    nets = {"IN": ["P1.3", "C1.1", "L1.1"], "A": ["C1.2", "U1.1"], "B": ["U1.3", "C2.1"], "OUT": ["C2.2", "P1.1"],
+            "VCC": ["L1.2", "U1.4"], "GND": ["P1.2", "P1.4", "U1.2"]}
+    return describe.describe(_netlist(tmp_path, nets, parts), "x", [902, 928])
+
+
+def test_a_part_the_path_leaves_and_returns_through_is_drawn_once(tmp_path):
+    from edaloop import schematic as drawing
+    bench = _loop_through(tmp_path)
+    text = drawing.schematic(bench, "x")
+    assert text.count('(property "Reference" "P1"') == 1
+    # Channels split where the path stops being continuous, whatever the connectors are called.
+    rows = [["A", "P1.1", "C1.1"], ["B", "C1.2", "P2.1"], ["C", "P3.1", "C2.1"], ["D", "C2.2", "P4.1"]]
+    assert [len(c) for c in drawing._channels(rows)] == [2, 2]
+
+
+def test_a_loop_through_schematic_exports_the_described_netlist(tmp_path):
+    from edaloop import schematic as drawing
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])):
+        pytest.skip("needs kicad-cli")
+    bench = _loop_through(tmp_path)
+    sheets = drawing.project_sheets(bench, "x")
+    for name, text in sheets["files"].items():
+        (tmp_path / name).write_text(text)
+    (tmp_path / "edaloop.kicad_sym").write_text(sheets["library"])
+    (tmp_path / "sym-lib-table").write_text('(sym_lib_table\n  (version 7)\n  (lib (name "edaloop")(type "KiCad")'
+                                            '(uri "${KIPRJMOD}/edaloop.kicad_sym")(options "")(descr ""))\n)\n')
+    r = toolchain.run([toolchain.paths()["kicad_cli"], "sch", "export", "netlist", "--format", "kicadxml", "-o", tmp_path / "n2.xml",
+                       tmp_path / "x.kicad_sch"], timeout=120)
+    assert r.returncode == 0
+    assert drawing.check_netlist(tmp_path / "n2.xml", bench) == []
+
+
 def test_describe_follows_a_path_between_two_ports_of_one_footprint(tmp_path):
     from edaloop import describe
     # An in-line amplifier: one footprint holds the plug at one end and the jack at the other, so its two signal pins are both RF ports.
