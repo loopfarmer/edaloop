@@ -833,7 +833,8 @@ def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judg
         segments.append((here, finish))
         # A tap beside the line hangs off the next part's input pad, as lna915's released board hangs L2 off P1.3: its stub then
         # joins the line where a pad already is, which adds nothing to the hop's path over its floor. Where it would touch something
-        # there, it slides back along the line toward where it was placed.
+        # there, it tries the other side of the line at that pad, turned about the line with its stack, and only then slides back
+        # along the line toward where it was placed.
         for i, r in enumerate(records):
             if not r.get("beside"):
                 continue
@@ -842,15 +843,24 @@ def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judg
             point, way = at[i]
             reach = (goal[0] - point[0]) * way[0] + (goal[1] - point[1]) * way[1]
             others = [fp for fp in done if fp not in r["units"]]
-            spot = point
-            for k in range(int(max(reach, 0.0) / FOLD_STEP_MM) + 1):
-                d = reach - k * FOLD_STEP_MM
+            spot, flipped = point, False
+
+            def flip(about, units=r["units"]):
+                for fp in units:
+                    fp.Rotate(pcbnew.VECTOR2I(pcbnew.FromMM(about[0]), pcbnew.FromMM(about[1])), pcbnew.EDA_ANGLE(180.0, pcbnew.DEGREES_T))
+            tries = [(reach, False), (reach, True)] + [(reach - k * FOLD_STEP_MM, False) for k in range(1, int(max(reach, 0.0) / FOLD_STEP_MM) + 1)]
+            for d, other_side in tries:
                 try_at = (point[0] + d * way[0], point[1] + d * way[1])
                 _shift(r["units"], try_at[0] - spot[0], try_at[1] - spot[1])
                 spot = try_at
+                if other_side != flipped:
+                    flip(spot)
+                    flipped = other_side
                 if not (_hit(r["main"], others, gap) or any(_hit(u, others, 0.1) for u in r["units"] if u is not r["main"])):
                     break
             else:
+                if flipped:
+                    flip(spot)
                 _shift(r["units"], point[0] - spot[0], point[1] - spot[1])
         return cross(finish) - cross(here), along(finish) - along(here), segments, done
 
@@ -1034,14 +1044,18 @@ def _place_rows(fps, layout, rows, attach, spec=None):
         row = _solve_row(fps, {**layout, "walk": walk, "attach": attach, "start": layout.get("start", 0.9 - low), "lines": lines,
                                "hops": hops}, folded)
         if folded:
-            # A fold's legs can reach behind its connector, which the row's start is set from: move the row along so that nothing
-            # sits before where its first part's courtyard begins, as it would in a straight row.
-            begin = _extent(row, "y" if layout["axis"] == "x" else "x")[0]
-            behind = (0.9 if "start" not in layout else begin) - begin
-            if behind > 0:
-                _shift(row, behind, 0) if layout["axis"] == "x" else _shift(row, 0, behind)
-                folded[:] = [((a[0] + behind, a[1]), (b[0] + behind, b[1])) if layout["axis"] == "x" else
-                             ((a[0], a[1] + behind), (b[0], b[1] + behind)) for a, b in folded]
+            # A fold's legs can reach behind its connector, which the row's start is set from, and across the board past an edge
+            # its line never comes near. Move the row along so that nothing sits before where its first part's courtyard begins, as
+            # it would in a straight row, and across so that nothing sits closer than that to the board's edge. A folded row has no
+            # one line for layout.line to set.
+            along_at = _extent(row, "y" if layout["axis"] == "x" else "x")[0]
+            across_at = _extent(row, "x" if layout["axis"] == "x" else "y")[0]
+            behind = (0.9 if "start" not in layout else along_at) - along_at
+            over = 0.9 - across_at
+            dx, dy = (max(behind, 0.0), max(over, 0.0)) if layout["axis"] == "x" else (max(over, 0.0), max(behind, 0.0))
+            if dx or dy:
+                _shift(row, dx, dy)
+                folded[:] = [((a[0] + dx, a[1] + dy), (b[0] + dx, b[1] + dy)) for a, b in folded]
         if by_row.get(index):
             # A part that finds no room goes to the shelf with the shared ones rather than failing the board.
             row += _seat_channel_parts(fps, row, by_row[index], spec, attach, walk, lines, folded)[0]

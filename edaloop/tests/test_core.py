@@ -1103,9 +1103,9 @@ def test_a_row_that_returns_to_its_first_part_is_placed_between_its_ports(tmp_pa
         boardgen.build(_kit_bench(tmp_path / "short", 5.0), tmp_path / "c", [tmp_path / "short"])
 
 
-def _fold_bench(tmp_path, apart, taps=()):
+def _fold_bench(tmp_path, apart, taps=(), on=None):
     """Six 0603 capacitors in series between the two ports of a two-SMA kit `apart` mm apart, each `taps` part a choke to ground on
-    the second net onward. About 21 mm of row, or 25 with two taps, straight."""
+    the second net onward, or on the nets `on` names. About 21 mm of row, or 25 with two taps, straight."""
     import yaml
 
     from edaloop import testbench
@@ -1120,7 +1120,7 @@ def _fold_bench(tmp_path, apart, taps=()):
     for k, tap in enumerate(taps):
         parts[tap] = {"value": "1nH"}
         footprints[tap] = fp["L1"]
-        nets[f"N{k + 2}"].append(tap + ".1")
+        nets[on[k] if on else f"N{k + 2}"].append(tap + ".1")
         ground.append(tap + ".2")
     nets["GND"] = ground
     b.update({"name": "kit", "parts": parts, "nets": nets, "chain": [[f"N{i}", pins[2 * i], pins[2 * i + 1]] for i in range(7)],
@@ -1176,6 +1176,21 @@ def test_a_fold_sets_taps_beside_the_line_only_when_it_needs_to(tmp_path, monkey
     assert sorted(built["taps_beside"]) == ["L1", "L2"] and all(v >= 0.1 for v in built["taps_beside"].values())
     stubs = yaml.safe_load((tmp_path / "b" / "edaloop.yaml").read_text())["rf_layout"]["tap_stub_mm"]
     assert stubs == built["taps_beside"]
+    critique = checks.placement_critique(Project(tmp_path / "b"))
+    assert critique.metrics["rf_hops_over"] == 0, critique.findings
+
+
+def test_a_folded_row_moves_across_to_stay_on_the_board(tmp_path, monkeypatch):
+    """Chokes on the first, second and fifth hops: the best fold runs its legs up past the board's top edge, which its line, at
+    layout.line, never comes near. The row moves down onto the board instead of failing the outline."""
+    from edaloop import boardgen
+    from edaloop.scripts.kicad_pcb import Board as GeometryBoard
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda netlist, bench: [])
+    boardgen.build(_fold_bench(tmp_path, 12.0, ("L1", "L2", "L3"), ("N1", "N2", "N5")), tmp_path / "b", [tmp_path])
+    board = GeometryBoard(str(tmp_path / "b" / "kit.kicad_pcb"))
+    assert min(p.y - p.hy for p in board.pads) > 0.5
     critique = checks.placement_critique(Project(tmp_path / "b"))
     assert critique.metrics["rf_hops_over"] == 0, critique.findings
 
