@@ -332,6 +332,16 @@ def _row_lines(fps, walk, attach, line, axis, gap=0.5):
     return [round(float(line) + o - base, 4) for o in offsets]
 
 
+def _row_end(chain, index):
+    """The part and pin where the row that starts at chain[index] ends: its last hop, the one no further hop leaves from."""
+    start = chain[index][1]
+    for _net, _entry, leave in chain[index:]:
+        ref, pin = leave.split(".")
+        if not any(c[1].split(".")[0] == ref for c in chain if c[1] != start):
+            return ref, pin
+    return None, None
+
+
 def _derive_layout(fps, spec, square=False, choice=0):
     """Rotations and bias positions from the netlist, so that a new board needs only its parts and nets.
 
@@ -445,12 +455,20 @@ def _derive_layout(fps, spec, square=False, choice=0):
                 prev_fp, prev_pad, prev_rot = fps[r], p, rot
 
     rows = []
-    for net, entry, leave in chain:
+    for index, (net, entry, leave) in enumerate(chain):
         ref = entry.split(".")[0]
         if not walk or walk[-1][3] is None:
             walk = []
             rows.append(walk)
-            walk.append([ref, _rot_for(fps[ref], None, entry.split(".")[1], travel), None, entry.split(".")[1]])
+            back = _row_end(chain, index)
+            if back[0] == ref and back[1] != entry.split(".")[1]:
+                # A row that comes back to the part it left, through another port, as from one SMA of a two-SMA kit to the
+                # other: the part faces its return port along the row, so that the row runs between the two.
+                rot = _rot_for(fps[ref], entry.split(".")[1], back[1], travel)
+            else:
+                rot = _rot_for(fps[ref], None, entry.split(".")[1], travel)
+            walk.append([ref, rot, None, entry.split(".")[1]])
+            walk_start = entry
         for ref, (tap_net, pin) in taps.items():
             if tap_net != net:
                 continue
@@ -471,7 +489,8 @@ def _derive_layout(fps, spec, square=False, choice=0):
                 rise(group, ref + "." + far, up, [abs((fx - px) * up[0] + (fy - py) * up[1]) + off])
                 attach[ref] = group
         ref, pin = leave.split(".")
-        following = next((c for c in chain if c[1].split(".")[0] == ref), None)
+        # Not the hop this row started with: a row that returns to its first part ends there.
+        following = next((c for c in chain if c[1].split(".")[0] == ref and c[1] != walk_start), None)
         if following:
             out_pin = following[1].split(".")[1]
             rot = _rot_for(fps[ref], pin, out_pin, travel)
@@ -481,6 +500,8 @@ def _derive_layout(fps, spec, square=False, choice=0):
             side = _side_exit(fps[ref], rot, pin, out_pin, travel, (up, down), pins.get(ref) or {}, half)
             # [ref, rot, entry, leave, tap offset, side exit]: a part whose exit pad can't leave along the row leaves across it.
             walk.append([ref, rot, pin, out_pin, [0.0, 0.0], side] if side else [ref, rot, pin, out_pin])
+        elif ref == walk[0][0]:
+            walk.append([ref, walk[0][1], pin, None])
         else:
             walk.append([ref, _rot_for(fps[ref], None, pin, (-travel[0], -travel[1])), pin, None])
     # A person's rotation for a part wins over the derived one. A part whose RF pads sit on opposite corners, like a TT1224
@@ -507,8 +528,23 @@ def _solve_row(fps, layout):
     def point(s):
         return (line, s) if axis else (s, line)
 
-    for row, line in zip(layout["walk"], lines):
+    walk = layout["walk"]
+    first = walk[0][0]
+    short, away = None, []
+    limit = origin = span = 0.0
+    last_ref = last_pad = None
+    # A row that returns to its first part, through another port, is placed between the two ports and ends at the second.
+    back = str(walk[-1][2]) if len(walk) > 1 and walk[-1][0] == first and walk[-1][3] is None else None
+    for row, line in zip(walk, lines):
         ref, rot, entry, leave = row[:4]
+        if back is not None and ref == first and previous is not None:
+            if short:
+                raise SystemExit("the row doesn't fit between %s's ports: %s.%s and %s.%s are %.2f mm apart, but the row from %s.%s to "
+                                 "%s.%s runs %.2f mm along the line, with %s the first part past %s.%s. The placer lays a row out "
+                                 "along one line, and can't fold it to fit" % (
+                                     first, first, walk[0][3], first, back, span, first, walk[0][3], last_ref, last_pad,
+                                     abs(previous - origin), short, first, back))
+            break
         # A tap's pad sits off the line, beside it, by this much.
         ox, oy = row[4] if len(row) > 4 else (0.0, 0.0)
         entry, leave = (str(entry) if entry is not None else None), (str(leave) if leave is not None else None)
@@ -528,17 +564,25 @@ def _solve_row(fps, layout):
                 at = point(s)
                 _at_pad(fp, rot, entry, at[0] + ox, at[1] + oy)
                 group = [_attach(fps, item) for item in groups.get(ref, [])]
-                clash = _hit(fp, inline, gap) or _hit(fp, [x for x in placed if x not in inline], 0.1)
+                clash = _hit(fp, [x for x in inline if x not in away], gap) or _hit(fp, [x for x in placed if x not in inline and x not in away], 0.1)
                 clash = clash or next((h for h in (_hit(g, placed + [fp] + [o for o in group if o is not g], 0.1)
                                                    for g in group) if h), None)
                 if not clash:
                     break
                 s += step
+                if back is not None and not short and s > limit:
+                    # Past the return port: carry on without it, to measure how long the row is.
+                    short, away, s = ref, [fps[first]], previous + 0.3
                 if s > start + 500:
                     raise SystemExit("no room for %s on the line: it keeps hitting %s" % (ref, clash))
+        if back is not None and previous is None:
+            limit = _pad_xy(fp, back)[axis]
+            origin = _pad_xy(fp, leave)[axis]
+            span = abs(limit - origin)
         placed += group + [fp]
         inline.append(fp)
         previous = _pad_xy(fp, leave)[axis] if leave else None
+        last_ref, last_pad = ref, leave
     return placed
 
 
@@ -1017,12 +1061,72 @@ def add_vias(src, spec, dst):
     print(json.dumps({"added": len(items)}))
 
 
+CLUSTER_MM = 2.0      # pads closer than this belong to one courtyard box
+
+
+def _pads_box(pads):
+    box = None
+    for pad in pads:
+        b = pad.GetBoundingBox()
+        if box is None:
+            box = b
+        else:
+            box.Merge(b)
+    return box
+
+
+def _pad_clusters(fp):
+    """A footprint's pads in groups, each pad within CLUSTER_MM of another in its group: the indices, in pad order."""
+    pads = list(fp.Pads())
+    gap = pcbnew.FromMM(CLUSTER_MM)
+    boxes = []
+    for pad in pads:
+        b = pad.GetBoundingBox()
+        b.Inflate(gap // 2)
+        boxes.append(b)
+    owner = list(range(len(pads)))
+
+    def find(i):
+        while owner[i] != i:
+            owner[i] = owner[owner[i]]
+            i = owner[i]
+        return i
+    for i in range(len(pads)):
+        for j in range(i + 1, len(pads)):
+            if boxes[i].Intersects(boxes[j]):
+                owner[find(i)] = find(j)
+    groups = {}
+    for i in range(len(pads)):
+        groups.setdefault(find(i), []).append(i)
+    return sorted(groups.values())
+
+
+def _parts_between(board, fp, groups):
+    """Whether the board puts another part's pad in the space between a footprint's groups of pads: inside the box round all of
+    them, but in none of the groups' own boxes. That's the board showing the space is free, as between the two SMAs of a
+    two-SMA kit with the amplifier between them. A footprint with nothing there, an IC with a row of pins each side, keeps one box."""
+    pads = list(fp.Pads())
+    whole = _pads_box(pads)
+    own = [_pads_box([pads[i] for i in group]) for group in groups]
+    for other in board.Footprints():
+        if other is fp or other.IsFlipped() != fp.IsFlipped():
+            continue
+        for pad in other.Pads():
+            q = pad.GetPosition()
+            if whole.Contains(q) and not any(b.Contains(q) for b in own):
+                return True
+    return False
+
+
 def export_footprints(src, pretty):
     """Each footprint a board uses, as a library, at rest, with a courtyard. A board from another tool often has few courtyards, and placement needs them."""
     board = pcbnew.LoadBoard(src)
+    if board is None:
+        raise SystemExit("KiCad couldn't read %s as a board" % src)
     os.makedirs(pretty, exist_ok=True)
     made = {}
     added = 0
+    split = []
     for fp in board.Footprints():
         name = str(fp.GetFPID().GetLibItemName())
         if name in made:
@@ -1036,26 +1140,27 @@ def export_footprints(src, pretty):
             pad.SetNetCode(0)
         copy.BuildCourtyardCaches()
         if copy.GetCourtyard(pcbnew.F_CrtYd).OutlineCount() == 0 and len(list(copy.Pads())):
-            box = None
-            for pad in copy.Pads():
-                b = pad.GetBoundingBox()
-                if box is None:
-                    box = b
-                else:
-                    box.Merge(b)
+            groups = _pad_clusters(fp)
+            if len(groups) > 1 and not _parts_between(board, fp, groups):
+                groups = [list(range(len(list(fp.Pads()))))]
+            pads = list(copy.Pads())
             m = pcbnew.FromMM(0.25)
-            rect = pcbnew.PCB_SHAPE(copy)
-            rect.SetShape(pcbnew.SHAPE_T_RECT)
-            rect.SetStart(pcbnew.VECTOR2I(box.GetLeft() - m, box.GetTop() - m))
-            rect.SetEnd(pcbnew.VECTOR2I(box.GetRight() + m, box.GetBottom() + m))
-            rect.SetLayer(pcbnew.F_CrtYd)
-            rect.SetWidth(pcbnew.FromMM(0.05))
-            copy.Add(rect)
+            for group in groups:
+                box = _pads_box([pads[i] for i in group])
+                rect = pcbnew.PCB_SHAPE(copy)
+                rect.SetShape(pcbnew.SHAPE_T_RECT)
+                rect.SetStart(pcbnew.VECTOR2I(box.GetLeft() - m, box.GetTop() - m))
+                rect.SetEnd(pcbnew.VECTOR2I(box.GetRight() + m, box.GetBottom() + m))
+                rect.SetLayer(pcbnew.F_CrtYd)
+                rect.SetWidth(pcbnew.FromMM(0.05))
+                copy.Add(rect)
             added += 1
+            if len(groups) > 1:
+                split.append(name)
         # Not pcbnew.FootprintSave: it picks its writer from what the folder already holds, and this one starts empty.
         pcbnew.PCB_IO_MGR.FindPlugin(pcbnew.PCB_IO_MGR.KICAD_SEXP).FootprintSave(pretty, copy)
         made[name] = True
-    print(json.dumps({"footprints": len(made), "courtyards_added": added}))
+    print(json.dumps({"footprints": len(made), "courtyards_added": added, "courtyards_split": split}))
 
 
 def remove_tracks(src, spec, dst):
