@@ -973,6 +973,8 @@ def add_vias(src, spec, dst):
 def export_footprints(src, pretty):
     """Each footprint a board uses, as a library, at rest, with a courtyard. A board from another tool often has few courtyards, and placement needs them."""
     board = pcbnew.LoadBoard(src)
+    if board is None:
+        raise SystemExit("KiCad couldn't read %s as a board" % src)
     os.makedirs(pretty, exist_ok=True)
     made = {}
     added = 0

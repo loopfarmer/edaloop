@@ -32,6 +32,8 @@ All of these go under `layout`, and all are optional except `footprints`.
 
 `footprints` names each part's footprint as `library:name`, where the library is a `.pretty` folder. The build looks in the `--footprints` folders, then edaloop's stand-ins, then KiCad's own libraries, and checks every part before it places any. A part with no footprint, a name with no library (as a board imported from EAGLE has), a library it can't find or a footprint its library doesn't have stops the build, with each part named. `--json` lists them under `detail.parts`.
 
+`edaloop describe` from a board catches this first. If any of the board's footprints wouldn't load, it copies every footprint the board uses into `<description>_footprints/imported.pretty`, beside the description, and names each part `imported:<name>`. The copies are the board's own, flattened to the top side at no rotation, and given a courtyard where the board had none. The description's first lines give the build command, with `--footprints <description>_footprints`. Copying needs KiCad's Python. Without it, the description keeps the board's names, and the result's `board_footprints.problem` says what's missing. A board whose footprints already load is left alone.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `axis` | `x` | The direction the RF line runs. |
