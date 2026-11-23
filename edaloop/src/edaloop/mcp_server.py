@@ -152,11 +152,14 @@ def describe_design(source_file: str, output_file: str, band_mhz: list[float], n
 
     `required` lists what the source can't say and a build refuses without. `assumed` lists defaults, such as the stackup, that a person should check.
 
-    What it may write: one new .yaml file, `output_file`, and nothing else. It must resolve, after symlinks
+    What it may write: one new .yaml file, `output_file`. It must resolve, after symlinks
     and `..`, inside the project folder this server was started for (EDALOOP_PROJECT, else its working
     directory); a relative path is taken from there. Its folder must already exist. It can't be edaloop.yaml,
     can't be inside .edaloop, and can't be a file that already exists: a description a person has filled in
-    is never overwritten, so write a new one under a new name.
+    is never overwritten, so write a new one under a new name. From a board whose footprints wouldn't load,
+    it also writes one new folder beside it, `<output name>_footprints`, holding copies of the board's
+    footprints. A folder of that name already there is never written into: the result's
+    `board_footprints.problem` says so.
     """
     import tempfile
 
@@ -170,7 +173,8 @@ def describe_design(source_file: str, output_file: str, band_mhz: list[float], n
         raise ToolError(f"refused: the folder for output_file {output_file!r} doesn't exist")
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            return described.describe_schematic(Path(source_file), name or Path(source_file).stem, list(band_mhz), out, Path(tmp))
+            return described.describe_schematic(Path(source_file), name or Path(source_file).stem, list(band_mhz), out, Path(tmp),
+                                                replace_footprints=False)
         except described.DescribeError as e:
             return {"written": False, "error": str(e)}
 

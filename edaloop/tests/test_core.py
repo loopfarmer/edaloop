@@ -582,6 +582,17 @@ def test_describe_without_kicad_says_the_footprints_still_need_copying(tmp_path,
     assert "imported:" not in (tmp_path / "d.yaml").read_text()
 
 
+def test_mcp_describe_design_never_writes_into_a_footprints_folder_already_there(confined):
+    proj, _ = confined
+    _describable_board(proj / "src.kicad_pcb")              # Lib:J1 and the rest don't load
+    (proj / "new_footprints").mkdir()
+    (proj / "new_footprints" / "mine.txt").write_text("a person's file")
+    before = _tree(proj / "new_footprints")
+    result = _mcp("describe_design", {"source_file": str(proj / "src.kicad_pcb"), "output_file": "new.yaml", "band_mhz": [900, 1500]})
+    assert result["board_footprints"]["copied"] is False and "new_footprints is already there" in result["board_footprints"]["problem"]
+    assert _tree(proj / "new_footprints") == before
+
+
 def test_describe_leaves_footprints_that_resolve_alone(tmp_path):
     import yaml
 

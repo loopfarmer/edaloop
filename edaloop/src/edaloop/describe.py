@@ -286,14 +286,19 @@ def imported_names(footprints: dict) -> dict:
     return {ref: f"{IMPORTED}:" + str(fp).split(":")[-1] for ref, fp in footprints.items()}
 
 
-def board_footprints(board: Path, description: dict, out: Path) -> dict | None:
+def board_footprints(board: Path, description: dict, out: Path, replace: bool = True) -> dict | None:
     """When the board names footprints the placer can't load, copy them from the board beside the description and
-    point the description at the copies. None when every footprint already resolves, and the description is unchanged."""
+    point the description at the copies. None when every footprint already resolves, and the description is unchanged.
+    With `replace` false, a folder already there is left alone and the footprints aren't copied."""
     from . import boardgen
     unresolved = boardgen.unresolved_footprints(description, [])
     if not unresolved:
         return None
     folder = Path(out).parent / f"{Path(out).stem}_footprints"
+    if not replace and (folder.exists() or folder.is_symlink()):
+        return {"unresolved": len(unresolved), "copied": False,
+                "problem": f"{len(unresolved)} parts name footprints the placer can't load, and {folder.name} is already there, "
+                           "so they weren't copied into it. Name another output file"}
     made = not folder.exists()
     try:
         lib = export_board_footprints(board, folder)
@@ -314,7 +319,7 @@ def board_footprints(board: Path, description: dict, out: Path) -> dict | None:
             "build": f"edaloop build {Path(out).name} -o board --footprints {rel}"}
 
 
-def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path) -> dict:
+def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path, replace_footprints: bool = True) -> dict:
     """Write the description from a schematic, through KiCad's netlist, or straight from a board's pads."""
     from .project import FILE
     if Path(out).name == FILE or Path(out).resolve().name == FILE:
@@ -329,7 +334,7 @@ def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: P
         if r.returncode != 0 or not netlist.exists():
             raise DescribeError(f"couldn't export a netlist: {r.stderr.strip()[-300:]}")
     description = describe(netlist, name, band_mhz, Path(schematic).name)
-    copied = board_footprints(Path(schematic), description, Path(out)) if Path(schematic).suffix == ".kicad_pcb" else None
+    copied = board_footprints(Path(schematic), description, Path(out), replace_footprints) if Path(schematic).suffix == ".kicad_pcb" else None
     head = "# Written by `edaloop describe`. Check the RF path, and supply anything marked REQUIRED.\n"
     if copied and copied["copied"]:
         head += (f"# Its footprints are copies from {Path(schematic).name}, in {Path(copied['library']).parent.name}/. "
