@@ -1195,6 +1195,19 @@ def test_a_folded_row_moves_across_to_stay_on_the_board(tmp_path, monkeypatch):
     assert critique.metrics["rf_hops_over"] == 0, critique.findings
 
 
+def test_taps_beside_a_folded_line_join_it_at_a_pad(tmp_path, monkeypatch):
+    """Chokes on the first three hops. Each stub is the shortest that clears the next part, rounded up: rounded down, the choke on
+    the first hop touched C2 by 0.005 mm, couldn't hang off C2's input pad, and stopped partway along the hop, 8% over its floor."""
+    from edaloop import boardgen
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda netlist, bench: [])
+    built = boardgen.build(_fold_bench(tmp_path, 12.0, ("L1", "L2", "L3"), ("N1", "N2", "N3")), tmp_path / "b", [tmp_path])
+    assert sorted(built["taps_beside"]) == ["L1", "L2", "L3"]
+    critique = checks.placement_critique(Project(tmp_path / "b"))
+    assert critique.metrics["rf_hops_over"] == 0, critique.findings
+
+
 def test_tap_stub_mm_can_name_the_taps_it_sets_beside_the_line(tmp_path):
     """rf_layout.tap_stub_mm as {REF: mm}: the chokes named sit beside the line, and the rest stay on it."""
     import yaml

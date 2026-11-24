@@ -497,6 +497,8 @@ def _derive_layout(fps, spec, square=False, choice=0):
                 # the tap's courtyard clear of its neighbours on the line, by the row's gap, so that it takes no length along the row.
                 # The tap goes on after the part before it, so only the part after it can sit beside it. That part's turn isn't known
                 # yet: a two-pad part lies along the row, and anything else may lie either way.
+                # It's rounded up to the 0.01 mm the stub is written in, never down: a stub 0.005 mm short leaves the tap's
+                # courtyard touching the next part's, and the fold then can't hang the tap off that part's pad.
                 back_to_line = (-side[0], -side[1])
                 # On the last hop of a row that returns to its first part, the part after is that part's return port, whose
                 # courtyard is the connector's: the part before is the neighbour then.
@@ -506,7 +508,7 @@ def _derive_layout(fps, spec, square=False, choice=0):
                 reach = (min(w, h) if len(list(nxt.Pads())) == 2 else max(w, h)) / 2
                 needed = (reach + float(layout.get("gap_mm", 0.1)) + _reach(fps[ref], rot, pin, back_to_line) - half_line
                           - _pad_reach(fps[ref], rot, pin, back_to_line))
-                mm = round(max(FOLD_TAP_STUB_MM, needed), 2)
+                mm = max(FOLD_TAP_STUB_MM, math.ceil(needed * 100 - 1e-6) / 100)
                 spec.setdefault("taps_beside", {})[ref] = mm
             off = tap_offset(half_line, mm, _pad_reach(fps[ref], rot, pin, (-side[0], -side[1]))) if far else 0.0
             walk.append([ref, rot, pin, pin, [round(side[0] * off, 4), round(side[1] * off, 4)]])
@@ -834,7 +836,7 @@ def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judg
         # A tap beside the line hangs off the next part's input pad, as lna915's released board hangs L2 off P1.3: its stub then
         # joins the line where a pad already is, which adds nothing to the hop's path over its floor. Where it would touch something
         # there, it tries the other side of the line at that pad, turned about the line with its stack, and only then slides back
-        # along the line toward where it was placed.
+        # along the line toward where it was placed, which may be short of the pad or past it.
         for i, r in enumerate(records):
             if not r.get("beside"):
                 continue
@@ -848,7 +850,8 @@ def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judg
             def flip(about, units=r["units"]):
                 for fp in units:
                     fp.Rotate(pcbnew.VECTOR2I(pcbnew.FromMM(about[0]), pcbnew.FromMM(about[1])), pcbnew.EDA_ANGLE(180.0, pcbnew.DEGREES_T))
-            tries = [(reach, False), (reach, True)] + [(reach - k * FOLD_STEP_MM, False) for k in range(1, int(max(reach, 0.0) / FOLD_STEP_MM) + 1)]
+            back = math.copysign(FOLD_STEP_MM, reach)
+            tries = [(reach, False), (reach, True)] + [(reach - k * back, False) for k in range(1, int(abs(reach) / FOLD_STEP_MM) + 1)]
             for d, other_side in tries:
                 try_at = (point[0] + d * way[0], point[1] + d * way[1])
                 _shift(r["units"], try_at[0] - spot[0], try_at[1] - spot[1])
