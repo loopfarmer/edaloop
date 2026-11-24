@@ -1208,6 +1208,24 @@ def test_taps_beside_a_folded_line_join_it_at_a_pad(tmp_path, monkeypatch):
     assert critique.metrics["rf_hops_over"] == 0, critique.findings
 
 
+def test_a_tap_beside_a_folded_line_tries_the_other_side_of_the_next_pad(tmp_path, monkeypatch):
+    """A choke on the third hop: on its own side of the line at C4's input pad it touches a part, so it turns to the other side
+    there and hangs straight off the pad. Without that try, it slid 2 mm back along the hop, short of the pad."""
+    from edaloop import boardgen
+    from edaloop.scripts.kicad_pcb import Board as GeometryBoard
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda netlist, bench: [])
+    built = boardgen.build(_fold_bench(tmp_path, 12.0, ("L1",), ("N3",)), tmp_path / "b", [tmp_path])
+    assert list(built["taps_beside"]) == ["L1"]
+    board = GeometryBoard(str(tmp_path / "b" / "kit.kicad_pcb"))
+    xy = {str(p).split("@")[0]: tuple(float(v) for v in str(p).split("@(")[1].rstrip(")").split(",")) for p in board.pads}
+    # The choke's pad is level with C4.1, its stub running straight across the line from the pad.
+    assert min(abs(xy["L1.1"][0] - xy["C4.1"][0]), abs(xy["L1.1"][1] - xy["C4.1"][1])) < 0.01, (xy["L1.1"], xy["C4.1"])
+    critique = checks.placement_critique(Project(tmp_path / "b"))
+    assert critique.metrics["rf_hops_over"] == 0, critique.findings
+
+
 def test_tap_stub_mm_can_name_the_taps_it_sets_beside_the_line(tmp_path):
     """rf_layout.tap_stub_mm as {REF: mm}: the chokes named sit beside the line, and the rest stay on it."""
     import yaml
