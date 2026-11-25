@@ -4500,3 +4500,56 @@ def test_strip_inner_pads_never_opens_a_net(tmp_path, locked):
     else:
         # Locked copper isn't moved, so the via keeps its pads, and says so.
         assert report["track_ends_centred"] == 0 and report["changed"] == 0 and report["kept_pads"] == [{"net": "N", "at": [10.0, 10.0]}]
+
+
+def _balanced_feed():
+    """Feed studs J1 into a 4:1 balun T1 with a GDT across the pair, a limiter LIM1 and an amplifier U1 out to J2."""
+    parts = {"J1": "300R studs", "GDT1": "GDT", "T1": "balun", "LIM1": "limiter", "U1": "LNA", "C1": "100pF", "J2": "N female"}
+    nets = {"P": ["J1.1", "GDT1.1", "T1.1"], "N": ["J1.2", "GDT1.2", "T1.2"], "BAL": ["T1.3", "LIM1.1"], "LIM": ["LIM1.2", "U1.1"],
+            "OUT": ["U1.2", "C1.1"], "COAX": ["C1.2", "J2.1"], "GND": ["GDT1.3", "T1.4", "LIM1.3", "U1.4", "J2.2"]}
+    return parts, nets
+
+
+def test_describe_takes_a_limiter_named_lim_for_a_signal_part_not_a_choke(tmp_path):
+    from edaloop import describe
+    parts, nets = _balanced_feed()
+    d = describe.describe(_netlist(tmp_path, nets, parts), "x", [470, 600])
+    assert [c[1].split(".")[0] for c in d["chain"]] == ["J1", "T1", "LIM1", "U1", "C1"]
+    assert describe._blocks_rf("L3", {"value": "100nH"}, {"1": "A", "2": "B"})
+    assert not describe._blocks_rf("LIM1", {"value": "limiter"}, {"1": "A", "2": "B", "3": "GND"})
+
+
+def test_describe_doesnt_route_the_path_through_a_part_across_a_balanced_pair():
+    from edaloop import describe
+    parts, nets = _balanced_feed()
+    chain = describe.find_chains({r: {"value": v} for r, v in parts.items()}, nets)[0]
+    assert "GDT1" not in {x.split(".")[0] for row in chain for x in row[1:]}
+    assert chain[0][1:] in (["J1.1", "T1.1"], ["J1.2", "T1.2"])
+
+
+def test_a_type_n_connector_is_an_rf_port_and_pairs_with_feed_studs(tmp_path):
+    from edaloop import describe
+    for word in ("N_Fem", "Type-N", "TypeN_50R", "N_BULKHEAD_44x86", "Amphenol_172100_N_Female"):
+        assert describe.RF_PORT.search(word), word
+    for word in ("PIN_JACK", "SMBJ15A", "NE555"):
+        assert not describe.RF_PORT.search(word), word
+    parts, nets = _balanced_feed()
+    notes = []
+    chains = describe.find_chains({r: {"value": v} for r, v in parts.items()}, nets, notes=notes)
+    # J2 alone says it's RF; the path still runs to the studs rather than stopping at the amplifier as at a radio.
+    assert {chains[0][0][1].split(".")[0], chains[0][-1][2].split(".")[0]} == {"J1", "J2"}
+    assert any("taking J1 as RF" in n for n in notes)
+
+
+def test_a_part_across_a_balanced_pair_is_a_tap_on_the_line(monkeypatch):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+    parts, nets = _balanced_feed()
+    chain = [["P", "J1.1", "T1.1"], ["BAL", "T1.3", "LIM1.1"], ["LIM", "LIM1.2", "U1.1"], ["OUT", "U1.2", "C1.1"], ["COAX", "C1.2", "J2.1"]]
+    legs = ops._pair_legs(nets, chain)
+    assert legs == {"N"}
+    assert ops._across_pair({"1": "P", "2": "N", "3": "GND"}, "1", legs)
+    # A rail is never a leg, even one that joins the same two parts as a hop.
+    rail = nets | {"V5": ["J1.3", "T1.5", "L9.1"]}
+    assert "V5" not in ops._pair_legs(rail, chain)
+    # A part with a second signal net that isn't the pair's other leg isn't across the pair.
+    assert not ops._across_pair({"1": "P", "2": "CTRL", "3": "GND"}, "1", legs)

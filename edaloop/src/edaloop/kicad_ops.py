@@ -21,6 +21,7 @@ channel_groups, which needs nothing but the standard library.
 import json
 import math
 import os
+import re
 import sys
 
 import channel_groups
@@ -82,6 +83,9 @@ def import_ses(src, ses, dst):
 
 
 # ---------------------------------------------------------------- placement
+
+_RAIL_NAME = re.compile(r"^(VDD|VCC|VBUS|V\+|\+?\d+V\d*|VIN|VBAT|V[0-9].*)", re.I)
+
 
 def _pose(fp, x, y, rot):
     fp.SetOrientationDegrees(rot)
@@ -356,6 +360,30 @@ def _row_end(chain, index):
     return None, None
 
 
+def _pair_legs(nets, chain):
+    """The other leg of each balanced pair the row carries, such as an antenna's 300 ohm feed into a balun: a net off the
+    chain that joins the same two parts as one of the chain's hops, and at most one part off the row, the one across the
+    pair. A rail is never one, whatever it joins, and its name says what it is."""
+    on_row = {x.split(".")[0] for c in chain for x in c[1:]}
+    hops = [{entry.split(".")[0], leave.split(".")[0]} for _net, entry, leave in chain]
+    chain_nets = {c[0] for c in chain}
+    legs = set()
+    for net, members in nets.items():
+        refs = [m.split(".")[0] for m in members]
+        if net in chain_nets or net == "GND" or _RAIL_NAME.match(net):
+            continue
+        if {r for r in refs if r in on_row} in hops and len([r for r in refs if r not in on_row]) <= 1:
+            legs.add(net)
+    return legs
+
+
+def _across_pair(by_pin, pin, legs):
+    """Whether a part with `pin` on a row net has only ground and one leg of the pair on its other pins, as a GDT across
+    a balanced feed does."""
+    others = [n for p, n in by_pin.items() if p != pin]
+    return sum(n in legs for n in others) == 1 and all(n in legs or n == "GND" for n in others) and len(by_pin) <= 3
+
+
 def _derive_layout(fps, spec, square=False, choice=0):
     """Rotations and bias positions from the netlist, so that a new board needs only its parts and nets.
 
@@ -380,10 +408,11 @@ def _derive_layout(fps, spec, square=False, choice=0):
     chain_nets = {c[0] for c in chain}
     on_row = {x.split(".")[0] for c in chain for x in c[1:]}
     taps = {}
+    legs = _pair_legs(nets, chain)
     for net, entry, leave in chain:
         for member in nets[net]:
             ref, pin = member.split(".")
-            if member not in (entry, leave) and ref not in on_row and ref not in taps and len(pins[ref]) <= 2:
+            if member not in (entry, leave) and ref not in on_row and ref not in taps and (len(pins[ref]) <= 2 or _across_pair(pins[ref], pin, legs)):
                 taps[ref] = (net, pin)
     # Rail pairs: which anchor pad carries which capacitors.
     anchors = {}                                        # rail net -> anchor pins, feed first
@@ -392,7 +421,7 @@ def _derive_layout(fps, spec, square=False, choice=0):
             if tap_net == net:
                 far = next((p for p in pins[ref] if p != pin), None)
                 rail = pins[ref].get(far)
-                if rail and rail != "GND" and rail not in chain_nets:
+                if rail and rail != "GND" and rail not in chain_nets and rail not in legs:
                     anchors.setdefault(rail, []).append(ref + "." + far)
     done = {r for r in taps} | on_row
     stacks = {}                                         # anchor pin -> the parts rising from it, in order
@@ -486,8 +515,9 @@ def _derive_layout(fps, spec, square=False, choice=0):
         for ref, (tap_net, pin) in taps.items():
             if tap_net != net:
                 continue
-            far = next((p for p in pins[ref] if p != pin), None)
-            grounded = far is None or pins[ref].get(far) in ("GND", None)
+            far = next((p for p in pins[ref] if p != pin and pins[ref][p] in legs), None) or next((p for p in pins[ref] if p != pin), None)
+            # A part across a balanced pair hangs off the line like a grounded tap, toward the pair's other leg, with no stack.
+            grounded = far is None or pins[ref].get(far) in ("GND", None) or pins[ref].get(far) in legs
             side = down if grounded else up
             rot = _rot_for(fps[ref], pin, far, side) if far else 0.0
             half_line = float(widths.get(net, spec.get("rf_line_width_mm") or 0.0)) / 2

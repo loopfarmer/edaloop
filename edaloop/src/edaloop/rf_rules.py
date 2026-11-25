@@ -362,7 +362,7 @@ def audit(tracks: list, facts: dict, chains: list, rails: list, parts: dict, ban
                 if asked is not None:
                     findings.append((f"rf_layout:tap_land:{name}", f"{net} runs through the land of {name}, though rf_layout.tap_stub_mm asks for "
                                      f"the pad beside the line, {asked} mm from its edge", "warning"))
-            if p["ref"].startswith("L") and len(by_ref[p["ref"]]) == 2:
+            if re.match(r"L\d", p["ref"]) and len(by_ref[p["ref"]]) == 2:
                 cold = next(q for q in by_ref[p["ref"]] if q is not p)
                 caps = []
                 if cold["net"] == "GND":        # a shunt inductor to ground, part of a match, has no cold end to bypass
