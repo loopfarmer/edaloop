@@ -1108,6 +1108,43 @@ def test_layout_place_is_checked_before_anything_is_placed():
     assert boardgen.place_problems({"layout": {"place": [1, 2]}}) == ["layout.place must map part references to [dx, dy] in mm"]
 
 
+def test_a_part_with_its_rf_pads_on_one_side_sends_its_output_out_sideways(tmp_path):
+    """A switch in an MSOP-10 with RF in on pin 6 and out on pin 8: pins 9 and 10 sit on the line beyond pin 8. The described
+    line is 0.25 mm, narrow enough for the placer to see it leave pin 8 between pins 7 and 9 with 0.2 mm clearance. This
+    tests placement only: the router sets its own width from the impedance coupon, and the MSOP's 0.5 mm pitch is finer
+    than this board's clearance anyway."""
+    import yaml
+
+    from edaloop import boardgen, checks, testbench
+    from edaloop.scripts.kicad_pcb import Board as GeometryBoard
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    b = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    fp = b["layout"]["footprints"]
+    b.update({"name": "side_exit", "parts": {"J1": {"value": "in"}, "C1": {"value": "100pF"}, "U1": {"value": "SPDT"}, "C2": {"value": "100pF"},
+                                             "J2": {"value": "out"}},
+              "nets": {"IN": ["J1.1", "C1.1"], "A": ["C1.2", "U1.6"], "B": ["U1.8", "C2.1"], "OUT": ["C2.2", "J2.1"],
+                       "GND": ["J1.2", "J2.2", "U1.1", "U1.7", "U1.9", "U1.10"]},
+              "open_pins": ["U1.2", "U1.3", "U1.4", "U1.5"],
+              "chain": [["IN", "J1.1", "C1.1"], ["A", "C1.2", "U1.6"], ["B", "U1.8", "C2.1"], ["OUT", "C2.2", "J2.1"]],
+              "project": {**b["project"], "rails": []},
+              "spice": {"models": {}, "bench": {"name": "bias", "stimulus": ["Vcable OUT 0 DC 5"], "measure": [".control", "op", "quit", ".endc"]},
+                        "expect": {}}})
+    b["layout"]["footprints"] = {"J1": fp["J1"], "J2": fp["J2"], "C1": fp["C1"], "C2": fp["C2"], "U1": "Package_SO:MSOP-10_3x3mm_P0.5mm"}
+    b["rf_line_width_mm"] = 0.25
+    for k in ("stages", "band_expect"):
+        b.pop(k, None)
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump(b, sort_keys=False))
+    boardgen.build(tmp_path / "s.yaml", tmp_path / "b", [])
+    pads = {str(p).split("@")[0]: p for p in GeometryBoard(str(tmp_path / "b" / "side_exit.kicad_pcb")).pads}
+    xy = {k: tuple(float(v) for v in str(p).split("@(")[1].rstrip(")").split(",")) for k, p in pads.items()}
+    # C2's input sits straight out from pin 8, across the row, not past pins 9 and 10 along it.
+    assert abs(xy["C2.1"][0] - xy["U1.8"][0]) < 0.5 and abs(xy["C2.1"][1] - xy["U1.8"][1]) > 1.0
+    assert xy["C2.1"][0] < xy["U1.10"][0]
+    c = checks.placement_critique(Project(tmp_path / "b"))
+    assert c.metrics["rf_hops_over"] == 0, c.findings
+
+
 def test_layout_place_moves_a_part_from_where_placement_put_it(tmp_path):
     import yaml
 

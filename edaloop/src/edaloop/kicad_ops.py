@@ -263,7 +263,49 @@ def _square_rot(fp, entry, leave, travel, nets, half, fallback, choice=0):
     return ranked[min(choice, len(ranked) - 1)][1] if ranked else fallback
 
 
-def _row_lines(fps, walk, attach, line, axis):
+def _side_exit(fp, rot, entry, leave, travel, sides, nets, half):
+    """The direction across the row a part's exit pad must leave by, or None when it can leave along the row.
+
+    A part with its RF pads on one side, such as a switch whose input and output are pins 6 and 8 of a row of five, is
+    aimed square with both pads on the line, and can't send its output forward: the line would cross pins 9 and 10. It
+    can send it straight out from that side, away from the body. Only a part with more than two pads, set square, with its
+    entry and exit pads in line along the row, is asked, and only when its own pads block the way forward. A part aimed
+    corner to corner at an angle crosses the row anyway, and is left as it was."""
+    if len(list(fp.Pads())) <= 2 or not _is_square(rot):
+        return None
+    _pose(fp, 0, 0, rot)
+    ex, ey = _pad_xy(fp, entry)
+    lx, ly = _pad_xy(fp, leave)
+    if abs(-(lx - ex) * travel[1] + (ly - ey) * travel[0]) > JOG_MIN_MM or _exit_clear(fp, rot, leave, travel, nets, half):
+        return None
+    # The line must clear the neighbouring pads as it leaves, so at a pitch too fine for the line no side is clear, and
+    # the part stays as it was.
+    return next(([float(d[0]), float(d[1])] for d in sides if _exit_clear(fp, rot, leave, d, nets, half)), None)
+
+
+def _side_jog(fps, item, following, axis, gap):
+    """How far the line moves across the row after a part that sends its output out sideways: past the part's own courtyard
+    on that side, the gap, and the reach of the next part's input pad to its courtyard edge facing back."""
+    across = 1 if axis == "x" else 0
+    sign = 1.0 if item[5][across] > 0 else -1.0
+    fp = fps[item[0]]
+    _pose(fp, 0, 0, item[1])
+    pad = _pad_xy(fp, str(item[3]))[across]
+    box = _courtyard(fp, 0).BBox()
+    lo, hi = (pcbnew.ToMM(box.GetTop()), pcbnew.ToMM(box.GetBottom())) if across else (pcbnew.ToMM(box.GetLeft()), pcbnew.ToMM(box.GetRight()))
+    edge = (hi - pad) if sign > 0 else (pad - lo)
+    reach = 0.0
+    if following is not None and following[2] is not None:
+        nxt = fps[following[0]]
+        _pose(nxt, 0, 0, following[1])
+        e = _pad_xy(nxt, str(following[2]))[across]
+        nbox = _courtyard(nxt, 0).BBox()
+        nlo, nhi = (pcbnew.ToMM(nbox.GetTop()), pcbnew.ToMM(nbox.GetBottom())) if across else (pcbnew.ToMM(nbox.GetLeft()), pcbnew.ToMM(nbox.GetRight()))
+        reach = (e - nlo) if sign > 0 else (nhi - e)
+    return sign * (edge + gap + reach)
+
+
+def _row_lines(fps, walk, attach, line, axis, gap=0.5):
     """Where the line runs across the board at each part of a row.
 
     A part whose exit pad sits off its entry pad's line, a square-set TT1224 for one, moves the line across by that much for the parts
@@ -279,6 +321,9 @@ def _row_lines(fps, walk, attach, line, axis):
         if entry is not None and leave is not None and str(entry) != str(leave):
             _pose(fps[ref], 0, 0, rot)
             jog = _pad_xy(fps[ref], str(leave))[across] - _pad_xy(fps[ref], str(entry))[across]
+            if len(item) > 5 and item[5]:
+                index = walk.index(item)
+                jog += _side_jog(fps, item, walk[index + 1] if index + 1 < len(walk) else None, axis, gap)
             if abs(jog) > JOG_MIN_MM:
                 here += jog
                 counts.append(0)
@@ -430,10 +475,12 @@ def _derive_layout(fps, spec, square=False, choice=0):
         if following:
             out_pin = following[1].split(".")[1]
             rot = _rot_for(fps[ref], pin, out_pin, travel)
+            half = max(float(widths.get(n, spec.get("rf_line_width_mm") or 0.0)) for n in (net, following[0])) / 2 + EXIT_CLEARANCE_MM
             if square and len(list(fps[ref].Pads())) > 2 and not _is_square(rot):
-                half = max(float(widths.get(n, spec.get("rf_line_width_mm") or 0.0)) for n in (net, following[0])) / 2 + EXIT_CLEARANCE_MM
                 rot = _square_rot(fps[ref], pin, out_pin, travel, pins.get(ref) or {}, half, rot, choice)
-            walk.append([ref, rot, pin, out_pin])
+            side = _side_exit(fps[ref], rot, pin, out_pin, travel, (up, down), pins.get(ref) or {}, half)
+            # [ref, rot, entry, leave, tap offset, side exit]: a part whose exit pad can't leave along the row leaves across it.
+            walk.append([ref, rot, pin, out_pin, [0.0, 0.0], side] if side else [ref, rot, pin, out_pin])
         else:
             walk.append([ref, _rot_for(fps[ref], None, pin, (-travel[0], -travel[1])), pin, None])
     # A person's rotation for a part wins over the derived one. A part whose RF pads sit on opposite corners, like a TT1224
@@ -628,7 +675,7 @@ def _place_rows(fps, layout, rows, attach, spec=None):
         _pose(first, 0, 0, walk[0][1])
         box = _courtyard(first, 0).BBox()
         low = pcbnew.ToMM(box.GetTop() if layout["axis"] == "y" else box.GetLeft())
-        lines = _row_lines(fps, walk, attach, layout["line"], layout["axis"])
+        lines = _row_lines(fps, walk, attach, layout["line"], layout["axis"], float(layout.get("gap_mm", 0.1)))
         row = _solve_row(fps, {**layout, "walk": walk, "attach": attach, "start": layout.get("start", 0.9 - low), "lines": lines})
         if by_row.get(index):
             # A part that finds no room goes to the shelf with the shared ones rather than failing the board.

@@ -31,7 +31,7 @@ A reference that more than one footprint carries, such as stitching vias drawn a
 
 Placement comes from the nets and the footprints' courtyards. Nothing is placed by hand.
 
-1. **RF rows.** Each RF path is one row. Every part is rotated so that its RF pads lie on the line, and placed as close to the last as the courtyards allow.
+1. **RF rows.** Each RF path is one row. Every part is rotated so that its RF pads lie on the line, and placed as close to the last as the courtyards allow. A part whose input and output pads are on the same side, such as a switch with its RF on pins 6 and 8 of a row of five, can't send its output along the line without crossing its own pins. Its output leaves straight out from that side instead: the line moves across the row, past the part's courtyard and the gap, and the next part sits directly out from the pad.
 2. **Bias stacks.** A two-pin part with one pin on an RF net is a tap. Rails rise from it in a column, with the smallest capacitor nearest the choke.
 3. **Channel parts.** On a board with several rows, a part that serves one row goes in and beside that row. Ownership comes from the nets: a part is a row's if the nets lead only to that row. A net or part reaching two rows is shared. When a rail has at least one capacitor per row, each row gets an equal share, and any left over go with the shared parts.
 4. **One path.** On a board with one RF path, every other part with a net goes round it, nearest what it joins.
