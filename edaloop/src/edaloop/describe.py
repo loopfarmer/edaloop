@@ -267,7 +267,59 @@ def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "") 
     return description
 
 
-def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path) -> dict:
+IMPORTED = "imported"
+
+
+def export_board_footprints(board: Path, folder: Path) -> Path:
+    """Copy every footprint a board uses into `folder`/imported.pretty, at rest and with a courtyard, and return the
+    library. A board imported from EAGLE names footprints with no `library:` prefix, so these copies are the only
+    library its parts can be placed from. Needs KiCad's Python."""
+    lib = Path(folder) / f"{IMPORTED}.pretty"
+    r = toolchain.run([toolchain.paths()["kicad_python"], Path(__file__).with_name("kicad_ops.py"), "export_footprints", board, lib], timeout=300)
+    if r.returncode != 0 or not lib.is_dir():
+        raise DescribeError(f"couldn't copy the board's footprints: {(r.stdout + r.stderr).strip()[-300:]}")
+    return lib
+
+
+def imported_names(footprints: dict) -> dict:
+    """Each part's footprint, renamed into the imported library: `imported:<name>`, with any old library dropped."""
+    return {ref: f"{IMPORTED}:" + str(fp).split(":")[-1] for ref, fp in footprints.items()}
+
+
+def board_footprints(board: Path, description: dict, out: Path, replace: bool = True) -> dict | None:
+    """When the board names footprints the placer can't load, copy them from the board beside the description and
+    point the description at the copies. None when every footprint already resolves, and the description is unchanged.
+    With `replace` false, a folder already there is left alone and the footprints aren't copied."""
+    from . import boardgen
+    unresolved = boardgen.unresolved_footprints(description, [])
+    if not unresolved:
+        return None
+    folder = Path(out).parent / f"{Path(out).stem}_footprints"
+    if not replace and (folder.exists() or folder.is_symlink()):
+        return {"unresolved": len(unresolved), "copied": False,
+                "problem": f"{len(unresolved)} parts name footprints the placer can't load, and {folder.name} is already there, "
+                           "so they weren't copied into it. Name another output file"}
+    made = not folder.exists()
+    try:
+        lib = export_board_footprints(board, folder)
+    except (DescribeError, toolchain.ToolMissing) as e:
+        if made:
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
+        return {"unresolved": len(unresolved), "copied": False,
+                "problem": f"{len(unresolved)} parts name footprints the placer can't load, and copying them from the board failed: {e}. "
+                           "Name library footprints in layout.footprints before building"}
+    renamed = imported_names(description["layout"]["footprints"])
+    absent = sorted({fp for fp in renamed.values() if not (lib / (fp.split(":", 1)[1] + ".kicad_mod")).is_file()})
+    if absent:
+        raise DescribeError(f"the board's footprint copies are missing {', '.join(absent[:10])}")
+    description["layout"]["footprints"] = renamed
+    rel = folder.name
+    return {"unresolved": len(unresolved), "copied": True, "library": str(lib), "footprints": len(set(renamed.values())),
+            "build": f"edaloop build {Path(out).name} -o board --footprints {rel}"}
+
+
+def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path, replace_footprints: bool = True) -> dict:
     """Write the description from a schematic, through KiCad's netlist, or straight from a board's pads."""
     from .project import FILE
     if Path(out).name == FILE or Path(out).resolve().name == FILE:
@@ -282,7 +334,12 @@ def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: P
         if r.returncode != 0 or not netlist.exists():
             raise DescribeError(f"couldn't export a netlist: {r.stderr.strip()[-300:]}")
     description = describe(netlist, name, band_mhz, Path(schematic).name)
-    out.write_text("# Written by `edaloop describe`. Check the RF path, and supply anything marked REQUIRED.\n" +
-                   yaml.safe_dump(description, sort_keys=False, width=120))
+    copied = board_footprints(Path(schematic), description, Path(out), replace_footprints) if Path(schematic).suffix == ".kicad_pcb" else None
+    head = "# Written by `edaloop describe`. Check the RF path, and supply anything marked REQUIRED.\n"
+    if copied and copied["copied"]:
+        head += (f"# Its footprints are copies from {Path(schematic).name}, in {Path(copied['library']).parent.name}/. "
+                 f"Build with: {copied['build']}\n")
+    out.write_text(head + yaml.safe_dump(description, sort_keys=False, width=120))
     needed = [f"project.rails.{x['net']}.loads.{k}" for x in description["project"]["rails"] for k, v in x["loads"].items() if v == NEEDED]
-    return {"written": str(out), "chain": description["summary"], "channels": sum(1 for row in description["chain"] if row[2].startswith("J")), "required": needed, "assumed": description["assumed"], "likely_rails": description["likely_rails"], "parts": len(description["parts"]), "nets": len(description["nets"])}
+    return {"written": str(out), "chain": description["summary"], "channels": sum(1 for row in description["chain"] if row[2].startswith("J")), "required": needed, "assumed": description["assumed"], "likely_rails": description["likely_rails"], "parts": len(description["parts"]), "nets": len(description["nets"]),
+            **({"board_footprints": copied} if copied else {})}

@@ -487,12 +487,13 @@ def regenerate(sample: dict, board: Path, d: dict | None, eagle: dict, out: Path
     from .project import Project
     if not d or not d.get("chain"):
         return [_row("regen.layout", False, "the placer only handles RF rows, and this board has none")]
-    lib = out / "imported.pretty"
-    r = toolchain.run([toolchain.paths()["kicad_python"], Path(__file__).with_name("kicad_ops.py"), "export_footprints", board, lib], timeout=300)
-    if r.returncode != 0 or not lib.exists():
-        return [_row("regen.layout", False, f"couldn't extract its footprints: {(r.stdout + r.stderr).strip()[-300:]}")]
+    from . import describe as described
+    try:
+        described.export_board_footprints(board, out)
+    except described.DescribeError as e:
+        return [_row("regen.layout", False, str(e))]
     stack, _ = stack_for(sample, eagle["copper_layers"])
-    bench = {**d, "stackup": stack, "layout": {**d["layout"], "unlisted_pads": "open", "footprints": {ref: "imported:" + str(fp).split(":")[-1] for ref, fp in d["layout"]["footprints"].items()}}}
+    bench = {**d, "stackup": stack, "layout": {**d["layout"], "unlisted_pads": "open", "footprints": described.imported_names(d["layout"]["footprints"])}}
     spec = out / "description.yaml"
     spec.write_text(yaml.safe_dump(bench, sort_keys=False))
     made = boardgen.make(spec, out / "generated", [out], True)

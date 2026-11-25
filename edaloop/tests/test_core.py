@@ -540,6 +540,72 @@ def test_no_safe_mcp_tool_changes_edaloop_yaml(confined):
     assert (proj / "edaloop.yaml").read_bytes() == before
 
 
+def _footprint_board(path, name):
+    """The describable board with every part on footprint `name`: `Lib:Ref` style, or bare like an EAGLE import."""
+    _describable_board(path)
+    import re as _re
+    path.write_text(_re.sub(r'\(footprint "Lib:(\w+)"', lambda m: f'(footprint "{name or m.group(1)}"', path.read_text()))
+
+
+def test_describe_copies_a_boards_footprints_when_they_dont_resolve(tmp_path):
+    import re
+
+    import yaml
+
+    from edaloop import boardgen, testbench
+    from edaloop.cli import main
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    boardgen.build(testbench.BENCHES / "gain_block_demo.yaml", tmp_path / "a", [])
+    # Bare footprint names, as an EAGLE import gives.
+    src = tmp_path / "src.kicad_pcb"
+    src.write_text(re.sub(r'\(footprint "[^":]+:([^"]+)"', r'(footprint "\1"', (tmp_path / "a" / "gain_block_demo.kicad_pcb").read_text()))
+    assert main(["describe", str(src), "-o", str(tmp_path / "d.yaml"), "--band-mhz", "900", "1500"]) == 0
+    text = (tmp_path / "d.yaml").read_text()
+    d = yaml.safe_load(text)
+    names = set(d["layout"]["footprints"].values())
+    assert names and all(n.startswith("imported:") for n in names)
+    lib = tmp_path / "d_footprints" / "imported.pretty"
+    assert {x.stem for x in lib.iterdir()} == {n.split(":")[1] for n in names}
+    assert "Build with: edaloop build d.yaml -o board --footprints d_footprints" in text
+    assert boardgen.unresolved_footprints(d, [tmp_path / "d_footprints"]) == []
+
+
+def test_describe_without_kicad_says_the_footprints_still_need_copying(tmp_path, monkeypatch):
+    from edaloop import describe as described
+    _footprint_board(tmp_path / "src.kicad_pcb", None)
+    paths = dict(toolchain.paths(), kicad_python=str(tmp_path / "no-kicad" / "python3"))
+    monkeypatch.setattr(toolchain, "paths", lambda: paths)
+    r = described.describe_schematic(tmp_path / "src.kicad_pcb", "x", [900, 1500], tmp_path / "d.yaml", tmp_path / "w")
+    assert r["board_footprints"]["copied"] is False and "3 parts name footprints the placer can't load" in r["board_footprints"]["problem"]
+    assert not (tmp_path / "d_footprints").exists()
+    assert "imported:" not in (tmp_path / "d.yaml").read_text()
+
+
+def test_mcp_describe_design_never_writes_into_a_footprints_folder_already_there(confined):
+    proj, _ = confined
+    _describable_board(proj / "src.kicad_pcb")              # Lib:J1 and the rest don't load
+    (proj / "new_footprints").mkdir()
+    (proj / "new_footprints" / "mine.txt").write_text("a person's file")
+    before = _tree(proj / "new_footprints")
+    result = _mcp("describe_design", {"source_file": str(proj / "src.kicad_pcb"), "output_file": "new.yaml", "band_mhz": [900, 1500]})
+    assert result["board_footprints"]["copied"] is False and "new_footprints is already there" in result["board_footprints"]["problem"]
+    assert _tree(proj / "new_footprints") == before
+
+
+def test_describe_leaves_footprints_that_resolve_alone(tmp_path):
+    import yaml
+
+    from edaloop import boardgen
+    from edaloop import describe as described
+    lib = next(boardgen.BUNDLED_FOOTPRINTS.glob("*.pretty"))
+    name = f"{lib.stem}:{next(lib.glob('*.kicad_mod')).stem}"
+    _footprint_board(tmp_path / "src.kicad_pcb", name)
+    r = described.describe_schematic(tmp_path / "src.kicad_pcb", "x", [900, 1500], tmp_path / "d.yaml", tmp_path / "w")
+    assert "board_footprints" not in r and not (tmp_path / "d_footprints").exists()
+    assert set(yaml.safe_load((tmp_path / "d.yaml").read_text())["layout"]["footprints"].values()) == {name}
+
+
 def test_ipc2221_matches_published_shape_and_round_trips():
     rise = power.ipc2221_rise_c(1.0, 0.3, 35, True)
     assert 10 < rise < 40                 # 1 A on 12 mil 1 oz outer is known to be warm
