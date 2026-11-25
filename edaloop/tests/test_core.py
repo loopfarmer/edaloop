@@ -1094,6 +1094,22 @@ def test_drawn_schematic_keeps_the_described_netlist(name, tmp_path):
     assert schematic.check_netlist(out, bench) == []
 
 
+def test_schematic_draws_a_chain_that_ends_on_a_two_pin_part():
+    import yaml
+
+    from edaloop import schematic, testbench
+    # A chain may end on a two-pin part, here the output feed choke: it was drawn as an in-line R, C or L with no exit pin,
+    # and sorting that missing pin crashed the build. Its free pin is now drawn and labelled like any other.
+    bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    net, start, _ = bench["chain"][-1]
+    choke = next(m for m in bench["nets"][net] if m.startswith("L"))
+    bench["chain"][-1] = [net, start, choke]
+    ref = choke.split(".")[0]
+    far = next(n for n, members in bench["nets"].items() if n != net and any(m.startswith(ref + ".") for m in members))
+    sheet = schematic.schematic(bench, "x")
+    assert f'(reference "{ref}")' in sheet and f'"{far}"' in sheet
+
+
 def test_netlist_check_catches_a_moved_pin(tmp_path):
     from edaloop import schematic
     out = tmp_path / "n.xml"
@@ -1713,6 +1729,15 @@ def test_a_loop_through_schematic_exports_the_described_netlist(tmp_path):
                        tmp_path / "x.kicad_sch"], timeout=120)
     assert r.returncode == 0
     assert drawing.check_netlist(tmp_path / "n2.xml", bench) == []
+
+
+def test_describe_blocks_rf_at_a_ferrite_bead_but_not_at_a_thermistor():
+    from edaloop import describe
+    # FB2 is a choke like L1; RT1 and RLM1 begin with R but aren't resistors, so a 2-pin RT doesn't block the path as a resistor.
+    assert describe._blocks_rf("L1", {"value": "1uH"}, {"1": "OUT", "2": "VDD"})
+    assert describe._blocks_rf("FB2", {"value": "bead"}, {"1": "OUT", "2": "VDD"})
+    assert not describe._blocks_rf("LIM1", {"value": "limiter"}, {"1": "A", "2": "B", "3": "GND"})
+    assert not describe._blocks_rf("RT1", {"value": "NTC"}, {"1": "A", "2": "B"})
 
 
 def test_describe_follows_a_path_between_two_ports_of_one_footprint(tmp_path):

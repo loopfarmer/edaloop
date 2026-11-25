@@ -198,7 +198,9 @@ def draw(bench: dict, name: str, sheet: Sheet | None = None) -> Sheet:
         """A part on the row. Returns the x of its input and output pins."""
         part = parts[ref]
         others = sorted([p for p in pins[ref] if p not in (entry, leave)] + opens.get(ref, []), key=_key)
-        if ref[0] in "RCL" and len(pins[ref]) == 2:
+        # A chain can start or end on a two-pin part, such as a choke into a rail: then its free pin is drawn like any other
+        # part's extra pins, below, and not as the inline R, C or L, which has no place for it.
+        if ref[0] in "RCL" and len(pins[ref]) == 2 and entry and leave:
             half = _snap(5.08)
             k = _kind(ref, part.get("value", "")) + "_h"
             at = (_snap(at_x + half), row)

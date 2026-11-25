@@ -620,6 +620,10 @@ def _solve_row(fps, layout, trace=None):
         ox, oy = row[4] if len(row) > 4 else (0.0, 0.0)
         entry, leave = (str(entry) if entry is not None else None), (str(leave) if leave is not None else None)
         fp = fps[ref]
+        if fp in placed:
+            # A part on two chain nets, or both a tap and in another tap's stack, is posed once: where it came first.
+            previous = _pad_xy(fp, leave)[axis] if leave else previous
+            continue
         if previous is None:
             _pose(fp, *point(start), rot)
             # Bring the pad that faces the cascade onto the line, keeping the origin where it was asked for.
@@ -634,7 +638,7 @@ def _solve_row(fps, layout, trace=None):
             while True:
                 at = point(s)
                 _at_pad(fp, rot, entry, at[0] + ox, at[1] + oy)
-                group = [_attach(fps, item) for item in groups.get(ref, [])]
+                group = _stack(fps, [item for item in groups.get(ref, []) if fps[item["ref"]] not in placed])
                 clash = _hit(fp, [x for x in inline if x not in away], gap) or _hit(fp, [x for x in placed if x not in inline and x not in away], 0.1)
                 clash = clash or next((h for h in (_hit(g, placed + [fp] + [o for o in group if o is not g], 0.1)
                                                    for g in group) if h), None)
@@ -928,6 +932,19 @@ def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judg
         return None
     # The best fold, placed again.
     return attempt(best[1], best[2], best[3])[2]
+
+
+def _stack(fps, items):
+    """Pose a tap's stack. A stack that branches, as a divider off one pad does, can put two parts in one place, and moving
+    the tap along the line never parts them: such a part, and what hangs off it, is left out here and goes to the shelf."""
+    kept, dropped = [], set()
+    for item in items:
+        fp = _attach(fps, item) if item["to"].split(".")[0] not in dropped else None
+        if fp is None or _hit(fp, kept, 0.1):
+            dropped.add(item["ref"])
+            continue
+        kept.append(fp)
+    return kept
 
 
 def _extent(group, axis):

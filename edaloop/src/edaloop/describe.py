@@ -21,7 +21,9 @@ RF_PORT = re.compile(r"\bSMA\b|SMA_|U\.?FL|MMCX|\bBNC\b|IPEX|ANTENNA|\bANT\b|\d\
                      r"|(?<![A-Z0-9])N[-_ ]?(?:TYPE|FEM(?:ALE)?|MALE|JACK|PLUG|BULKHEAD)(?![A-Z0-9])|TYPE[-_ ]?N(?![A-Z0-9])", re.I)
 CONNECTOR_REF = re.compile(r"^J\d")     # JP is a header or a jumper
 ACTIVE = ("U", "IC", "X", "Q")
-INDUCTOR_REF = re.compile(r"^L\d")     # L1, L12: an inductor. LIM1, LED1 and LNA1 aren't
+# An inductor's or resistor's reference: L1, R12, FB3 (a ferrite bead). Not LIM1, LED2, LNA1, RT1 or RLM1, which are other parts.
+INDUCTOR_REF = re.compile(r"^(L|FB)\d")
+RESISTOR_REF = re.compile(r"^R\d")
 NEEDED = "REQUIRED"
 SEARCH_LIMIT = 200_000
 MAX_RF_NET_PINS = 6
@@ -197,7 +199,7 @@ def _blocks_rf(ref: str, part: dict, pins: dict[str, str]) -> bool:
         return True
     if _digital_part(ref, part, pins):
         return True
-    if ref[0] == "R":
+    if RESISTOR_REF.match(ref):
         value = (str(part.get("value", "")).split() or [""])[0].upper()
         return value not in ("0R", "0", "0R0", "0OHM")
     return False
