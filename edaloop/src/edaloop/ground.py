@@ -445,7 +445,8 @@ def finish(p) -> dict:
         spec = work / "plane_voids.json"
         spec.write_text(json.dumps({"layer": "In1.Cu", "voids": voids}))
         _op("add_voids", p.board, spec, p.board)
-    stripped = _op("strip_inner_pads", p.board, ",".join(sorted(rf)), 1.0, p.board)["changed"]
+    strip = _op("strip_inner_pads", p.board, ",".join(sorted(rf)), 1.0, p.board)
+    stripped = strip["changed"]
     silk = _op("place_silk", p.board, p.board)
     filled = work / "filled.kicad_pcb"
     _op("fill_zones", p.board, filled)
@@ -456,4 +457,5 @@ def finish(p) -> dict:
         rf_rules.fence_holes(final.tracks, facts["pads"], facts["courtyards"], rf, pitch, float(layout["fence_line_mm"]))
     return {"fence_vias": fence, "fence_fill_vias": filled_in, "fence_still_open": [{"net": x["net"], "kind": x["kind"], "at": x["at"]} for x in still],
             "stitch_vias": len(placed) - fence - filled_in, "ground_vias_now": sum(
-        1 for t in Board(p.board).tracks if t.kind == "via" and t.net == "GND"), "vias_with_inner_pads_stripped": stripped, "silk_hidden": silk["hidden"], "plane_voids": [v["pad"] for v in voids], **pruned}
+        1 for t in Board(p.board).tracks if t.kind == "via" and t.net == "GND"), "vias_with_inner_pads_stripped": stripped,
+            "inner_track_ends_centred": strip.get("track_ends_centred", 0), "vias_kept_inner_pads_to_stay_connected": strip.get("kept_pads", []), "silk_hidden": silk["hidden"], "plane_voids": [v["pad"] for v in voids], **pruned}
