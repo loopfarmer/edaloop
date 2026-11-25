@@ -25,6 +25,14 @@ INDUCTOR_REF = re.compile(r"^L\d")     # L1, L12: an inductor. LIM1, LED1 and LN
 NEEDED = "REQUIRED"
 SEARCH_LIMIT = 200_000
 MAX_RF_NET_PINS = 6
+# A net named for logic: a clock, a serial bus, a strobe, an enable or a mute. A signal path doesn't run along one, whatever it joins.
+DIGITAL_NET = re.compile(r"(?:^|[^A-Z0-9])(?:S?CLK|SCL|SDA|SPI|I2C|MOSI|MISO|SDI|SDO|CS|CSB|CE|SS|GPIO\d*|IO\d+|LE|DATA|DAT|CTRL|CTL|EN|ENABLE|"
+                         r"MUTE|RST|RESET|IRQ|UART|RXD|TXD|PWM|SYNC|LVDS|JESD|LD|LOCK|STROBE|PTT)\d*(?=$|[^A-Z0-9])", re.I)
+# A part that is logic or a clock: an FPGA, a processor, a shift register, a clock distributor or an oscillator. A path neither runs
+# through one nor ends at one as at a radio, even when an RF-looking net reaches it, such as a clock chip's reference input.
+DIGITAL_PART = re.compile(r"FPGA|CPLD|\bMCU\b|MICROCONTROLLER|PROCESSOR|^XC[A-Z]?\d|^EP\d|^10M\d|^ICE40|^LFE\d|^STM32F|^ATMEGA|^ATSAM|"
+                          r"^RP2040|^PIC\d|^MSP430|^(?:SN|TC|NC|MC|NL|MM)?74[A-Z]{1,5}\d|SHIFT.?REG|^LMK0|^SI53\d|^CDCE|^HMC7044|^AD95\d\d|CLOCK|JITTER|"
+                          r"OCXO|TCXO|VCXO|\bXO\b|OSCILLATOR", re.I)
 
 
 class DescribeError(Exception):
@@ -187,10 +195,19 @@ def _blocks_rf(ref: str, part: dict, pins: dict[str, str]) -> bool:
         return True
     if INDUCTOR_REF.match(ref):
         return True
+    if _digital_part(ref, part, pins):
+        return True
     if ref[0] == "R":
         value = (str(part.get("value", "")).split() or [""])[0].upper()
         return value not in ("0R", "0", "0R0", "0OHM")
     return False
+
+
+def _digital_part(ref: str, part: dict, pins: dict[str, str]) -> bool:
+    """Logic, a clock, or a multi-pin header: a control header's pins carry serial lines between boards, not the RF path."""
+    if ref.startswith(ACTIVE) and DIGITAL_PART.search(str(part.get("value", ""))):
+        return True
+    return bool(CONNECTOR_REF.match(ref)) and len(pins) > 3 and not RF_PORT.search(f"{part.get('value', '')} {part.get('footprint', '')}")
 
 
 def _maybe_rf_end(pins: dict[str, str], usable: set) -> bool:
@@ -229,7 +246,8 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
     if partner:
         connectors = sorted(set(connectors) | set(partner), key=lambda r: (len(r), r))
     # A control or power bus joins many parts, and a signal doesn't travel along one.
-    usable = {n for n, m in nets.items() if not GROUND.match(n) and not RAIL.match(n) and not n.startswith("unconnected-") and len(m) <= MAX_RF_NET_PINS}
+    usable = {n for n, m in nets.items() if not GROUND.match(n) and not RAIL.match(n) and not n.startswith("unconnected-") and len(m) <= MAX_RF_NET_PINS
+              and not DIGITAL_NET.search(n)}
     # One footprint can hold two RF ports, as an in-line part with a plug at one end and a jack at the other does. Each of its signal pins on a
     # net of its own is then a port, and a path can run from one to another. Only a part that says it's an RF port counts: a header's pins aren't.
     multi_port = {r for r in ports if len({n for n in pins[r].values() if n in usable}) >= 2}
@@ -255,6 +273,7 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
     used: set[str] = set()
     steps = [0]
     direct: set = set()     # the (start, end) of each path that is a shortest route, not the longest
+    to_radio = [False]      # no path joins two connectors, so each may end at the radio it reaches
 
     def shortest(a: str, b: str) -> list:
         """The route from a to b through the fewest parts, as chain rows, or [] if there is none."""
@@ -319,9 +338,13 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
                         # This net also reaches a part already on the path, so the path has gone out through a part
                         # across two of its nets and come back, as through a GDT across a balanced pair: a shunt, not a hop.
                         continue
-                    if (other in connectors and (not partner or other in partner.get(start, ()))) or (radio_end and other.startswith(ACTIVE) and len(pins[other]) > 2):
+                    radio = (radio_end or to_radio[0]) and other.startswith(ACTIVE) and len(pins[other]) > 2 and not _digital_part(other, parts[other], pins[other])
+                    if (other in connectors and (not partner or other in partner.get(start, ()))) or radio:
                         if len(path) + 1 > len(best):
                             best = [*path, step]
+                        if radio and to_radio[0] and other not in connectors:
+                            # No connector reached: a radio may end the path, but so may one further on, past an amplifier.
+                            walk(other, other_pin, seen | {other}, [*path, step])
                     elif other in connectors:
                         continue        # a connector the hint doesn't pair with this one: a path doesn't run through it
                     elif radio_end and INDUCTOR_REF.match(other) and len([n for n in pins[other].values() if not GROUND.match(n) and not RAIL.match(n)]) == 2:
@@ -340,8 +363,12 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
                 direct.add((start, best[-1][2].partition(".")[0]))
         return best
     while True:
-        found = [longest_from(c) for c in connectors if c not in used and (not partner or c in partner)]
+        found = [longest_from(c) for c in connectors if c not in used and (not partner or c in partner) and (not to_radio[0] or c in ports)]
         found = [f for f in found if f]
+        if not found and not chains and not partner and not to_radio[0] and ports:
+            # A transmitter or a receiver whose connectors meet only through logic: each path runs from its connector to its radio.
+            to_radio[0] = True
+            continue
         if not found:
             break
         best = max(found, key=len)
@@ -351,6 +378,9 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
             notes.append(f"chains: {ends[0]} to {ends[1]} is the most direct route, as there were too many routes to try every one")
         for _, a, b in best:
             used.update((a.partition(".")[0], b.partition(".")[0]))
+    if to_radio[0] and chains and notes is not None:
+        notes.append("chains: no two connectors are joined by signal parts, so each path ends at the radio it reaches: " +
+                     ", ".join(f"{c[0][1].partition('.')[0]} to {c[-1][2].partition('.')[0]}" for c in chains))
     if not chains:
         raise DescribeError("no path between connectors through signal parts" + (" between the hinted pairs" if partner else ""))
     if notes is not None:

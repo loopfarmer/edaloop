@@ -4533,6 +4533,40 @@ def test_describe_doesnt_route_the_path_through_a_part_across_a_balanced_pair():
     assert chain[0][1:] in (["J1.1", "T1.1"], ["J1.2", "T1.2"])
 
 
+def test_describe_keeps_the_rf_path_off_logic_clocks_and_control_headers(tmp_path):
+    from edaloop import describe
+    # A transmitter: a modulator U2 into a PA U1 and out at J1. The modulator's LO comes from a clock chip U3, disciplined from
+    # an antenna at J2; the clock also feeds an FPGA U4, which mutes the PA and keys a second radio U5 on its own antenna J3.
+    # Through the clock, the FPGA and the mute line, J1 reaches J3 the long way round, but none of that is RF.
+    parts = {"J1": "SMA_OUT", "U1": "SAW+PA", "U2": "DAC+IQ_MOD", "U3": "LMK04832+OCXO", "U4": "XC7A35T_FPGA", "U5": "SX1262",
+             "J2": "SMA_GNSS", "J3": "SMA_ISM"}
+    nets = {"TX_OUT": ["J1.1", "U1.3"], "RF_MOD": ["U2.3", "U1.1"], "PA_MUTE_CTRL": ["U4.4", "U1.2"], "LVDS_IQ": ["U2.1", "U4.3"],
+            "LO": ["U2.2", "U3.3"], "GNSS_ANT": ["J2.1", "U3.1"], "CLK_PRN": ["U3.2", "U4.1"], "RADIO_MUTE_N": ["U4.2", "U5.2"],
+            "RADIO_ANT": ["U5.1", "J3.1"], "GND": ["J1.2", "J2.2", "J3.2", "U1.4", "U2.4", "U3.4", "U4.5", "U5.3"]}
+    chains = describe.find_chains({r: {"value": v} for r, v in parts.items()}, nets)
+    assert [row[1:] for row in chains[0]] == [["J1.1", "U1.3"], ["U1.1", "U2.3"]]
+    assert not {"U3", "U4"} & {x.split(".")[0] for c in chains for row in c for x in row[1:]}
+    assert ("J3", "U5") in _chain_ends(chains)
+    # Two channels and a control header: each DSA's serial lines run out to the header J9 and on through a shift register U9,
+    # which would join J1 to J4 through J9 if a path could run along a clock or a data line.
+    parts = {"J1": "SMA", "C1": "100pF", "U1": "DSA", "C2": "100pF", "J2": "SMA", "J3": "SMA", "C3": "100pF", "U2": "DSA",
+             "C4": "100pF", "J4": "SMA", "J9": "control header", "U9": "74LVC164A"}
+    nets = {"A": ["J1.1", "C1.1"], "B": ["C1.2", "U1.1"], "C": ["U1.2", "C2.1"], "D": ["C2.2", "J2.1"],
+            "E": ["J3.1", "C3.1"], "F": ["C3.2", "U2.1"], "G": ["U2.2", "C4.1"], "H": ["C4.2", "J4.1"],
+            "DSA_CLK": ["U1.4", "J9.3"], "DSA_DATA": ["J9.1", "U9.1"], "DSA_LE_2": ["U9.2", "U2.4"],
+            "GND": ["J1.2", "J2.2", "J3.2", "J4.2", "U1.3", "U2.3", "J9.2", "J9.4", "U9.3"]}
+    chains = describe.find_chains({r: {"value": v} for r, v in parts.items()}, nets)
+    assert sorted(_chain_ends(chains)) == [("J1", "J2"), ("J3", "J4")]
+    for logic in ("TC74HC04AF", "SN74LVC1G04", "XC6SLX9-TQG144", "LMK04832", "10MHz OCXO"):
+        assert describe.DIGITAL_PART.search(logic), logic
+    for rf in ("ESP32-C3", "SX1262", "HMC544AE", "ADL5801", "MAX2871", "PE43711"):
+        assert not describe.DIGITAL_PART.search(rf), rf
+    for net in ("DSA_CLK", "/SPI_MOSI", "LO1_CE", "RADIO_MUTE_N", "PA_EN", "I2C_SCL"):
+        assert describe.DIGITAL_NET.search(net), net
+    for net in ("TX_OUT", "RF_MOD", "LO_OUT", "Net-(C136-Pad1)", "COAX_CH1", "D_LIMOUT"):
+        assert not describe.DIGITAL_NET.search(net), net
+
+
 def test_a_type_n_connector_is_an_rf_port_and_pairs_with_feed_studs(tmp_path):
     from edaloop import describe
     for word in ("N_Fem", "Type-N", "TypeN_50R", "N_BULKHEAD_44x86", "Amphenol_172100_N_Female"):
