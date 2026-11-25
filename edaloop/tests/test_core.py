@@ -1145,6 +1145,98 @@ def test_a_part_with_its_rf_pads_on_one_side_sends_its_output_out_sideways(tmp_p
     assert c.metrics["rf_hops_over"] == 0, c.findings
 
 
+def _kit(folder, apart, courtyards=True):
+    """A two-SMA kit as one footprint, like lna915's SMA-KIT-1.5MF: signal pin 1 and ground pin 2 at one end, signal pin 3 and
+    ground pin 4 `apart` mm away, facing each other. With `courtyards`, one box round each end; without, none, as from EAGLE."""
+    pads = []
+    for num, gnd, x, side in (("1", "2", 0.75, 1), ("3", "4", apart + 0.75, -1)):
+        pads.append(f'(pad "{num}" smd rect (at {x} 0) (size 1.5 1.6) (layers "F.Cu" "F.Mask"))')
+        for y in (-3.185, 3.185):
+            pads.append(f'(pad "{gnd}" smd rect (at {x - side * 0.25} {y}) (size 1 2.6) (layers "F.Cu" "F.Mask"))')
+    yards = ""
+    if courtyards:
+        for lo in (-0.25, apart - 0.25):
+            yards += (f'(fp_rect (start {lo} -4.735) (end {lo + 2.0} 4.735) (stroke (width 0.05) (type default)) (fill no) '
+                      f'(layer "F.CrtYd"))\n')
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "KIT.kicad_mod").write_text('(footprint "KIT" (version 20240108) (generator "pcbnew") (layer "F.Cu")\n'
+                                          + yards + "\n".join(pads) + "\n)\n")
+
+
+def _kit_bench(tmp_path, apart):
+    import yaml
+
+    from edaloop import testbench
+    b = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    fp = b["layout"]["footprints"]
+    b.update({"name": "kit", "parts": {"P1": {"value": "SMA kit"}, "C1": {"value": "100pF"}, "U1": {"value": "LNA"}, "C2": {"value": "100pF"}},
+              "nets": {"IN": ["P1.3", "C1.1"], "A": ["C1.2", "U1.3"], "B": ["U1.1", "C2.1"], "OUT": ["C2.2", "P1.1"],
+                       "GND": ["P1.2", "P1.4", "U1.2", "U1.4"]},
+              "chain": [["IN", "P1.3", "C1.1"], ["A", "C1.2", "U1.3"], ["B", "U1.1", "C2.1"], ["OUT", "C2.2", "P1.1"]],
+              "project": {**b["project"], "rails": []},
+              "spice": {"models": {}, "bench": {"name": "bias", "stimulus": ["Vcable OUT 0 DC 5"], "measure": [".control", "op", "quit", ".endc"]},
+                        "expect": {}}})
+    b["layout"]["footprints"] = {"P1": "kit:KIT", "C1": fp["C1"], "C2": fp["C2"], "U1": fp["U1"]}
+    b["outline_mm"] = [60, 20]
+    for k in ("stages", "band_expect"):
+        b.pop(k, None)
+    _kit(tmp_path / "kit.pretty", apart)
+    (tmp_path / "kit.yaml").write_text(yaml.safe_dump(b, sort_keys=False))
+    return tmp_path / "kit.yaml"
+
+
+def test_a_row_that_returns_to_its_first_part_is_placed_between_its_ports(tmp_path, monkeypatch):
+    """lna915's path runs from one SMA of a two-SMA kit to the other. The row goes between the kit's two ports, and the kit is placed
+    once. A row too long for the gap is refused with both lengths, not searched for 500 mm along the line."""
+    from edaloop import boardgen
+    from edaloop.scripts.kicad_pcb import Board as GeometryBoard
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    # The drawn schematic of a loop-through needs #60 to match its description; placement is what's tested here.
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda netlist, bench: [])
+    boardgen.build(_kit_bench(tmp_path, 20.0), tmp_path / "b", [tmp_path])
+    board = GeometryBoard(str(tmp_path / "b" / "kit.kicad_pcb"))
+    xy = {str(p).split("@")[0]: tuple(float(v) for v in str(p).split("@(")[1].rstrip(")").split(",")) for p in board.pads}
+    # Every pad on the path, in order along the line, between P1.3 and P1.1, and all on one line.
+    path = ["P1.3", "C1.1", "C1.2", "U1.3", "U1.1", "C2.1", "C2.2", "P1.1"]
+    along = [xy[k][0] for k in path]
+    assert along == sorted(along), along
+    assert xy["P1.1"][0] - xy["P1.3"][0] == pytest.approx(20.0, abs=0.01)
+    assert all(abs(xy[k][1] - xy["P1.3"][1]) < 0.01 for k in path)
+    with pytest.raises(boardgen.BuildError, match=r"doesn't fit between P1's ports: P1.3 and P1.1 are 5.00 mm apart, but the row from "
+                                                  r"P1.3 to C2.2 runs [\d.]+ mm"):
+        boardgen.build(_kit_bench(tmp_path / "short", 5.0), tmp_path / "c", [tmp_path / "short"])
+
+
+def test_exported_footprints_get_a_courtyard_per_group_of_pads_only_where_the_board_shows_the_gap_is_free(tmp_path):
+    """export_footprints adds a courtyard to a footprint that has none. A two-SMA kit with the amplifier between its ends gets a box
+    round each end; the same kit with nothing between them gets one box round it all, as an IC with a row of pins each side does."""
+    kicad_python = Path(toolchain.paths()["kicad_python"])
+    if not kicad_python.exists():
+        pytest.skip("needs KiCad")
+    from edaloop import boardgen
+    _kit(tmp_path / "lib" / "kit.pretty", 10.5, courtyards=False)
+    script = tmp_path / "make.py"
+    script.write_text(
+        "import sys, pcbnew\n"
+        "board = pcbnew.BOARD()\n"
+        "kit = pcbnew.FootprintLoad(sys.argv[1], 'KIT'); kit.SetReference('P1'); board.Add(kit)\n"
+        "if sys.argv[3] == 'between':\n"
+        "    c = pcbnew.FootprintLoad(sys.argv[4], 'C_0402_1005Metric'); c.SetReference('C1')\n"
+        "    c.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(5.5), 0)); board.Add(c)\n"
+        "pcbnew.SaveBoard(sys.argv[2], board)\n")
+    caps = next(Path(d) / "Capacitor_SMD.pretty" for d in boardgen.STANDARD_LIBS if (Path(d) / "Capacitor_SMD.pretty").is_dir())
+    counts = {}
+    for case in ("between", "empty"):
+        pcb = tmp_path / f"{case}.kicad_pcb"
+        toolchain.run([kicad_python, script, tmp_path / "lib" / "kit.pretty", pcb, case, caps], timeout=120)
+        out = tmp_path / f"{case}.pretty"
+        r = toolchain.run([kicad_python, boardgen.OPS, "export_footprints", pcb, out], timeout=120)
+        report = json.loads([x for x in r.stdout.splitlines() if x.startswith("{")][-1])
+        counts[case] = ((out / "KIT.kicad_mod").read_text().count('(layer "F.CrtYd")'), report.get("courtyards_split"))
+    assert counts == {"between": (2, ["KIT"]), "empty": (1, [])}
+
+
 def test_layout_place_moves_a_part_from_where_placement_put_it(tmp_path):
     import yaml
 
