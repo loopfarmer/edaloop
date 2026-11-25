@@ -1881,6 +1881,44 @@ def test_finish_strips_beside_every_net_the_plane_check_judges(tmp_path):
     assert ground.rf_nets(p, bench) == ({"RF1", "RF2"},) * 2
 
 
+def test_finish_stops_rather_than_replace_a_board_changed_after_the_route(tmp_path):
+    import json
+    import os
+
+    from edaloop import ground, route_classes
+
+    p = _tiny_project(tmp_path)
+    (tmp_path / "board_description.yaml").write_text("layout: {}\nchain: []\n")
+    work = tmp_path / ".edaloop" / "route_classes"
+    work.mkdir(parents=True)
+    routed = work / "3_signal.kicad_pcb"
+    routed.write_text(PCB + "\n; routed\n")
+    record = work / route_classes.SOURCE
+    record.write_text(json.dumps({"board_sha256": route_classes.file_sha256(p.board)}))
+    # As the route left it, or already the route: nothing would be lost.
+    assert not ground.board_changed_since_route(p.board, routed)
+    (tmp_path / "b.kicad_pcb").write_text(PCB + "\n; routed\n")
+    assert not ground.board_changed_since_route(p.board, routed)
+    # Changed by hand after the route (a script that routed what it left, a swapped part): finish says so and stops.
+    (tmp_path / "b.kicad_pcb").write_text(PCB + "\n; hand-routed the nets it left\n")
+    assert ground.board_changed_since_route(p.board, routed)
+    with pytest.raises(ground.FinishRefused, match=r"b.kicad_pcb has changed since `edaloop route --by-class` read it.*"
+                                           r"3_signal.kicad_pcb.*edaloop finish --as-is"):
+        ground.finish(p)
+    assert "hand-routed" in (tmp_path / "b.kicad_pcb").read_text()
+    # The board finish wrote, or one it stopped partway through, can be finished again.
+    record.write_text(json.dumps({"board_sha256": "x", "finished_sha256": route_classes.file_sha256(p.board)}))
+    assert not ground.board_changed_since_route(p.board, routed)
+    record.write_text(json.dumps({"board_sha256": "x", "finishing": True}))
+    assert not ground.board_changed_since_route(p.board, routed)
+    # A route made before the record: the board is changed if it was written after the route.
+    record.unlink()
+    os.utime(routed, (1_000_000, 1_000_000))
+    assert ground.board_changed_since_route(p.board, routed)
+    os.utime(p.board, (999_000, 999_000))
+    assert not ground.board_changed_since_route(p.board, routed)
+
+
 def test_no_rails_is_not_a_pass(tmp_path):
     p = _tiny_project(tmp_path, "power:\n  rails: []\n")
     o = checks.power_rails(p)

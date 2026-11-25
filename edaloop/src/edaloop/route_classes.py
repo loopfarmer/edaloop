@@ -760,6 +760,14 @@ def _layer_args(layers: list, costs: dict | None) -> list[str]:
     return ["--layers", *layers, *(["--layer-costs", *[str(float(costs.get(x, 1.0))) for x in layers]] if costs else [])]
 
 
+SOURCE = "source.json"
+
+
+def file_sha256(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def route(project_board: Path, chains_file: Path, rails: list[dict], work: Path, keep_nets: list[str],
           max_rise_c: float = 10.0, rf_target_ohm: float = 50.0, reference_layers: tuple = ("In1.Cu",),
           power_layers: tuple | None = None, layer_costs: dict | None = None) -> dict:
@@ -767,6 +775,8 @@ def route(project_board: Path, chains_file: Path, rails: list[dict], work: Path,
 
     `layer_costs` makes a layer dearer without forbidding it. A pad still gets its short stub on the top layer, and the run goes inside."""
     work.mkdir(parents=True, exist_ok=True)
+    # The board this route starts from, so that `finish` can tell whether it was changed after the route was made.
+    (work / SOURCE).write_text(json.dumps({"board": project_board.name, "board_sha256": file_sha256(project_board)}))
     stem = "board"
     for ext in (".kicad_pro", ".kicad_prl", ".kicad_dru"):
         if project_board.with_suffix(ext).exists():
