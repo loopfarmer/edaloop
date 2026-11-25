@@ -17,9 +17,11 @@ from . import toolchain
 
 GROUND = re.compile(r"^(GND|AGND|DGND|PGND|VSS|0|GROUND)$", re.I)
 RAIL = re.compile(r"^(VDD|VCC|VBUS|V\+|\+?\d+V\d*|VIN|VBAT|V[0-9].*)$", re.I)
-RF_PORT = re.compile(r"\bSMA\b|SMA_|U\.?FL|MMCX|\bBNC\b|IPEX|ANTENNA|\bANT\b|\d\.\dGHZ", re.I)   # not SMB: that's also a diode package
+RF_PORT = re.compile(r"\bSMA\b|SMA_|U\.?FL|MMCX|\bBNC\b|IPEX|ANTENNA|\bANT\b|\d\.\dGHZ"   # not SMB: that's also a diode package
+                     r"|(?<![A-Z0-9])N[-_ ]?(?:TYPE|FEM(?:ALE)?|MALE|JACK|PLUG|BULKHEAD)(?![A-Z0-9])|TYPE[-_ ]?N(?![A-Z0-9])", re.I)
 CONNECTOR_REF = re.compile(r"^J\d")     # JP is a header or a jumper
 ACTIVE = ("U", "IC", "X", "Q")
+INDUCTOR_REF = re.compile(r"^L\d")     # L1, L12: an inductor. LIM1, LED1 and LNA1 aren't
 NEEDED = "REQUIRED"
 SEARCH_LIMIT = 200_000
 MAX_RF_NET_PINS = 6
@@ -183,12 +185,17 @@ def _blocks_rf(ref: str, part: dict, pins: dict[str, str]) -> bool:
     named = [n for n in pins.values() if not GROUND.match(n)]
     if len(named) < 2:
         return True
-    if ref.startswith("L"):
+    if INDUCTOR_REF.match(ref):
         return True
     if ref[0] == "R":
         value = (str(part.get("value", "")).split() or [""])[0].upper()
         return value not in ("0R", "0", "0R0", "0OHM")
     return False
+
+
+def _maybe_rf_end(pins: dict[str, str], usable: set) -> bool:
+    """A J that could end an RF path though it doesn't say so: three pins at most, none on a rail, one on a signal net."""
+    return len(pins) <= 3 and not any(RAIL.match(n) for n in pins.values()) and any(n in usable for n in pins.values())
 
 
 class _Spent(Exception):
@@ -227,6 +234,20 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
     # net of its own is then a port, and a path can run from one to another. Only a part that says it's an RF port counts: a header's pins aren't.
     multi_port = {r for r in ports if len({n for n in pins[r].values() if n in usable}) >= 2}
     # One RF port and a radio: the path ends at the radio, and a series inductor on the way is matching rather than a choke.
+    if len(ports) == 1 and not multi_port and not partner:
+        # One connector says it's RF. Another J that isn't a supply, such as an antenna's feed studs, may be the
+        # path's other end, so a path from the port to one of those comes first, and a radio at the end only after.
+        feeds = [r for r in parts if CONNECTOR_REF.match(r) and r not in ports and _maybe_rf_end(pins[r], usable)]
+        if feeds:
+            try:
+                found = find_chains(parts, nets, [[ports[0], f] for f in feeds])
+            except DescribeError:
+                found = []
+            if found:
+                if notes is not None:
+                    ends = ", ".join(f"{c[0][1].partition('.')[0]} to {c[-1][2].partition('.')[0]}" for c in found)
+                    notes.append(f"chains: {ends}, taking {', '.join(feeds)} as RF though {'it says' if len(feeds) == 1 else 'they say'} nothing of it")
+                return found
     radio_end = len(connectors) == 1 and bool(ports) and not multi_port
     if len(connectors) < 2 and not radio_end and not multi_port:
         raise DescribeError(f"an RF path needs two connectors, and this has {connectors or 'none'}")
@@ -294,12 +315,16 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
                         continue
                     if other in seen or other in used or other not in parts or parts[other].get("dnp"):
                         continue
+                    if any(m.partition(".")[0] in seen - {ref} for m in nets[net]):
+                        # This net also reaches a part already on the path, so the path has gone out through a part
+                        # across two of its nets and come back, as through a GDT across a balanced pair: a shunt, not a hop.
+                        continue
                     if (other in connectors and (not partner or other in partner.get(start, ()))) or (radio_end and other.startswith(ACTIVE) and len(pins[other]) > 2):
                         if len(path) + 1 > len(best):
                             best = [*path, step]
                     elif other in connectors:
                         continue        # a connector the hint doesn't pair with this one: a path doesn't run through it
-                    elif radio_end and other[0] == "L" and len([n for n in pins[other].values() if not GROUND.match(n) and not RAIL.match(n)]) == 2:
+                    elif radio_end and INDUCTOR_REF.match(other) and len([n for n in pins[other].values() if not GROUND.match(n) and not RAIL.match(n)]) == 2:
                         walk(other, other_pin, seen | {other}, [*path, step])
                     elif not _blocks_rf(other, parts[other], pins[other]):
                         walk(other, other_pin, seen | {other}, [*path, step])
@@ -374,7 +399,7 @@ def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "", 
         last_net = channel[-1][0]
         for member in kept[last_net]:
             ref, _, pin = member.partition(".")
-            if ref.startswith("L"):
+            if INDUCTOR_REF.match(ref):
                 for net, members in kept.items():
                     # A series inductor in the path has an RF net on its far side, and that isn't a rail it feeds from.
                     if net != last_net and net not in seen_rails and net not in {row[0] for row in chain} and any(m.startswith(ref + ".") for m in members):
