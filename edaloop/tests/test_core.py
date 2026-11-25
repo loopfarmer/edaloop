@@ -4343,3 +4343,48 @@ def test_placement_check_runs_in_the_place_stage_and_goes_stale_with_its_config(
     assert checks.current_inputs(p, ev)
     p.cfg["placement"] = {"clearance_mm": 0.3}
     assert not checks.current_inputs(p, ev)
+
+
+def test_an_inner_track_end_off_a_vias_centre_moves_onto_it_before_the_strip(monkeypatch):
+    ops = _under_kicad_python(monkeypatch, "kicad_ops")
+    ends = [("near", 10.304, 10.0, 0.2), ("centre", 10.0, 10.0, 0.2), ("inside", 10.2, 10.0, 0.2), ("edge", 10.405, 10.0, 0.2),
+            ("away", 10.41, 10.0, 0.2)]
+    # A 0.61 mm via: an end whose 0.2 mm track reaches the ring (within 0.405 mm) moves; one already central, or clear of it, doesn't.
+    assert ops.ends_to_centre((10.0, 10.0), 0.61, ends) == ["near", "inside", "edge"]
+
+
+_STRIP_BOARD = '''
+import pcbnew, sys
+b = pcbnew.BOARD(); b.SetCopperLayerCount(4)
+net = pcbnew.NETINFO_ITEM(b, "N"); b.Add(net)
+def mm(x, y): return pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+for layer, a, c, locked in ((pcbnew.F_Cu, (5, 10), (10, 10), False), (pcbnew.In2_Cu, (10 + float(sys.argv[2]), 10), (15, 10), sys.argv[3] == "1")):
+    t = pcbnew.PCB_TRACK(b); t.SetLayer(layer); t.SetStart(mm(*a)); t.SetEnd(mm(*c)); t.SetWidth(pcbnew.FromMM(0.2)); t.SetNet(net)
+    t.SetLocked(locked); b.Add(t)
+v = pcbnew.PCB_VIA(b); v.SetPosition(mm(10, 10)); v.SetWidth(pcbnew.FromMM(0.61)); v.SetDrill(pcbnew.FromMM(0.3)); v.SetNet(net); b.Add(v)
+pcbnew.SaveBoard(sys.argv[1], b)
+'''
+
+
+@pytest.mark.parametrize("locked", ["0", "1"])
+def test_strip_inner_pads_never_opens_a_net(tmp_path, locked):
+    kp = Path(toolchain.paths()["kicad_python"])
+    if not kp.exists():
+        pytest.skip("no KiCad Python")
+    import json
+    import subprocess
+    ops = Path(checks.__file__).with_name("kicad_ops.py")
+    (tmp_path / "make.py").write_text(_STRIP_BOARD)
+    board, out = tmp_path / "b.kicad_pcb", tmp_path / "s.kicad_pcb"
+    # The In2.Cu track ends 0.304 mm from the centre of a via with a 0.305 mm ring. Stripped as it was, KiCad dropped
+    # the via's In2.Cu pad and the net opened.
+    subprocess.run([kp, tmp_path / "make.py", board, "0.304", locked], check=True, capture_output=True)
+    r = subprocess.run([kp, ops, "strip_inner_pads", board, "N", "1.0", out], check=True, capture_output=True, text=True)
+    report = json.loads(r.stdout.strip().splitlines()[-1])
+    assert report["unconnected_before"] == report["unconnected_after"] == 0
+    if locked == "0":
+        # Its end is moved onto the centre, and the pad that's still unused comes off.
+        assert report["track_ends_centred"] == 1 and report["changed"] == 1 and report["kept_pads"] == []
+    else:
+        # Locked copper isn't moved, so the via keeps its pads, and says so.
+        assert report["track_ends_centred"] == 0 and report["changed"] == 0 and report["kept_pads"] == [{"net": "N", "at": [10.0, 10.0]}]

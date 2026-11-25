@@ -1555,8 +1555,20 @@ def add_voids(src, spec, dst):
     print(json.dumps({"voids": len(data["voids"])}))
 
 
+def ends_to_centre(via_xy, via_width, ends, tol=0.001):
+    """Which track ends to move onto a via's centre before its unused inner pads come off. KiCad keeps an inner pad only
+    where it sees a track joined to the via, and an end inside the ring but off the centre isn't always seen (one
+    0.304 mm out on a 0.305 mm ring lost its pad and opened the net). `ends` is [(key, x, y, width)] for the via's own
+    net's unlocked tracks on inner layers. An end is moved if its copper reaches the ring, and isn't already central."""
+    vx, vy = via_xy
+    return [key for key, x, y, width in ends if tol < math.hypot(x - vx, y - vy) <= (via_width + width) / 2]
+
+
 def strip_inner_pads(src, nets_csv, radius, dst):
-    """Take the unused inner-layer pads off signal vias beside an RF line. A through via's ring on the plane keeps the pour back, and that antipad can reach under the trace."""
+    """Take the unused inner-layer pads off signal vias beside an RF line. A through via's ring on the plane keeps the pour back, and that antipad can reach under the trace.
+
+    A track end on an inner layer that reaches the ring off its centre is moved onto the centre first, so KiCad sees it
+    joined. If the strip still opens a net, the pads go back on the vias that opened it, and they're listed."""
     board = pcbnew.LoadBoard(src)
     nets = set(nets_csv.split(","))
     radius = float(radius)
@@ -1572,17 +1584,41 @@ def strip_inner_pads(src, nets_csv, radius, dst):
         s = 0.0 if length == 0 else max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length))
         return math.hypot(x - x1 - s * dx, y - y1 - s * dy)
 
-    changed = 0
+    def unconnected():
+        board.BuildConnectivity()
+        return board.GetConnectivity().GetUnconnectedCount(False)
+
+    before = unconnected()
+    inner = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK" and not t.IsLocked()
+             and t.GetLayer() not in (pcbnew.F_Cu, pcbnew.B_Cu)]
+    changed, moved = [], 0
     for via in board.GetTracks():
         if via.GetClass() != "PCB_VIA" or via.GetNetname() == "GND":
             continue
         p = via.GetPosition()
         if any(distance(pcbnew.ToMM(p.x), pcbnew.ToMM(p.y), *line) < radius for line in lines) and not via.GetRemoveUnconnected():
+            ends = [((t, end), pcbnew.ToMM(getattr(t, "Get" + end)().x), pcbnew.ToMM(getattr(t, "Get" + end)().y), pcbnew.ToMM(t.GetWidth()))
+                    for t in inner if t.GetNetCode() == via.GetNetCode() for end in ("Start", "End")]
+            for t, end in ends_to_centre((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)), pcbnew.ToMM(via.GetWidth()), ends):
+                getattr(t, "Set" + end)(p)
+                moved += 1
             via.SetRemoveUnconnected(True)
             via.SetKeepStartEnd(True)
-            changed += 1
+            changed.append(via)
+    kept = []
+    if changed and unconnected() > before:
+        # One via at a time, the strips that opened something are given back.
+        for via in changed:
+            now = unconnected()
+            via.SetRemoveUnconnected(False)
+            if unconnected() < now:
+                p = via.GetPosition()
+                kept.append({"net": via.GetNetname(), "at": [round(pcbnew.ToMM(p.x), 3), round(pcbnew.ToMM(p.y), 3)]})
+            else:
+                via.SetRemoveUnconnected(True)
     pcbnew.SaveBoard(dst, board)
-    print(json.dumps({"changed": changed}))
+    print(json.dumps({"changed": len(changed) - len(kept), "track_ends_centred": moved, "kept_pads": kept,
+                      "unconnected_before": before, "unconnected_after": unconnected()}))
 
 
 def plane_coverage(src, nets_csv, layer_name, out):
