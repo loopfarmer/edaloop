@@ -4618,3 +4618,29 @@ def test_a_part_across_a_balanced_pair_is_a_tap_on_the_line(monkeypatch):
     assert "V5" not in ops._pair_legs(rail, chain)
     # A part with a second signal net that isn't the pair's other leg isn't across the pair.
     assert not ops._across_pair({"1": "P", "2": "CTRL", "3": "GND"}, "1", legs)
+
+
+def test_freerouting_dsn_leaves_pour_joined_ground_pins_out_and_keeps_layer_types():
+    from edaloop import route
+    dsn = ('(pcb x\n  (structure\n    (layer F.Cu (type signal))\n    (layer In1.Cu (type power))\n    (layer In2.Cu (type power))\n  )\n'
+           '  (network\n    (net GND\n      (pins U1-2 C1-2 J1-2)\n    )\n    (net VDD\n      (pins U1-1 C1-1)\n    )\n'
+           '    (net "RF IN"\n      (pins J1-1 U1-3)\n    )\n  )\n'
+           '  (wiring\n    (via "Via[0-3]_610:254_um" 100 200 (net GND)(type fix))\n  )\n)\n')
+    text, report = route.dsn_for_freerouting(dsn, ["GND"])
+    assert "(net GND\n      (pins)" in text                      # nothing on GND to connect: the pours join it
+    assert "(pins U1-1 C1-1)" in text and "(pins J1-1 U1-3)" in text
+    assert text.count("(type power)") == 2                     # a poured rail layer stays a plane
+    assert "(net GND)(type fix)" in text                       # GND vias stay, as obstacles
+    assert report == {"pins_left_to_pours": {"GND": 3}}
+    assert route.dsn_for_freerouting(dsn, [])[0] == dsn
+
+
+def test_a_pcbnew_result_is_read_even_when_swig_warnings_share_its_line():
+    from edaloop import toolchain
+    # KiCad 10's SWIG writes leak warnings from C at exit; one landed in front of export_dsn's result on a 151-part board.
+    out = ("swig/python detected a memory leak of type 'PCB_TRACK *', no destructor found.\n"
+           "swig/pytho{\"removed\": 1169, \"kept\": 799}\n"
+           "not json {\n")
+    assert toolchain.json_lines(out) == [{"removed": 1169, "kept": 799}]
+    assert toolchain.json_lines('{"a": 1}\nchatter\n{"b": 2}') == [{"a": 1}, {"b": 2}]
+    assert toolchain.json_lines("no result here") == []

@@ -41,9 +41,9 @@ def _kicad_op(*args, timeout=900) -> dict:
     r = toolchain.run([py, OPS, *args], timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(f"pcbnew {args[0]} failed: {(r.stderr + r.stdout).strip()[-400:]}")
-    for line in reversed(r.stdout.strip().splitlines()):   # pcbnew prints its own chatter around ours
-        if line.startswith("{"):
-            return json.loads(line)
+    found = toolchain.json_lines(r.stdout)    # pcbnew prints its own chatter around ours
+    if found:
+        return found[-1]
     raise RuntimeError(f"pcbnew {args[0]} returned no result: {r.stdout.strip()[-300:]}")
 
 
@@ -68,6 +68,24 @@ def _krt_route(p: Project, stripped: Path, run_dir: Path, keep_nets: list[str]) 
     if not out.exists():
         row["error"] = info.get("tail", "no output")
     return row
+
+
+def dsn_for_freerouting(text: str, keep_nets: list[str]) -> tuple[str, dict]:
+    """The DSN as Freerouting should see it. KiCad lists every pin of a net kept out of routing (GND), and Freerouting then fans
+    each one out though the pours already join them. A kept net keeps its name and its vias, as obstacles, and its pads stay in
+    the footprints as obstacles too, but it loses its pin list, so there's nothing on it to connect. Layers keep KiCad's types:
+    an inner layer poured with a rail is a plane Freerouting may reach that rail through, and calling it a signal layer made it
+    neck VDD tracks down to 0.15 mm on four_channel_demo."""
+    import re
+    emptied = {}
+
+    def pins(m):
+        if m.group(2) not in keep_nets:
+            return m.group(0)
+        emptied[m.group(2)] = len(m.group(3).split())
+        return m.group(1) + "(pins)"
+    text = re.sub(r"(\(net\s+\"?([^\s\")]+)\"?\s*)\(pins([^)]*)\)", pins, text)
+    return text, {"pins_left_to_pours": emptied}
 
 
 def tournament(p: Project, runs: int = 3, passes: int = 20, threads: int = 4) -> dict:
@@ -95,6 +113,8 @@ def tournament(p: Project, runs: int = 3, passes: int = 20, threads: int = 4) ->
             shutil.copy(p.board.parent / table, root / table)
     dsn = root / "board.dsn"
     strip = _kicad_op("export_dsn", p.board, stripped, dsn, ",".join(keep_nets))
+    text, strip["dsn"] = dsn_for_freerouting(dsn.read_text(), keep_nets)
+    dsn.write_text(text)
     results = []
     for i in range(1, runs + 1):
         run_dir = root / f"run{i}"
