@@ -98,6 +98,7 @@ def _zones(board: Board, index: dict[str, int]) -> list[dict]:
 
 
 SINKS = ("U", "IC", "Q", "A")      # parts that use a rail's current, rather than pass it on
+OFF_BOARD = ("J", "P")             # connectors: current that reaches one (a bias-T feeding an active antenna) leaves the board
 
 
 def _ref(pad_name: str) -> str:
@@ -105,7 +106,15 @@ def _ref(pad_name: str) -> str:
 
 
 def _sink_of(load: str, pads: list[dict], rail_net: str) -> str:
-    """The active part a load's current ends in, followed through series resistors and chokes. The load's own part if it reaches none."""
+    """The active part a load's current ends in, followed through series resistors and chokes. A connector if it reaches
+    no active part but one (the current leaves the board), else the load's own part."""
+    sink = _sink_through(load, pads, rail_net, SINKS)
+    if sink == _ref(load) and not sink.startswith(SINKS):
+        return _sink_through(load, pads, rail_net, OFF_BOARD)
+    return sink
+
+
+def _sink_through(load: str, pads: list[dict], rail_net: str, ends: tuple) -> str:
     on_net: dict[str, list[str]] = {}
     nets_of: dict[str, list[tuple[str, str]]] = {}
     for p in pads:
@@ -113,7 +122,7 @@ def _sink_of(load: str, pads: list[dict], rail_net: str) -> str:
             on_net.setdefault(p["net"], []).append(p["name"])
             nets_of.setdefault(_ref(p["name"]), []).append((p["name"], p["net"]))
     start = _ref(load)
-    if start.startswith(SINKS):
+    if start.startswith(ends):
         return start
     seen, frontier = {start}, [(start, load)]
     while frontier:
@@ -126,7 +135,7 @@ def _sink_of(load: str, pads: list[dict], rail_net: str) -> str:
                     who = _ref(other)
                     if who in seen:
                         continue
-                    if who.startswith(SINKS):
+                    if who.startswith(ends):
                         return who
                     if who[0] in "RL" and len(nets_of.get(who, [])) == 2:
                         seen.add(who)
@@ -138,10 +147,16 @@ def _sink_of(load: str, pads: list[dict], rail_net: str) -> str:
 def part_heat(pads: list[dict], rails: list[dict], supply_v: float, overrides: dict | None = None) -> dict[str, dict]:
     """The DC power each part takes from the stated load currents, all of it counted as heat, which errs on the hot side.
 
-    Currents add within a rail. The same current can be listed on two rails in series, such as a supply and the bias net it feeds, so a
-    part takes the largest across rails rather than the sum. `overrides` gives a part's watts directly, and 0 leaves it out.
+    A part's current is charged at its rail's `volts`, or at `supply_v` for a rail that doesn't say. Currents add within
+    a rail. The same current can be listed on two rails in series, such as a supply and the bias net it feeds, so a part
+    takes the largest across rails rather than the sum. A regulator whose output rail gives `volts` is charged what it
+    drops, (V_in - V_out) x I_out, plus any current it takes beyond what it passes on, at V_in: its output's power is
+    already charged to the parts that use it. Current that reaches a connector leaves the board (a bias-T feeding an
+    active antenna) and isn't heat here; it's listed under the connector with no watts. `overrides` gives a part's watts
+    directly, and 0 leaves it out.
     """
     per_rail: list[dict[str, float]] = []
+    volts = [float(rail["volts"]) if rail.get("volts") is not None else float(supply_v) for rail in rails]
     for rail in rails:
         here: dict[str, float] = {}
         for load, amps in rail["loads"].items():
@@ -150,11 +165,25 @@ def part_heat(pads: list[dict], rails: list[dict], supply_v: float, overrides: d
         per_rail.append(here)
     out = {}
     for ref in {r for here in per_rail for r in here}:
-        amps = max(here.get(ref, 0.0) for here in per_rail)
-        out[ref] = {"amps": round(amps, 6), "watts": round(amps * supply_v, 5), "source": "stated current"}
+        k = max(range(len(rails)), key=lambda i: per_rail[i].get(ref, 0.0) * volts[i])
+        amps = per_rail[k].get(ref, 0.0)
+        if ref.startswith(OFF_BOARD):
+            out[ref] = {"amps": round(amps, 6), "watts": 0.0, "source": "leaves the board"}
+            continue
+        out[ref] = {"amps": round(amps, 6), "watts": round(amps * volts[k], 5), "volts": volts[k], "source": "stated current"}
+    for i, rail in enumerate(rails):
+        regulator = _ref(str(rail.get("source", "")))
+        if rail.get("volts") is None or not regulator.startswith(SINKS):
+            continue
+        i_out = sum(float(a) for a in rail["loads"].values())
+        feeds = [k for k in range(len(rails)) if k != i and per_rail[k].get(regulator)]
+        v_in = max((volts[k] for k in feeds), default=float(supply_v))
+        i_in = max((per_rail[k][regulator] for k in feeds), default=i_out)
+        watts = max(v_in - volts[i], 0.0) * i_out + max(i_in - i_out, 0.0) * v_in
+        out[regulator] = {"amps": round(i_in, 6), "watts": round(watts, 5), "source": f"regulator, {v_in:g} V to {volts[i]:g} V"}
     for ref, watts in (overrides or {}).items():
         out[ref] = {"amps": None, "watts": float(watts), "source": "given"}
-    return {r: v for r, v in out.items() if v["watts"] > 0}
+    return {r: v for r, v in out.items() if v["watts"] > 0 or v["source"] == "leaves the board"}
 
 
 def still_air_h(watts: float, area_m2: float, ambient_c: float = 25.0, emissivity: float = 0.9) -> dict:

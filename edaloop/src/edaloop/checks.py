@@ -690,7 +690,7 @@ def power_rails(p: Project) -> Outcome:
     return Outcome({**_files(p, p.board), "power_config": _config(p, "power_config")}, metrics, findings)
 
 
-@check("thermal_field", "verify", tools=("kicad_python", "boardfield"))
+@check("thermal_field", "verify", version=2, tools=("kicad_python", "boardfield"))
 def thermal_field(p: Project) -> Outcome:
     """Current and temperature solved on the real copper, pours included, for each rail in `power`. A failed solve can't pass."""
     cfg = p.section("thermal")
@@ -734,7 +734,12 @@ def thermal_field(p: Project) -> Outcome:
     if supply is None:
         findings.append(Finding("thermal_field:no_part_heat", "thermal.supply_v isn't set, so the parts' own heat isn't in this result, only the copper's", "warning"))
     else:
-        heat = thermal.part_heat(problem["pads"], rails, float(supply), cfg.get("part_watts"))
+        # Each rail's own voltage, where it gives one, so a part on a regulated rail isn't charged the input's.
+        stated = [{**r, "volts": x.get("volts")} for r, x in zip(rails, p.section("power").get("rails", []))]
+        charged = thermal.part_heat(problem["pads"], stated, float(supply), cfg.get("part_watts"))
+        heat = {r: h for r, h in charged.items() if h["watts"] > 0}
+        if charged.keys() - heat.keys():
+            metrics["part_current_off_board"] = {r: h["amps"] for r, h in charged.items() if r not in heat}
         if heat:
             # A person's figure for the air wins. Otherwise it's worked out for this board, as the fixed figure above only suits the copper's own tiny heat.
             x1, y1, x2, y2 = problem["bbox"]
@@ -748,7 +753,7 @@ def thermal_field(p: Project) -> Outcome:
                                              f"{p.name}: with part heat (upper estimate)"))
             top = warm["hotspot"]
             metrics.update(part_heat=heat, part_watts_total=round(sum(h["watts"] for h in heat.values()), 4), part_rise_c=round(top["rise_c"], 2), part_hotspot=top,
-                           part_h_w_m2k=part_h, part_method="stated DC current times supply, all as heat, on the board under the part, in still air with no conduction out through connectors. Junction temperature is higher")
+                           part_h_w_m2k=part_h, part_method="stated DC current times its rail's volts (thermal.supply_v where a rail gives none), a regulator its drop, current reaching a connector left out, the rest all as heat, on the board under the part, in still air with no conduction out through connectors. Junction temperature is higher")
             if not warm["converged"]:
                 findings.append(Finding("thermal_field:parts_not_converged", "the solve with part heat stopped before reaching its tolerance"))
             if abs(warm["energy_error_pct"]) > 1.0:
