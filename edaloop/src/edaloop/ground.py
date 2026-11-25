@@ -28,10 +28,10 @@ PLACEMENT_FAULTS = {"clearance", "hole_clearance", "hole_to_hole", "shorting_ite
 
 def _op(*args) -> dict:
     r = toolchain.run([toolchain.paths()["kicad_python"], OPS, *args], timeout=600)
-    lines = [x for x in r.stdout.splitlines() if x.startswith("{")]
+    lines = toolchain.json_lines(r.stdout)
     if r.returncode != 0 or not lines:
         raise RuntimeError(f"{args[0]} failed: {(r.stdout + r.stderr).strip()[-300:]}")
-    return json.loads(lines[-1])
+    return lines[-1]
 
 
 def _facts(board: Path, work: Path) -> dict:

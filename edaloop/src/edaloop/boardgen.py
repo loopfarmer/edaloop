@@ -102,20 +102,15 @@ class BuildError(ProjectError):
 
 
 # What KiCad's Python prints on its own account when pcbnew loads outside an app. It is never why a build failed.
-_KICAD_NOISE = re.compile(r"assert .* failed in .*: create wxApp before calling this|^\S+\.cpp\(\d+\): assert ")
+_KICAD_NOISE = re.compile(r"assert .* failed in .*: create wxApp before calling this|^\S+\.cpp\(\d+\): assert |swig/python detected a memory leak")
 
 
 def _placement_failure(stdout: str, stderr: str) -> BuildError:
     """The placer's own reason, first, and its data. KiCad's wx asserts are dropped, and so are the JSON lines, which go in `detail`."""
     detail = {}
-    for line in stdout.splitlines():
-        if line.startswith("{"):
-            try:
-                x = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(x, dict) and "error" in x:
-                detail = x
+    for x in toolchain.json_lines(stdout):
+        if isinstance(x, dict) and "error" in x:
+            detail = x
     said = [x for x in (stdout + "\n" + stderr).splitlines() if x.strip() and not _KICAD_NOISE.search(x) and not x.startswith("{")]
     return BuildError("placement failed: " + ("\n".join(said).strip()[-600:] or "the placer stopped without saying why"), detail)
 
@@ -403,10 +398,10 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
     (out / f"{name}.kicad_pro").write_text(json.dumps({**project_file(bench, name), "sheets": sheets["sheets"]}, indent=2))
     seed.unlink(missing_ok=True)
     spec.unlink(missing_ok=True)
-    lines = [x for x in r.stdout.splitlines() if x.startswith("{")]
+    lines = toolchain.json_lines(r.stdout)
     if r.returncode != 0 or not lines:
         raise _placement_failure(r.stdout, r.stderr)
-    result = json.loads(lines[-1])
+    result = lines[-1]
     moved = result.get("taps_beside") or {}
     if moved:
         # The placer set these taps beside the line to fold a row that wouldn't fit otherwise. edaloop.yaml says so, so that the

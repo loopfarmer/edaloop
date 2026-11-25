@@ -564,10 +564,8 @@ def _op(*args, timeout=600) -> dict:
     r = toolchain.run([toolchain.paths()["kicad_python"], OPS, *args], timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(f"{args[0]} failed: {(r.stdout + r.stderr).strip()[-400:]}")
-    for line in reversed(r.stdout.strip().splitlines()):
-        if line.startswith("{"):
-            return json.loads(line)
-    return {}
+    found = toolchain.json_lines(r.stdout)
+    return found[-1] if found else {}
 
 
 def project_rules(project_file: Path) -> dict:

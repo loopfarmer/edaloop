@@ -7,6 +7,7 @@ tool name below.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -52,6 +53,22 @@ def paths() -> dict[str, str]:
 
 class ToolMissing(FileNotFoundError):
     """An external tool that isn't where edaloop looks for it. A FileNotFoundError, so existing handlers still catch it."""
+
+
+def json_lines(stdout: str) -> list:
+    """The JSON objects a pcbnew script printed, in order. KiCad's own chatter shares the stream, and SWIG's exit-time leak
+    warnings are written from C, so one can land in front of ours on the same line, as `swig/pytho{"removed": 1169, ...}`:
+    each line is read from its first `{`, not only when it starts with one."""
+    out = []
+    for line in stdout.splitlines():
+        i = line.find("{")
+        if i < 0:
+            continue
+        try:
+            out.append(json.loads(line[i:]))
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 def run(cmd, cwd=None, env=None, timeout=None) -> subprocess.CompletedProcess:
