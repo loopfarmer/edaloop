@@ -1319,6 +1319,26 @@ def test_many_channels_draw_on_their_own_pages():
     assert s.page_plan(bench) == []
 
 
+def test_parts_where_paths_meet_are_drawn_once_on_the_shared_page():
+    from edaloop import schematic as s
+
+    # Two arms meet at a star resistor R6 and leave through J2, so both paths end R6 -> J2.
+    parts = {r: {"value": "x"} for r in ("J1", "U1", "J3", "U2", "R6", "J2", "C1")}
+    nets = {"A": ["J1.1", "U1.1"], "B": ["U1.2", "R6.1"], "C": ["J3.1", "U2.1"], "D": ["U2.2", "R6.2"], "OUT": ["R6.3", "J2.1", "C1.1"],
+            "GND": ["U1.3", "U2.3", "J1.2", "J2.2", "J3.2", "C1.2"]}
+    chain = [["A", "J1.1", "U1.1"], ["B", "U1.2", "R6.1"], ["OUT", "R6.3", "J2.1"],
+             ["C", "J3.1", "U2.1"], ["D", "U2.2", "R6.2"], ["OUT", "R6.3", "J2.1"]]
+    bench = {"name": "t", "parts": parts, "nets": nets, "chain": chain, "layout": {"footprints": {r: "L:" + r for r in parts}}, "summary": "s"}
+    plan = s.page_plan(bench)
+    assert [(p["title"], p["refs"]) for p in plan] == [("Channel 1", {"J1", "U1"}), ("Channel 2", {"J3", "U2"}), ("Shared", {"R6", "J2", "C1"})]
+    assert plan[0]["chain"] == chain[:2] and plan[0]["note"] == "J1 to R6"
+    out = s.project_sheets(bench, "t")
+    drawn = [r for text in out["files"].values() for r in parts if f'(property "Reference" "{r}"' in text]
+    assert sorted(drawn) == sorted(parts)    # each part once, or KiCad's parity check finds duplicates
+    # A channel's row stops at the net into the Shared page, which joins it by name.
+    assert 'global_label "B"' in out["files"]["t_ch1.kicad_sch"] and 'global_label "B"' in out["files"]["t_shared.kicad_sch"]
+
+
 def test_describe_takes_stackup_and_width_from_a_board(tmp_path):
     from edaloop import describe
 
