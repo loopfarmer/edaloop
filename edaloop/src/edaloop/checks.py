@@ -433,13 +433,22 @@ def placement_critique(p: Project, board_path: Path | None = None):
     from . import placement
     from .scripts.kicad_pcb import Board as GeometryBoard
     from .scripts.kicad_pcb import load_chains
-    chains, width, net_width = load_chains(p.root / p.section("rf")["chains"])
+    named = p.section("rf").get("chains")
+    if not named:
+        raise ProjectError("edaloop.yaml names no RF chains (rf.chains), so there's no RF path to judge. "
+                           "`edaloop build` writes them, or list each RF net's entry and exit pad in a chains file")
+    if not (p.root / named).is_file():
+        raise ProjectError(f"the RF chains file {named} named in edaloop.yaml isn't there")
+    board = Path(board_path) if board_path else p.board
+    if not board.is_file():
+        raise ProjectError(f"the board {board} isn't there")
+    chains, width, net_width = load_chains(p.root / named)
     described = p.root / "board_description.yaml"
     parts = (yaml.safe_load(described.read_text()) or {}).get("parts") or {} if described.exists() else {}
     route_cfg = p.section("route")
     layers = len(route_cfg.get("power_layers") or ["F.Cu", "B.Cu"])
     cfg = {"ground_nets": list(p.section("placement").get("ground_nets") or ["GND"]), **p.section("placement")}
-    return placement.critique(GeometryBoard(str(board_path or p.board)), chains, width, net_width,
+    return placement.critique(GeometryBoard(str(board)), chains, width, net_width,
                               max_over_pct=float(p.section("rf").get("max_over_pct", 5.0)), parts=parts, route_layers=layers, cfg=cfg)
 
 
