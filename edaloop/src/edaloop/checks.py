@@ -443,7 +443,8 @@ def placement_critique(p: Project, board_path: Path | None = None):
                               max_over_pct=float(p.section("rf").get("max_over_pct", 5.0)), parts=parts, route_layers=layers, cfg=cfg)
 
 
-@check("placement", "place")
+# Version 2: RF findings name the parts on the hop, so a waiver bound to a version 1 message no longer matches it.
+@check("placement", "place", version=2)
 def placement_check(p: Project) -> Outcome:
     """What a placed board will cost to route, read before routing: each RF net's shortest path around the pads against its
     floor, dedicated pins whose escapes cross, other nets that must cross an RF line beside a limiter, and RUDY congestion."""

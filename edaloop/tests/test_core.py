@@ -1068,6 +1068,54 @@ def test_project_files_holds_a_guessed_package_back_from_release(tmp_path):
     assert [x["ref"] for x in ev.metrics["stand_in_footprints"]] == ["U1", "U2"]
 
 
+def test_an_overflow_says_how_far_and_what_to_change():
+    from edaloop import outline_fit
+    assert outline_fit.overflow((0.9, 39.0, 4.0, 14.0), (40, 20), "x") is None
+    # gain_block_demo with gap_mm 4.5: the row is too long for the board.
+    long = outline_fit.overflow((0.90, 69.24, 4.32, 14.49), (40, 20), "x", ["U1", "U2"])
+    assert long["over_mm"] == {"right": 29.74} and long["row_mm"] == 68.34 and long["fits_on_axis"] is None
+    assert "gap_mm" in long["hint"] and "with U1, U2 set square. The RF row is 68.34 mm long" in outline_fit.message(long)
+    # lband_element with axis x on its 26 x 66 board: the row fits only turned, and the hint says so instead of "shrink the gap".
+    turned = outline_fit.overflow((0.90, 53.91, 1.92, 19.27), (26, 66), "x")
+    assert turned["fits_on_axis"] == "y" and "Set layout.axis: y" in turned["hint"] and "gap_mm" not in turned["hint"]
+    # gain_block_demo with line 1.0: the row fits along x, and sits past the top edge.
+    off = outline_fit.overflow((0.90, 33.24, -4.69, 3.50), (40, 20), "x")
+    assert off["over_mm"] == {"top": 5.19} and "past the top edge: move layout.line 5.19 mm" in off["hint"]
+
+
+def test_a_failed_placement_leads_with_its_reason_not_kicads_noise():
+    from edaloop import boardgen
+    data = {"error": "outline_overflow", "over_mm": {"right": 29.74}}
+    stderr = ('./src/common/stdpbase.cpp(59): assert ""traits"" failed in Get(): create wxApp before calling this\n'
+              "parts span x 0.90..69.24, y 4.32..14.49, outside the 40 x 20 mm outline with a 0.5 mm margin\n")
+    e = boardgen._placement_failure(json.dumps(data) + "\n", stderr)
+    assert str(e).startswith("placement failed: parts span x 0.90..69.24") and "wxApp" not in str(e) and "{" not in str(e)
+    assert e.detail == data
+    assert boardgen._placement_failure("", "").detail == {} and "without saying why" in str(boardgen._placement_failure("", ""))
+
+
+@pytest.mark.parametrize("made_first", [False, True])
+def test_a_failed_build_leaves_nothing_to_refuse_the_next(tmp_path, monkeypatch, made_first):
+    from edaloop import boardgen, testbench
+    out = tmp_path / "board"
+    if made_first:
+        out.mkdir()
+
+    def fail(bench, name, bench_path, out, footprint_dirs):
+        (out / "board_description.yaml").write_text("x")
+        (out / "lib.pretty").mkdir()
+        raise boardgen.BuildError("placement failed: parts span ...", {"error": "outline_overflow"})
+
+    monkeypatch.setattr(boardgen, "_write", fail)
+    with pytest.raises(boardgen.BuildError) as e:
+        boardgen.build(testbench.BENCHES / "gain_block_demo.yaml", out, [])
+    assert e.value.detail == {"error": "outline_overflow"}
+    # The folder is as it was: gone if the build made it, empty if it was there already. The next build into it can start.
+    assert (out.is_dir() and not any(out.iterdir())) if made_first else not out.exists()
+    result = boardgen.make(testbench.BENCHES / "gain_block_demo.yaml", out, [])
+    assert result["stopped_at"] in ("preflight", "build") and "isn't empty" not in result.get("refused", "")
+
+
 def test_build_refuses_a_folder_with_a_board_in_it(tmp_path):
     from edaloop import boardgen, testbench
     (tmp_path / "board").mkdir()
@@ -2122,6 +2170,20 @@ def test_an_evaluation_fetches_a_projects_custom_rules_when_it_has_them(tmp_path
     asked.clear()
     evaluate.fetch({**sample, "repo": "norules"})
     assert asked == []
+
+
+def test_eval_keeps_the_description_it_judged(tmp_path, monkeypatch):
+    import yaml
+
+    from edaloop import evaluate
+    d = {"name": "x", "chain": [["RF", "J1.1", "J2.1"]], "layout": {"axis": "x"}}
+    for name, value in {"fetch": lambda s: tmp_path / "x.kicad_pcb", "read_kicad": lambda s: {"copper_layers": 2},
+                        "copy_kicad_board": lambda sample, source, eagle, out, name: out.mkdir(parents=True) or out / "x.kicad_pcb", "import_score": lambda *a: [],
+                        "describe_score": lambda *a: ([], d), "fritzing_score": lambda *a: []}.items():
+        monkeypatch.setattr(evaluate, name, value)
+    sample = {"title": "t", "class": "c", "product": "p"}
+    assert not [r for r in evaluate.evaluate_one("s", sample, tmp_path / "work", "describe")["rows"] if r["item"] == "crash"]
+    assert yaml.safe_load((tmp_path / "work" / "s" / "description.yaml").read_text()) == d
 
 
 def test_unstated_rf_path_reads_as_info_not_as_none(tmp_path, monkeypatch):
@@ -3637,6 +3699,9 @@ def test_critic_passes_a_clear_rf_hop_and_reports_one_a_part_blocks(tmp_path):
     over = [f for f in blocked.findings if f[0] == "placement:rf:RF:over_floor"]
     assert over and over[0][2] == "error" and "in the way" in over[0][1]
     assert blocked.metrics["rf_estimate_mm"] > 10.5 and blocked.cost > clear.cost
+    # The finding names the parts a fix would move or turn, so no reader has to map the net to them.
+    assert "parts U1, U2" in over[0][1] and blocked.metrics["rf_parts_by_net"] == {"RF": ["U1", "U2"]}
+    assert clear.metrics["rf_parts_by_net"] == {} and clear.hops[0]["parts"] == ["U1", "U2"]
 
 
 def test_critic_routes_a_net_named_on_several_rows_as_one_tree(tmp_path):

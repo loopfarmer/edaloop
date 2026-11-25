@@ -534,6 +534,9 @@ def evaluate_one(key: str, sample: dict, work: Path, level: str) -> dict:
         result["rows"] += import_score(board, eagle)
         rows, d = describe_score(sample, board, name)
         result["rows"] += rows
+        if d:
+            # Kept, so the description a row was judged on can be read and rebuilt without describing the board again.
+            (out / "description.yaml").write_text(yaml.safe_dump(d, sort_keys=False, width=120))
         result["rows"] += fritzing_score(sample, board)
         if level == "checks":
             known = sample.get("known") or {}
