@@ -736,6 +736,12 @@ def test_power_solver_joins_a_via_over_a_pads_edge_and_says_so():
     # In the pad, it's an ordinary via in pad.
     r = solve(5.5)
     assert r.connected and r.edge_vias == []
+    # A track from the via into the pad joins it anyway, so a ring that grazes the pad's edge is no finding: routers leave most vias so.
+    into = Track("segment", "V", "F.Cu", (5.0, 0), (5.5, 0), 0.3, 0, False)
+    tail = Track("segment", "V", "In1.Cu", (5, 0), (5.0, 0), 0.5, 0, False)
+    via = Track("via", "V", "F.Cu", (5.0, 0), (5.0, 0), 0.6, 0.3, False)
+    r = power.solve_rail("V", [feed, tail, via, into], pads, "S.1", {"L.1": 1.0}, thickness_um={}, board_height_mm=1.6, pad_layer_map=layers)
+    assert r.connected and r.edge_vias == []
 
 
 def test_power_solver_keeps_a_narrow_neckdown_visible():
