@@ -2,7 +2,30 @@
 
 A description is one YAML file with a board's parts, nets, RF path and stackup. `testbenches/` holds examples. `edaloop describe` writes one from a schematic or a board, and marks with `REQUIRED` what the source can't say, such as a load's current. A build refuses until a person fills those in.
 
-`assumed` lists defaults it used, such as the stackup when reading a schematic. `likely_rails` lists nets that look like supplies but have no currents yet. They aren't checked until you add them under `project.rails` with their source and load currents, and until then the power check fails rather than passing with nothing to check.
+`assumed` lists defaults it used, such as the stackup when reading a schematic, and anything it left out or guessed about the RF path. `likely_rails` lists nets that look like supplies but have no currents yet. They aren't checked until you add them under `project.rails` with their source and load currents, and until then the power check fails rather than passing with nothing to check.
+
+### Boards with many connectors
+
+`describe` finds each RF path by trying every route between connectors, and keeps the longest. A board with many connectors and small signal nets has more routes than it can try (`SEARCH_LIMIT` steps), and a search cut short wanders through logic. So it stops, and names the connector pairs that have a route, with the fewest hops between each:
+
+```
+edaloop: more routes between the 7 connectors than can be searched. Name the connector pairs each RF path runs between with --chains-hint, ...
+Pairs with a route, fewest hops first: J1-J2 (6 hops); J1-J5 (8 hops); J2-J5 (8 hops)
+```
+
+Name the pairs from the design in a YAML file, and describe again:
+
+```bash
+echo '[[J2, J5]]' > pairs.yaml
+```
+
+```bash
+edaloop describe board.kicad_pcb -o d.yaml --band-mhz 1 3800 --chains-hint pairs.yaml
+```
+
+Each path then ends only at its partner, and each pair gets a search budget of its own. A pair whose routes still can't all be tried gets its most direct route, and `assumed` says so. That route can leave out a part on a longer branch, such as a filter beside a bypass, so check it. A pair that can't be joined without parts already on another path is named in `assumed` too. The MCP tool takes the same pairs as `chains_hint`.
+
+A reference that more than one footprint carries, such as stitching vias drawn as footprints all called `GND_VIA`, isn't one part. `describe` leaves those footprints out and lists them in `assumed`.
 
 ## How a board is placed
 

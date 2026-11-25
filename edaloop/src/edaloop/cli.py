@@ -82,6 +82,7 @@ def main(argv=None):
     ds.add_argument("-o", "--output", type=Path, required=True)
     ds.add_argument("--band-mhz", type=float, nargs=2, required=True, metavar=("LOW", "HIGH"))
     ds.add_argument("--name", help="board name, by default the schematic's")
+    ds.add_argument("--chains-hint", type=Path, help="a YAML list of connector pairs each RF path runs between, such as [[J1, J2], [J3, J4]], for a board with too many routes to search")
     cc = sub.add_parser("convert-chains", help="turn a Python chain spec (chains.py) into the YAML one edaloop reads")
     cc.add_argument("chains", help="the .py chain spec")
     cc.add_argument("-o", "--output", help="the .yaml to write (default: beside it)")
@@ -143,7 +144,8 @@ def main(argv=None):
             from . import describe as described
             with tempfile.TemporaryDirectory() as tmp:
                 try:
-                    result = described.describe_schematic(args.schematic, args.name or args.schematic.stem, list(args.band_mhz), args.output, Path(tmp))
+                    pairs = described.load_pairs(args.chains_hint) if args.chains_hint else None
+                    result = described.describe_schematic(args.schematic, args.name or args.schematic.stem, list(args.band_mhz), args.output, Path(tmp), pairs=pairs)
                 except described.DescribeError as e:
                     print(f"edaloop: {e}", file=sys.stderr)
                     return 1

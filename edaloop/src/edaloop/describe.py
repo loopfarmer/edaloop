@@ -49,20 +49,34 @@ def read_netlist(path: Path) -> tuple[dict, dict]:
     return parts, nets
 
 
-def read_board(path: Path) -> tuple[dict, dict]:
+def read_board(path: Path, shared: dict | None = None) -> tuple[dict, dict]:
     """The same from a routed or compiled board, for a design with no schematic to read, such as an atopile build.
 
     A numbered pad on no net gets the name KiCad gives an unconnected pin, since on a board that's all an empty net can mean.
+    A reference that more than one footprint carries, such as a stitching via drawn as a footprint, isn't one part, so
+    those footprints are left out, and counted by reference in `shared`.
     """
+    import collections
+
     from .pcbfile import Board, _child
 
     tree = Board(path).tree
     numbered = {x[1]: x[2] for x in tree if isinstance(x, list) and x and x[0] == "net" and len(x) > 2}
+    footprints = [x for x in tree if isinstance(x, list) and x and x[0] == "footprint"]
+
+    def reference(fp: list) -> str | None:
+        return next((x[2] for x in fp if isinstance(x, list) and x[0] == "property" and len(x) > 2 and x[1] == "Reference"), None)
+
+    count = collections.Counter(reference(fp) for fp in footprints)
     parts, nets = {}, {}
-    for fp in (x for x in tree if isinstance(x, list) and x and x[0] == "footprint"):
+    for fp in footprints:
         props = {x[1]: x[2] for x in fp if isinstance(x, list) and x[0] == "property" and len(x) > 2}
         ref = props.get("Reference")
         if not ref or ref.startswith(("REF", "#")):
+            continue
+        if count[ref] > 1:
+            if shared is not None:
+                shared[ref] = count[ref]
             continue
         entry = {"value": props.get("Value", ""), "footprint": fp[1]}
         mpn = props.get("MPN") or props.get("Partnumber") or props.get("Manufacturer Part Number")
@@ -139,8 +153,18 @@ def _blocks_rf(ref: str, part: dict, pins: dict[str, str]) -> bool:
     return False
 
 
-def find_chains(parts: dict, nets: dict) -> list[list[list[str]]]:
-    """Each RF path on the board, longest first, with no part shared between two of them. Each is rows of net, entry pin and exit pin."""
+class _Spent(Exception):
+    """The chain search ran out of steps."""
+
+
+def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list | None = None) -> list[list[list[str]]]:
+    """Each RF path on the board, longest first, with no part shared between two of them. Each is rows of net, entry pin and exit pin.
+
+    The search tries every route between connectors, up to SEARCH_LIMIT steps in all. A board with many connectors and
+    small signal nets has more routes than that, and a path cut short would wander through logic, so the search refuses
+    and names the connector pairs it can join. `pairs` says which connectors each path runs between, as a person knows
+    them: a path then ends only at its start's partner, each pair has a SEARCH_LIMIT of its own, and a pair whose routes
+    still can't all be tried gets its shortest route, recorded in `notes`."""
     pins: dict[str, dict[str, str]] = {r: {} for r in parts}
     for net, members in nets.items():
         for member in members:
@@ -150,6 +174,15 @@ def find_chains(parts: dict, nets: dict) -> list[list[list[str]]]:
     # A part that says it's an RF connector or antenna, whatever its reference. On a schematic with no such word, any J.
     ports = sorted((r for r, p in parts.items() if RF_PORT.search(f"{p.get('value', '')} {p.get('footprint', '')}")), key=lambda r: (len(r), r))
     connectors = ports or sorted((r for r in parts if CONNECTOR_REF.match(r)), key=lambda r: (len(r), r))
+    partner: dict[str, set] = {}
+    for a, b in pairs or []:
+        partner.setdefault(str(a), set()).add(str(b))
+        partner.setdefault(str(b), set()).add(str(a))
+    unknown = sorted(r for r in partner if r not in parts)
+    if unknown:
+        raise DescribeError(f"the chains hint names {', '.join(unknown)}, which aren't parts on this board")
+    if partner:
+        connectors = sorted(set(connectors) | set(partner), key=lambda r: (len(r), r))
     # A control or power bus joins many parts, and a signal doesn't travel along one.
     usable = {n for n, m in nets.items() if not GROUND.match(n) and not RAIL.match(n) and not n.startswith("unconnected-") and len(m) <= MAX_RF_NET_PINS}
     # One footprint can hold two RF ports, as an in-line part with a plug at one end and a jack at the other does. Each of its signal pins on a
@@ -162,16 +195,52 @@ def find_chains(parts: dict, nets: dict) -> list[list[list[str]]]:
     chains: list = []
     used: set[str] = set()
     steps = [0]
+    direct: set = set()     # the (start, end) of each path that is a shortest route, not the longest
+
+    def shortest(a: str, b: str) -> list:
+        """The route from a to b through the fewest parts, as chain rows, or [] if there is none."""
+        prev: dict = {a: None}
+        queue = [a]
+        for ref in queue:
+            if ref == b:
+                break
+            for pin, net in pins[ref].items():
+                if net not in usable:
+                    continue
+                for member in nets[net]:
+                    other, _, _ = member.partition(".")
+                    if other in prev or other in used or other not in parts or parts[other].get("dnp"):
+                        continue
+                    if other != b and (other in connectors or _blocks_rf(other, parts[other], pins[other])):
+                        continue
+                    prev[other] = (ref, pin, net, member)
+                    queue.append(other)
+        if b not in prev:
+            return []
+        rows, ref = [], b
+        while prev[ref]:
+            src, pin, net, member = prev[ref]
+            rows.append([net, f"{src}.{pin}", member])
+            ref = src
+        return rows[::-1]
+
+    def spent() -> DescribeError:
+        found = [(a, b, len(r)) for i, a in enumerate(connectors) for b in connectors[i + 1:] if (r := shortest(a, b))]
+        joined = "; ".join(f"{a}-{b} ({n} hops)" for a, b, n in sorted(found, key=lambda x: x[2])[:12]) or "none"
+        return DescribeError(f"more routes between the {len(connectors)} connectors than can be searched. Name the connector pairs each "
+                             "RF path runs between with --chains-hint, a YAML list such as [[J1, J2]], or write the chains by hand. "
+                             f"Pairs with a route, fewest hops first: {joined}")
 
     def longest_from(start: str) -> list:
         best: list = []
+        if partner:
+            steps[0] = 0        # each named pair has a budget of its own
 
         def walk(ref: str, pin_in: str | None, seen: set, path: list) -> None:
             nonlocal best
             steps[0] += 1
             if steps[0] > SEARCH_LIMIT:
-                raise DescribeError(f"more routes between the {len(connectors)} connectors than can be searched. A board with many channels or a "
-                                    "combining node needs its chains written by hand, for now")
+                raise _Spent
             for pin, net in pins[ref].items():
                 if pin == pin_in or net not in usable:
                     continue
@@ -187,31 +256,64 @@ def find_chains(parts: dict, nets: dict) -> list[list[list[str]]]:
                         continue
                     if other in seen or other in used or other not in parts or parts[other].get("dnp"):
                         continue
-                    if other in connectors or (radio_end and other.startswith(ACTIVE) and len(pins[other]) > 2):
+                    if (other in connectors and (not partner or other in partner.get(start, ()))) or (radio_end and other.startswith(ACTIVE) and len(pins[other]) > 2):
                         if len(path) + 1 > len(best):
                             best = [*path, step]
+                    elif other in connectors:
+                        continue        # a connector the hint doesn't pair with this one: a path doesn't run through it
                     elif radio_end and other[0] == "L" and len([n for n in pins[other].values() if not GROUND.match(n) and not RAIL.match(n)]) == 2:
                         walk(other, other_pin, seen | {other}, [*path, step])
                     elif not _blocks_rf(other, parts[other], pins[other]):
                         walk(other, other_pin, seen | {other}, [*path, step])
-        walk(start, None, {start}, [])
+        try:
+            walk(start, None, {start}, [])
+        except _Spent:
+            if not partner:
+                raise spent() from None
+            # Every route couldn't be tried, so take the most direct one to a partner, and say so.
+            routes = [r for b in sorted(partner.get(start, ())) if b not in used for r in [shortest(start, b)] if r]
+            best = min(routes, key=len) if routes else []
+            if best:
+                direct.add((start, best[-1][2].partition(".")[0]))
         return best
     while True:
-        found = [longest_from(c) for c in connectors if c not in used]
+        found = [longest_from(c) for c in connectors if c not in used and (not partner or c in partner)]
         found = [f for f in found if f]
         if not found:
             break
         best = max(found, key=len)
         chains.append(best)
+        ends = (best[0][1].partition(".")[0], best[-1][2].partition(".")[0])
+        if ends in direct and notes is not None:
+            notes.append(f"chains: {ends[0]} to {ends[1]} is the most direct route, as there were too many routes to try every one")
         for _, a, b in best:
             used.update((a.partition(".")[0], b.partition(".")[0]))
     if not chains:
-        raise DescribeError("no path between connectors through signal parts")
+        raise DescribeError("no path between connectors through signal parts" + (" between the hinted pairs" if partner else ""))
+    if notes is not None:
+        joined = {frozenset((c[0][1].partition(".")[0], c[-1][2].partition(".")[0])) for c in chains}
+        for a, b in pairs or []:
+            if frozenset((str(a), str(b))) not in joined:
+                notes.append(f"chains: no path for the hinted pair {a}-{b} that keeps clear of the parts on the other paths")
     return chains
 
 
-def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "") -> dict:
-    parts, nets = read_board(netlist) if Path(netlist).suffix == ".kicad_pcb" else read_netlist(netlist)
+def load_pairs(path: Path) -> list[list[str]]:
+    """A chains hint: a YAML list of connector pairs, each RF path's two ends, such as [[J1, J2], [J3, J4]]."""
+    try:
+        data = yaml.safe_load(Path(path).read_text())
+    except (OSError, yaml.YAMLError) as e:
+        raise DescribeError(f"couldn't read the chains hint {path}: {e}") from None
+    if isinstance(data, dict):
+        data = data.get("pairs")
+    if not isinstance(data, list) or not data or not all(isinstance(x, list) and len(x) == 2 and x[0] != x[1] for x in data):
+        raise DescribeError(f"the chains hint {path} must be a list of connector pairs, such as [[J1, J2], [J3, J4]]")
+    return [[str(a), str(b)] for a, b in data]
+
+
+def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "", pairs: list | None = None) -> dict:
+    shared: dict[str, int] = {}
+    parts, nets = read_board(netlist, shared) if Path(netlist).suffix == ".kicad_pcb" else read_netlist(netlist)
     # The carrier nets KiCad makes for an unconnected pin mean the pin is open.
     opens = []
     kept = {}
@@ -220,7 +322,8 @@ def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "") 
             opens += members
         else:
             kept[net] = members
-    channels = find_chains(parts, kept)
+    notes: list[str] = []
+    channels = find_chains(parts, kept, pairs, notes)
     chain = [row for channel in channels for row in channel]
     footprints = {r: p.pop("footprint") for r, p in parts.items()}
     missing = [r for r, f in footprints.items() if not f]
@@ -246,7 +349,10 @@ def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "") 
         if ref.startswith("J") or ref.startswith("FL") or parts[ref].get("dnp"):
             models[ref] = {"kind": "open", "reason": "no DC path modelled: connector, RF filter or not fitted"}
     facts = board_facts(Path(netlist), chain) if Path(netlist).suffix == ".kicad_pcb" else {}
-    assumed = [k for k in ("stackup", "rf_line_width_mm") if k not in facts]
+    assumed = [k for k in ("stackup", "rf_line_width_mm") if k not in facts] + notes
+    if shared:
+        assumed.append("parts: left out footprints that share a reference, so aren't one part: " +
+                       ", ".join(f"{r} x{n}" for r, n in sorted(shared.items(), key=lambda x: -x[1])))
     description = {
         "name": name,
         "summary": f"Described from {source or Path(netlist).name}. {len(channels)} RF path(s), the first: " +
@@ -319,7 +425,8 @@ def board_footprints(board: Path, description: dict, out: Path, replace: bool = 
             "build": f"edaloop build {Path(out).name} -o board --footprints {rel}"}
 
 
-def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path, replace_footprints: bool = True) -> dict:
+def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path, replace_footprints: bool = True,
+                       pairs: list | None = None) -> dict:
     """Write the description from a schematic, through KiCad's netlist, or straight from a board's pads."""
     from .project import FILE
     if Path(out).name == FILE or Path(out).resolve().name == FILE:
@@ -333,7 +440,7 @@ def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: P
         r = toolchain.run([toolchain.paths()["kicad_cli"], "sch", "export", "netlist", "--format", "kicadxml", "-o", netlist, schematic], timeout=120)
         if r.returncode != 0 or not netlist.exists():
             raise DescribeError(f"couldn't export a netlist: {r.stderr.strip()[-300:]}")
-    description = describe(netlist, name, band_mhz, Path(schematic).name)
+    description = describe(netlist, name, band_mhz, Path(schematic).name, pairs)
     copied = board_footprints(Path(schematic), description, Path(out), replace_footprints) if Path(schematic).suffix == ".kicad_pcb" else None
     head = "# Written by `edaloop describe`. Check the RF path, and supply anything marked REQUIRED.\n"
     if copied and copied["copied"]:
