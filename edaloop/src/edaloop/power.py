@@ -47,6 +47,23 @@ def via_resistance_ohm(drill_mm: float, height_mm: float) -> float:
     return COPPER_RHO_OHM_MM * height_mm / area
 
 
+def _joined_without(edges: list, k: int) -> bool:
+    """Whether edge k's two ends are still joined with edge k left out."""
+    a, b = edges[k][0], edges[k][1]
+    adjacency: dict[int, list] = {}
+    for i, (u, v, _, _) in enumerate(edges):
+        if i != k:
+            adjacency.setdefault(u, []).append(v)
+            adjacency.setdefault(v, []).append(u)
+    seen, stack = {a}, [a]
+    while stack:
+        for m in adjacency.get(stack.pop(), []):
+            if m not in seen:
+                seen.add(m)
+                stack.append(m)
+    return b in seen
+
+
 @dataclass
 class RailResult:
     net: str
@@ -158,8 +175,12 @@ def solve_rail(net: str, tracks: list, pads: dict, source: str, loads: dict, *, 
             on_pad = [e for e, lyr in zip(ends, layers) if lyr in pad_layers(name)]
             edges.append((pad_nodes[name], (on_pad or ends)[0], 1e-9, None))
             if abs(vx - x) > hw + WELD_MM or abs(vy - y) > hh + WELD_MM:
-                edge_vias.append({"pad": name, "via": [round(vx, 3), round(vy, 3)],
-                                  "off_pad_mm": round(math.hypot(max(abs(vx - x) - hw, 0.0), max(abs(vy - y) - hh, 0.0)), 3)})
+                edge_vias.append(({"pad": name, "via": [round(vx, 3), round(vy, 3)],
+                                   "off_pad_mm": round(math.hypot(max(abs(vx - x) - hw, 0.0), max(abs(vy - y) - hh, 0.0)), 3)},
+                                  len(edges) - 1))
+    # Only a via that is the pad's sole joint counts: one whose ring merely grazes a pad a track already runs into
+    # joins nothing the track doesn't, and is where a router leaves most vias.
+    edge_vias = [info for info, k in edge_vias if not _joined_without(edges, k)]
     n = len(nodes)
     if source not in pad_nodes:
         raise ValueError(f"{net}: source {source} is not a pad on this net")
