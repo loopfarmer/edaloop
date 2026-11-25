@@ -4644,3 +4644,29 @@ def test_a_pcbnew_result_is_read_even_when_swig_warnings_share_its_line():
     assert toolchain.json_lines(out) == [{"removed": 1169, "kept": 799}]
     assert toolchain.json_lines('{"a": 1}\nchatter\n{"b": 2}') == [{"a": 1}, {"b": 2}]
     assert toolchain.json_lines("no result here") == []
+
+
+def test_describe_reads_kicads_escaped_net_names_as_a_drawn_label_gives_them_back(tmp_path):
+    from edaloop import describe
+    from edaloop import schematic as drawing
+    # KiCad saves a label typed "+5V/1" as "+5V{slash}1" and reads it back as "+5V/1": the description must hold the latter.
+    parts = {"J1": "in", "C1": "100pF", "J2": "out"}
+    nets = {"/Power Supply/VREG5V{slash}4": ["J1.1", "C1.1"], "+5V{slash}1": ["C1.2", "J2.1"], "GND": ["J1.2", "J2.2"]}
+    _, got = describe.read_netlist(_netlist(tmp_path, nets, parts))
+    assert set(got) == {"Power Supply/VREG5V/4", "+5V/1", "GND"}
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])):
+        pytest.skip("needs kicad-cli for the round trip")
+    bench = _loop_through(tmp_path)
+    ren = {"A": "/Power Supply/VREG5V/4", "B": "+5V/1"}
+    bench["nets"] = {ren.get(k, k): v for k, v in bench["nets"].items()}
+    bench["chain"] = [[ren.get(r[0], r[0]), *r[1:]] for r in bench["chain"]]
+    sheets = drawing.project_sheets(bench, "x")
+    for name, text in sheets["files"].items():
+        (tmp_path / name).write_text(text)
+    (tmp_path / "edaloop.kicad_sym").write_text(sheets["library"])
+    (tmp_path / "sym-lib-table").write_text('(sym_lib_table\n  (version 7)\n  (lib (name "edaloop")(type "KiCad")'
+                                            '(uri "${KIPRJMOD}/edaloop.kicad_sym")(options "")(descr ""))\n)\n')
+    r = toolchain.run([toolchain.paths()["kicad_cli"], "sch", "export", "netlist", "--format", "kicadxml", "-o", tmp_path / "n2.xml",
+                       tmp_path / "x.kicad_sch"], timeout=120)
+    assert r.returncode == 0
+    assert drawing.check_netlist(tmp_path / "n2.xml", bench) == []

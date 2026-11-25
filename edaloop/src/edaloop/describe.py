@@ -37,6 +37,18 @@ DIGITAL_PART = re.compile(r"FPGA|CPLD|\bMCU\b|MICROCONTROLLER|PROCESSOR|^XC[A-Z]
                           r"OCXO|TCXO|VCXO|\bXO\b|OSCILLATOR", re.I)
 
 
+# KiCad's escapes in a saved net name: a label typed "+5V/1" is stored as "+5V{slash}1", since "/" is its sheet separator, and
+# read back as "+5V/1". A description holds the name a drawn label gives back, so that the drawn schematic matches it.
+KICAD_ESCAPES = {"{slash}": "/", "{backslash}": "\\", "{colon}": ":", "{dblquote}": '"', "{quote}": "'", "{lt}": "<", "{gt}": ">",
+                 "{tab}": "\t", "{return}": "\n", "{space}": " ", "{comma}": ","}
+_ESCAPE = re.compile("|".join(re.escape(k) for k in KICAD_ESCAPES))
+
+
+def kicad_name(name: str) -> str:
+    """A net name as KiCad shows it, with its file escapes undone."""
+    return _ESCAPE.sub(lambda m: KICAD_ESCAPES[m.group(0)], name)
+
+
 class DescribeError(Exception):
     pass
 
@@ -58,7 +70,7 @@ def read_netlist(path: Path) -> tuple[dict, dict]:
     nets = {}
     for net in root.find("nets"):
         members = [f"{n.get('ref')}.{n.get('pin')}" for n in net]
-        nets[net.get("name").lstrip("/")] = members
+        nets[kicad_name(net.get("name").lstrip("/"))] = members
     return parts, nets
 
 
@@ -107,7 +119,7 @@ def read_board(path: Path, shared: dict | None = None) -> tuple[dict, dict]:
                 continue
             seen.add(number)
             n = _child(pad, "net")
-            name = numbered.get(n[-1], n[-1]) if n else ""
+            name = kicad_name(str(numbered.get(n[-1], n[-1]))) if n else ""
             nets.setdefault(name or f"unconnected-({ref}-Pad{number})", []).append(f"{ref}.{number}")
     return parts, nets
 
