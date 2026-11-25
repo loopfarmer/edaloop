@@ -1552,6 +1552,29 @@ def test_part_heat_follows_each_load_to_the_part_using_it():
         heated_parts(pads, {"U9": heat["U2"]})
 
 
+def test_part_heat_charges_each_rail_its_volts_a_regulator_its_drop_and_not_current_that_leaves():
+    from edaloop.thermal import part_heat
+
+    def pad(name, net):
+        return {"name": name, "net": net, "x": 0.0, "y": 0.0, "hw": 0.2, "hh": 0.2, "layers": [0]}
+    # 6 V in. U1, an LDO, makes 3.3 V for U2's 100 mA, taking 2 mA more itself. L5 is a bias-T choke feeding 50 mA out
+    # through J1 to an active antenna.
+    pads = [pad("U1.1", "VIN"), pad("U1.2", "V3"), pad("U1.3", "GND"), pad("U2.1", "V3"), pad("U2.2", "GND"),
+            pad("L5.1", "VIN"), pad("L5.2", "ANT"), pad("J1.1", "ANT"), pad("J1.2", "GND")]
+    rails = [{"net": "VIN", "source": "J2.1", "loads": {"U1.1": 0.102, "L5.1": 0.05}},
+             {"net": "V3", "source": "U1.2", "volts": 3.3, "loads": {"U2.1": 0.1}}]
+    heat = part_heat(pads, rails, 6.0)
+    assert heat["U2"]["watts"] == pytest.approx(0.33)                     # at its rail's 3.3 V, not the input's 6 V
+    assert heat["U1"]["watts"] == pytest.approx(2.7 * 0.1 + 0.002 * 6)    # its drop, plus its own 2 mA
+    assert heat["J1"] == {"amps": 0.05, "watts": 0.0, "source": "leaves the board"}
+    assert "L5" not in heat
+    # 0.612 W in all, where charging every load the supply's 6 V made it 1.512 W.
+    assert sum(h["watts"] for h in heat.values()) == pytest.approx(0.612)
+    # A rail that gives no volts is charged the supply's, as before.
+    rails[1].pop("volts")
+    assert part_heat(pads, rails, 6.0)["U2"]["watts"] == pytest.approx(0.6)
+
+
 def test_no_supply_voltage_is_said_out_loud(tmp_path, monkeypatch):
     from edaloop import thermal
 

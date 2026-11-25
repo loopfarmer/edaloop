@@ -22,6 +22,14 @@ A board with one RF path is drawn on one page. A board with several gets one pag
 
 The temperature check solves twice. The first solve is the copper's own heat, judged against `power.max_rise_c`. The second adds each part's heat, found by following each load's stated current through series resistors and chokes to the part that uses it, at `thermal.supply_v`. All of that power counts as heat, and the result is the board's temperature under the part, so junctions run hotter.
 
+A rail can give its own `volts`, and then its parts are charged at that voltage rather than the supply's. If the rail's `source` is a regulator, the regulator is charged what it drops, (V_in − V_out) × I_out, plus any current it takes beyond what it passes on: the output's power is already counted in the parts that use it. Current that reaches a connector rather than an active part, such as a bias-T feeding an active antenna, leaves the board and isn't counted. It's listed in `part_current_off_board`. Without `volts`, every load is charged the supply's voltage, which overstates a board with regulated rails.
+
+```yaml
+rails:
+  - {net: VIN, source: J2.1, loads: {U1.1: 0.102, L5.1: 0.05}}
+  - {net: V3V3, source: U1.2, volts: 3.3, loads: {U2.1: 0.1}}
+```
+
 The second solve works out convection and radiation for the board's size and heat, since a small board sheds heat faster per area than a large one, unless you set `thermal.part_h_w_m2k`. It leaves out conduction through connectors and wires, so small boards read somewhat hot.
 
 Part rise only warns until you set `thermal.max_part_rise_c`, because the limit depends on your parts' ratings and your enclosure. Give a part's real dissipation with `thermal.part_watts: {U2: 0.18}`, or 0 to leave it out.
