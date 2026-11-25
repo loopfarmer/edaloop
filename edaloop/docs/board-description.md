@@ -30,6 +30,8 @@ Part rise only warns until you set `thermal.max_part_rise_c`, because the limit 
 
 All of these go under `layout`, and all are optional except `footprints`.
 
+`footprints` names each part's footprint as `library:name`, where the library is a `.pretty` folder. The build looks in the `--footprints` folders, then edaloop's stand-ins, then KiCad's own libraries, and checks every part before it places any. A part with no footprint, a name with no library (as a board imported from EAGLE has), a library it can't find or a footprint its library doesn't have stops the build, with each part named. `--json` lists them under `detail.parts`.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `axis` | `x` | The direction the RF line runs. |

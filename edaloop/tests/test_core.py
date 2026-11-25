@@ -1116,6 +1116,27 @@ def test_a_failed_build_leaves_nothing_to_refuse_the_next(tmp_path, monkeypatch,
     assert result["stopped_at"] in ("preflight", "build") and "isn't empty" not in result.get("refused", "")
 
 
+def test_footprints_the_placer_cant_load_are_named_before_anything_is_placed(tmp_path):
+    import yaml
+
+    from edaloop import boardgen, testbench
+    lib = tmp_path / "fp" / "Mine.pretty"
+    lib.mkdir(parents=True)
+    (lib / "X.kicad_mod").write_text("(footprint X)")
+    bench = {"parts": {"U1": {}, "U2": {}, "U3": {}, "U4": {}, "U10": {}}, "layout": {"footprints": {
+        "U1": "TSSOP16", "U2": "Mine:X", "U3": "Mine:Y", "U4": "Nowhere:Z"}}}
+    found = {x["ref"]: x["why"] for x in boardgen.unresolved_footprints(bench, [tmp_path / "fp"])}
+    assert found == {"U1": "no_library", "U3": "not_in_library", "U4": "no_such_library", "U10": "none"}
+    # An EAGLE import's bare names stop the build with every part named and nothing written, not a traceback from the placer.
+    eagle = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    eagle["layout"]["footprints"]["U1"] = "TSSOP16"
+    (tmp_path / "d.yaml").write_text(yaml.safe_dump(eagle))
+    with pytest.raises(boardgen.BuildError) as e:
+        boardgen.build(tmp_path / "d.yaml", tmp_path / "board", [])
+    assert "U1 (TSSOP16)" in str(e.value) and "EAGLE" in str(e.value) and not (tmp_path / "board").exists()
+    assert {"ref": "U1", "footprint": "TSSOP16", "why": "no_library"} in e.value.detail["parts"]
+
+
 def test_build_refuses_a_folder_with_a_board_in_it(tmp_path):
     from edaloop import boardgen, testbench
     (tmp_path / "board").mkdir()
