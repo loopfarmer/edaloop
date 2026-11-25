@@ -991,7 +991,44 @@ def _seat_channel_parts(fps, row, refs, spec, attach, walk, lines=None, folded=N
     region = (x0, y0 - margin, x1, y1 + margin) if axis == "x" else (x0 - margin, y0, x1 + margin, y1)
     low, high = (y0, y1) if axis == "x" else (x0, x1)
     out = []
-    for ref in channel_groups.seating_order(refs, pins, {fp.GetReference() for fp in row}):
+    # Per-pin decoupling first, before anything else round the IC: each cap beside its own pin, in the pins' order, so
+    # no pin's escape has to cross a neighbour's. A cap that isn't clear there is seated as usual below.
+    seated = {fp.GetReference() for fp in row}
+    for ic, caps in channel_groups.pin_caps(pins, seated).items():
+        caps = [c for c in caps if c[0] in refs]
+        if not caps:
+            continue
+        ic_fp = fps[ic]
+        ic_box = _box_mm(ic_fp, 1.0 if len(list(ic_fp.Pads())) > 4 else 0.4)
+        ic_pads = {pad.GetNumber(): pad.GetPosition() for pad in ic_fp.Pads()}
+        entries = []
+        for ref, ic_pin, cap_pin in caps:
+            if ic_pin not in ic_pads:
+                continue
+            fp = fps[ref]
+            shapes = {}
+            for rot in (0.0, 90.0, 180.0, 270.0):
+                _pose(fp, 0, 0, rot)
+                pads = [(pins[ref].get(pad.GetNumber()), pcbnew.ToMM(pad.GetPosition().x), pcbnew.ToMM(pad.GetPosition().y))
+                        for pad in fp.Pads() if pins[ref].get(pad.GetNumber())]
+                pads.sort(key=lambda t: t[0] != pins[ref][cap_pin])     # the pin's net first
+                # Beside one IC the caps sit a courtyard apart, as close as their pins; other parts keep the usual gap.
+                shapes[rot] = {"box": _box_mm(fp, 0.05), "pads": pads}
+            q = ic_pads[ic_pin]
+            entries.append((ref, (pcbnew.ToMM(q.x), pcbnew.ToMM(q.y)), shapes))
+        group = []
+        for ref, (x, y, rot) in channel_groups.beside_pins(ic_box, entries).items():
+            fp = fps[ref]
+            _pose(fp, x, y, rot)
+            if any(channel_groups._overlap(_box_mm(fp, 0.05), o) for o in obstacles):
+                continue
+            group.append(fp)
+        for fp in group:
+            obstacles.append(_box_mm(fp, 0.3))
+            note(fp)
+            out.append(fp)
+    refs = [r for r in refs if r not in {fp.GetReference() for fp in out}]
+    for ref in channel_groups.seating_order(refs, pins, {fp.GetReference() for fp in row} | {fp.GetReference() for fp in out}):
         fp = fps[ref]
         crowded = len(list(fp.Pads())) > 4
         shapes = {}

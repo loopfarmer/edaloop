@@ -35,7 +35,8 @@ Placement comes from the nets and the footprints' courtyards. Nothing is placed 
 2. **Bias stacks.** A two-pin part with one pin on an RF net is a tap. Rails rise from it in a column, with the smallest capacitor nearest the choke.
 3. **Channel parts.** On a board with several rows, a part that serves one row goes in and beside that row. Ownership comes from the nets: a part is a row's if the nets lead only to that row. A net or part reaching two rows is shared. When a rail has at least one capacitor per row, each row gets an equal share, and any left over go with the shared parts.
 4. **One path.** On a board with one RF path, every other part with a net goes round it, nearest what it joins.
-5. **Shared parts.** The rest goes in a shelf after the last row, such as headers and control logic.
+5. **Per-pin decoupling.** Before anything else goes round an IC on a row, each capacitor on a net that joins it to one pin of the IC, and nothing else, goes beside that pin: straight out from the IC's side, in the pins' order along it, a courtyard apart. A step attenuator's ACG caps are the usual case. Placed anywhere else, one pin's cap can sit across a neighbour's escape, and no route order joins both. A cap that isn't clear beside its pin is placed as in 3 and 4.
+6. **Shared parts.** The rest goes in a shelf after the last row, such as headers and control logic.
 
 ## The schematic
 
