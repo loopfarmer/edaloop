@@ -1189,6 +1189,35 @@ def test_channel_parts_found_from_nets():
     assert spread_bypass(pins, rows, owners) == {"C1": 0, "C2": 0, "C3": 1, "C4": 1}
 
 
+def test_a_dsas_per_pin_caps_sit_beside_their_pins_in_pin_order():
+    from edaloop.channel_groups import beside_pins, pin_caps
+
+    # A DSA's ACG pins 7-12, each with its own cap to ground; C9 decouples a supply shared with U1, so it isn't per-pin.
+    pins = {"U3": {**{str(i): f"ACG{i - 6}" for i in range(7, 13)}, "1": "VDD", "4": "RFIN", "15": "RFOUT", "25": "GND"},
+            **{f"C{20 + i}": {"1": f"ACG{i + 1}", "2": "GND"} for i in range(6)},
+            "C9": {"1": "VDD", "2": "GND"}, "U1": {"1": "VDD", "2": "GND", "3": "X", "4": "Y", "5": "Z"}}
+    caps = pin_caps(pins, {"U3", "U1"})
+    assert caps == {"U3": [(f"C{20 + i}", str(7 + i), "1") for i in range(6)]}
+    assert pin_caps(pins, {"U1"}) == {}                  # the IC isn't down yet
+    # A 0402 lying along x has pads at -0.5 and +0.5; turned 90 degrees, along y. Its box with a small margin.
+    def shapes():
+        return {0.0: {"box": (-0.95, -0.45, 0.95, 0.45), "pads": [("P", -0.5, 0.0), ("G", 0.5, 0.0)]},
+                90.0: {"box": (-0.45, -0.95, 0.45, 0.95), "pads": [("P", 0.0, -0.5), ("G", 0.0, 0.5)]},
+                180.0: {"box": (-0.95, -0.45, 0.95, 0.45), "pads": [("P", 0.5, 0.0), ("G", -0.5, 0.0)]},
+                270.0: {"box": (-0.45, -0.95, 0.45, 0.95), "pads": [("P", 0.0, 0.5), ("G", 0.0, -0.5)]}}
+    # The pins sit on the IC's bottom edge, 0.5 mm apart, listed out of order.
+    entries = [(f"C{20 + i}", (1.25 + 0.5 * i, 4.0), shapes()) for i in (3, 0, 5, 1, 4, 2)]
+    spots = beside_pins((0.0, 0.0, 4.0, 4.0), entries)
+    xs = [spots[f"C{20 + i}"][0] for i in range(6)]
+    # Below the IC, upright with the pin's pad towards it, in pin order a box apart, centred on the pins.
+    assert all(spots[r][1] == pytest.approx(4.0 + 0.95 + 0.01) and spots[r][2] == 90.0 for r in spots)
+    assert xs == sorted(xs) and all(b - a == pytest.approx(0.9) for a, b in zip(xs, xs[1:]))
+    assert sum(xs) / 6 == pytest.approx(sum(1.25 + 0.5 * i for i in range(6)) / 6)
+    # A pin on the left side puts its cap to the left, lying along x with the pin's pad nearest the IC.
+    left = beside_pins((0.0, 0.0, 4.0, 4.0), [("C30", (0.0, 2.0), shapes())])
+    assert left == {"C30": (pytest.approx(-0.96), 2.0, 180.0)}
+
+
 def test_seat_takes_the_cheapest_free_place():
     from edaloop.channel_groups import seat, seating_order
 

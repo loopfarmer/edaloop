@@ -144,3 +144,75 @@ def seating_order(refs: list[str], pins: dict[str, dict[str, str]], seated: set[
         left.discard(best)
         seated.add(best)
     return order
+
+
+def pin_caps(pins: dict[str, dict[str, str]], seated: set[str], min_pins: int = 5) -> dict[str, list[tuple[str, str, str]]]:
+    """Each seated IC's per-pin decoupling, as {ic: [(cap, ic_pin, cap_pin)]}: a capacitor not yet placed whose only
+    other net is ground, on a net that joins it to one pin of the IC and nothing else, such as a DSA's ACG caps."""
+    on_net: dict[str, list[tuple[str, str]]] = {}
+    for ref, by_pin in pins.items():
+        for pin, net in by_pin.items():
+            on_net.setdefault(net, []).append((ref, pin))
+    out: dict[str, list[tuple[str, str, str]]] = {}
+    for ref, by_pin in pins.items():
+        if ref in seated or not ref.startswith("C") or len(by_pin) != 2:
+            continue
+        signal = [(pin, net) for pin, net in by_pin.items() if net not in GROUND]
+        if len(signal) != 1 or len(by_pin) - len(signal) != 1:
+            continue
+        cap_pin, net = signal[0]
+        others = [m for m in on_net[net] if m[0] != ref]
+        if len(others) == 1 and others[0][0] in seated and len(pins.get(others[0][0], {})) >= min_pins:
+            out.setdefault(others[0][0], []).append((ref, others[0][1], cap_pin))
+    return out
+
+
+def beside_pins(ic_box: tuple, caps: list[tuple[str, tuple, dict]]) -> dict[str, tuple]:
+    """Where an IC's per-pin caps go: each straight out from its own pin's side of `ic_box`, against it, in the order of
+    the pins along that side, as close to its pin as the caps beside it allow.
+
+    `caps` is [(ref, (pin_x, pin_y), shapes)], `shapes` as `seat` takes them, keyed by rotation, each with the cap's box
+    and its pads as (net, dx, dy) where the first pad listed is the one on the pin's net. Returns {ref: (x, y, rot)},
+    before any test against other parts: the caller keeps what's clear and seats the rest as usual.
+    """
+    bx0, by0, bx1, by1 = ic_box
+    sides: dict[str, list] = {}
+    for ref, (px, py), shapes in caps:
+        gaps = {"left": px - bx0, "right": bx1 - px, "top": py - by0, "bottom": by1 - py}
+        sides.setdefault(min(gaps, key=gaps.get), []).append((ref, px, py, shapes))
+    out = {}
+    for side, group in sides.items():
+        along_x = side in ("top", "bottom")
+        outward = {"left": (-1, 0), "right": (1, 0), "top": (0, -1), "bottom": (0, 1)}[side]
+        placed = []
+        for ref, px, py, shapes in group:
+            # The rotation whose pin-net pad faces the IC and whose length runs straight out from it.
+            def inward(rot, shapes=shapes, outward=outward):
+                (_, ax, ay), (_, bx, by) = shapes[rot]["pads"][:2]
+                return (ax - bx) * outward[0] + (ay - by) * outward[1]
+            rot = min(shapes, key=inward)
+            if inward(rot) >= 0:
+                continue
+            box = shapes[rot]["box"]
+            placed.append([ref, px if along_x else py, rot, box])
+        placed.sort(key=lambda c: c[1])
+        # In order along the side, each at least a box width from the last, then the group centred on its pins.
+        want = [c[1] for c in placed]
+        at = []
+        for c in placed:
+            width = (c[3][2] - c[3][0]) if along_x else (c[3][3] - c[3][1])
+            at.append(c[1] if not at else max(c[1], at[-1] + width))
+        shift = (sum(want) - sum(at)) / len(at) if at else 0.0
+        for c, a in zip(placed, at):
+            ref, _, rot, (cx0, cy0, cx1, cy1) = c
+            a += shift
+            clear = 0.01     # just off the IC's box, not touching it to the last bit of rounding
+            if side == "left":
+                out[ref] = (bx0 - cx1 - clear, a, rot)
+            elif side == "right":
+                out[ref] = (bx1 - cx0 + clear, a, rot)
+            elif side == "top":
+                out[ref] = (a, by0 - cy1 - clear, rot)
+            else:
+                out[ref] = (a, by1 - cy0 + clear, rot)
+    return out
