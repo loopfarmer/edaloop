@@ -611,6 +611,28 @@ def test_power_solver_conducts_through_a_via_pad_that_touches_a_track():
     assert r.connected and r.worst_drop_mv > 0
 
 
+def test_power_solver_joins_a_via_over_a_pads_edge_and_says_so():
+    from edaloop.pcbfile import Track
+    feed = Track("segment", "V", "In1.Cu", (0, 0), (5, 0), 0.5, 0, False)
+    pads = {"S.1": (0, 0, 0.1, 0.1), "L.1": (5.5, 0, 0.3, 0.3)}     # L.1 spans x 5.2 to 5.8
+    layers = {"S.1": ("In1.Cu",), "L.1": ("F.Cu",)}
+
+    def solve(via_x):
+        via = Track("via", "V", "F.Cu", (via_x, 0), (via_x, 0), 0.6, 0.3, False)
+        tail = Track("segment", "V", "In1.Cu", (5, 0), (via_x, 0), 0.5, 0, False)
+        return power.solve_rail("V", [feed, tail, via], pads, "S.1", {"L.1": 1.0}, thickness_um={}, board_height_mm=1.6,
+                                pad_layer_map=layers)
+    # The via's centre is 0.2 mm off the pad and its 0.3 mm ring overlaps it: KiCad counts that connected.
+    r = solve(5.0)
+    assert r.connected and r.worst_drop_mv > 0
+    assert r.edge_vias == [{"pad": "L.1", "via": [5.0, 0.0], "off_pad_mm": 0.2}]
+    # Clear of the pad by 0.05 mm, it's open, as KiCad sees it.
+    assert solve(4.85).unreached == ["L.1"]
+    # In the pad, it's an ordinary via in pad.
+    r = solve(5.5)
+    assert r.connected and r.edge_vias == []
+
+
 def test_power_solver_keeps_a_narrow_neckdown_visible():
     from edaloop.pcbfile import Track
     wide = Track("segment", "V", "F.Cu", (0, 0), (5, 0), 1.5, 0, False)

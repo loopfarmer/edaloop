@@ -626,7 +626,7 @@ def impedance(p: Project) -> Outcome:
 SHORT_NECK_MM = 5.0
 
 
-@check("power", "verify")
+@check("power", "verify", version=2)
 def power_rails(p: Project) -> Outcome:
     """Each rail's drop and heating on its real copper, from stated load currents. DRC sees none of this."""
     cfg = p.section("power")
@@ -646,7 +646,14 @@ def power_rails(p: Project) -> Outcome:
         r = power.solve_rail(net, tracks, pads, rail["source"], {k: float(v) for k, v in rail["loads"].items()},
                              thickness_um=thickness, board_height_mm=board.board_height_mm(), pad_layer_map=layer_map)
         rows[net] = {k: getattr(r, k) for k in ("connected", "drops_mv", "worst_drop_mv", "worst_rise_c", "worst_segment",
-                                                "min_width_mm", "total_a", "segments", "vias")}
+                                                "min_width_mm", "total_a", "segments", "vias", "edge_vias")}
+        # Joined as KiCad joins it, so the rail is solved on the copper DRC passes, but said: a via half in a pad wicks solder.
+        for e in r.edge_vias:
+            findings.append(Finding(f"power:{net}:edge_via:{e['pad']}",
+                                    f"{net}: {e['pad']} joins the rail through the via at ({e['via'][0]}, {e['via'][1]}), whose centre "
+                                    f"is {e['off_pad_mm']} mm off the pad and whose ring overlaps its edge. KiCad and this check count "
+                                    "it connected, but a via half in a pad wicks solder: run a track into the pad, or move the via "
+                                    "off it", "warning"))
         pours = board.zones_on_net(net)
         rows[net]["zones"] = pours
         if r.unreached:

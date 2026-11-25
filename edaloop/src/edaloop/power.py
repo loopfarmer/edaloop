@@ -14,7 +14,7 @@ pessimistic, and the result says so.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -60,6 +60,7 @@ class RailResult:
     total_a: float
     segments: int
     vias: int
+    edge_vias: list = field(default_factory=list)    # vias joined to a pad only through copper over its edge
 
 
 def pad_layers(all_pads: list[dict], copper_layers: list[str]) -> dict[str, tuple]:
@@ -122,8 +123,10 @@ def solve_rail(net: str, tracks: list, pads: dict, source: str, loads: dict, *, 
         if seg is not None:
             node_halfwidth[a] = max(node_halfwidth.get(a, 0.0), seg.width / 2)
             node_halfwidth[b] = max(node_halfwidth.get(b, 0.0), seg.width / 2)
+    via_ends = []
     for v in vias:
         ends = [node(v.start[0], v.start[1], lyr) for lyr in layers]
+        via_ends.append(ends)
         for i, (nx, ny, nl) in enumerate(list(nodes)):
             if nl in layers and i not in ends:
                 reach = v.width / 2 + node_halfwidth.get(i, 0.0)
@@ -143,6 +146,20 @@ def solve_rail(net: str, tracks: list, pads: dict, source: str, loads: dict, *, 
         for i, (nx, ny, nl) in enumerate(nodes[:-1]):
             if not str(nl).startswith("pad:") and nl in pad_layers(name) and abs(nx - x) <= hw + WELD_MM and abs(ny - y) <= hh + WELD_MM:
                 edges.append((pad_nodes[name], i, 1e-9, None))
+    # A via whose ring overlaps a pad joins it, as KiCad counts it, though its centre is off the pad. The barrel reaches
+    # every layer, so it joins at the via's end on one of the pad's layers if it has one there.
+    edge_vias = []
+    for v, ends in zip(vias, via_ends):
+        vx, vy = v.start
+        for name, (x, y, hw, hh) in pads.items():
+            gap = math.hypot(max(abs(vx - x) - hw, 0.0), max(abs(vy - y) - hh, 0.0))
+            if gap > v.width / 2 or not ends:
+                continue
+            on_pad = [e for e, lyr in zip(ends, layers) if lyr in pad_layers(name)]
+            edges.append((pad_nodes[name], (on_pad or ends)[0], 1e-9, None))
+            if abs(vx - x) > hw + WELD_MM or abs(vy - y) > hh + WELD_MM:
+                edge_vias.append({"pad": name, "via": [round(vx, 3), round(vy, 3)],
+                                  "off_pad_mm": round(math.hypot(max(abs(vx - x) - hw, 0.0), max(abs(vy - y) - hh, 0.0)), 3)})
     n = len(nodes)
     if source not in pad_nodes:
         raise ValueError(f"{net}: source {source} is not a pad on this net")
@@ -196,4 +213,4 @@ def solve_rail(net: str, tracks: list, pads: dict, source: str, loads: dict, *, 
     drops = {name: round(v(pad_nodes[name]) * 1000, 3) for name in loads if pad_nodes[name] in seen}
     return RailResult(net, not unreached, unreached, drops, max(drops.values(), default=0.0), round(worst_rise, 2),
                       worst_seg, min((s.width for s in segs), default=0.0), round(sum(loads.values()), 4),
-                      len(segs), len(vias))
+                      len(segs), len(vias), edge_vias)
