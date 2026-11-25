@@ -1217,6 +1217,10 @@ def test_an_overflow_says_how_far_and_what_to_change():
     # gain_block_demo with line 1.0: the row fits along x, and sits past the top edge.
     off = outline_fit.overflow((0.90, 33.24, -4.69, 3.50), (40, 20), "x")
     assert off["over_mm"] == {"top": 5.19} and "past the top edge: move layout.line 5.19 mm" in off["hint"]
+    # Past an end of the row only, with its length fitting, as a folded row's leg once reached behind its connector: said, not a
+    # KeyError looking for an edge across the row.
+    end = outline_fit.overflow((0.03, 14.89, 7.27, 24.12), (60, 40), "x")
+    assert end["over_mm"] == {"left": 0.47} and "0.47 mm past the left edge, though they span 14.86 mm along x" in end["hint"]
 
 
 def test_a_failed_placement_leads_with_its_reason_not_kicads_noise():

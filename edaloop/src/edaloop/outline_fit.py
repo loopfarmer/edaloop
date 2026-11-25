@@ -33,11 +33,18 @@ def overflow(span: tuple, outline: tuple, axis: str, squared: list | None = None
                 f"inside the margins along {other}")
     else:
         low, high = ("top", "bottom") if axis == "x" else ("left", "right")
-        if low in over:
+        start, end = ("left", "right") if axis == "x" else ("top", "bottom")
+        if low not in over and high not in over:
+            # Past an end of the row only, with its length fitting: the placer started it too near that end. Nothing in the description
+            # moves the start, so the hint says what happened rather than what to set.
+            edge = start if start in over else end
+            hint = (f"the parts sit {over[edge]:.2f} mm past the {edge} edge, though they span {along:.2f} mm along {axis}, which fits "
+                    f"inside the margins: the placer started them too near that edge")
+        elif low in over:
             hint = f"the parts sit {over[low]:.2f} mm past the {low} edge: move layout.line {over[low]:.2f} mm or more away from it"
         else:
             hint = f"the parts sit {over[high]:.2f} mm past the {high} edge: move layout.line {over[high]:.2f} mm or more away from it"
-        if along <= room[axis] and (over.get("left" if axis == "x" else "top") or over.get("right" if axis == "x" else "bottom")):
+        if (low in over or high in over) and along <= room[axis] and (over.get(start) or over.get(end)):
             hint += f", and the row is {along:.2f} mm long along {axis}, which fits"
     return {"error": "outline_overflow", "span_mm": {"x": [round(left, 2), round(right, 2)], "y": [round(top, 2), round(bottom, 2)]},
             "outline_mm": [w, h], "margin_mm": margin, "axis": axis, "row_mm": round(along, 2), "across_mm": round(across, 2),
