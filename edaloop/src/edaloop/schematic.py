@@ -273,7 +273,9 @@ def draw(bench: dict, name: str, sheet: Sheet | None = None) -> Sheet:
             span = _snap(7.62 + 7.62 * (len(taps) + 1))
             stops = [_snap(out_x + 7.62 * (i + 1)) for i in range(len(taps) + 1)]
             next_in = _snap(out_x + span)
-            points = [out_x, *stops, next_in]
+            # A part on another page (where paths meet, on the Shared page) ends the row at the net's name.
+            off_page = ref not in parts
+            points = [out_x, *stops] if off_page else [out_x, *stops, next_in]
             for a, b in zip(points, points[1:]):
                 sheet.wire((a, row), (b, row))
             for stop in stops:
@@ -283,6 +285,9 @@ def draw(bench: dict, name: str, sheet: Sheet | None = None) -> Sheet:
             sheet.label(net, (stops[0], _snap(row - 3.81)), 90)
             for t_ref, stop in zip(taps, stops[1:]):
                 tap(t_ref, net, stop)
+            if off_page:
+                out_x = stops[-1]
+                break
             if ref in placed:
                 # Back at a part already drawn, as a path that leaves and returns through one two-port footprint does.
                 # Its pin is already labelled with this net there, so the row ends on the label rather than a second copy.
@@ -414,11 +419,18 @@ def page_plan(bench: dict) -> list[dict]:
     from .channel_groups import channel_owners, spread_bypass
     pins = pin_map(bench)
     seeds = [{m.split(".")[0] for row in channel for m in row[1:]} for channel in channels]
+    # Paths that meet (a combiner's star resistor and output connector end every arm) name the same parts. Those go
+    # to the Shared page, once, and ownership doesn't pass through them.
+    common = {r for i, seed in enumerate(seeds) for r in seed if any(r in other for other in seeds[i + 1:])}
+    seeds = [seed - common for seed in seeds]
     owners = channel_owners(pins, seeds)
     owners.update(spread_bypass(pins, seeds, owners))
     plan = []
     for i, (channel, seed) in enumerate(zip(channels, seeds)):
         refs = seed | {r for r, o in owners.items() if o == i}
+        # The path is drawn up to the first part it shares; what follows is on the Shared page.
+        reach = next((k for k, row in enumerate(channel) if row[2].split(".")[0] in common), None)
+        channel = channel if reach is None else channel[:reach + 1]
         first = channel[0][1].split(".")[0]
         last = channel[-1][2].split(".")[0]
         plan.append({"title": f"Channel {i + 1}", "file": f"ch{i + 1}", "refs": refs, "chain": channel, "note": f"{first} to {last}"})
