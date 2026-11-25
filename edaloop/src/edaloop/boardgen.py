@@ -322,7 +322,27 @@ def build(bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
         raise
 
 
+def place_problems(bench: dict) -> list[str]:
+    """What's wrong with `layout.place`, which moves named parts by [dx, dy] mm from where placement put them."""
+    offsets = (bench.get("layout") or {}).get("place")
+    if offsets is None:
+        return []
+    if not isinstance(offsets, dict):
+        return ["layout.place must map part references to [dx, dy] in mm"]
+    parts = bench.get("parts") or {}
+    problems = []
+    for ref, value in offsets.items():
+        if ref not in parts:
+            problems.append(f"layout.place names {ref}, which isn't a part")
+        elif not (isinstance(value, (list, tuple)) and len(value) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)):
+            problems.append(f"layout.place.{ref} must be [dx, dy] in mm, not {value!r}")
+    return problems
+
+
 def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: list[Path]) -> dict:
+    placing = place_problems(bench)
+    if placing:
+        raise BuildError("; ".join(placing), {"error": "layout_place", "problems": placing})
     unresolved = unresolved_footprints(bench, footprint_dirs)
     if unresolved:
         # Before anything is placed: the placer would stop at the first of these, with a traceback or a bare name.
