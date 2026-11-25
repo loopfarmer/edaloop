@@ -377,14 +377,52 @@ def fill_fence(field: Field, board: Board, facts: dict, nets: set, pitch: float,
     return added
 
 
-def finish(p) -> dict:
-    """Bring the by-class route back, then add the RF fence and stitching around the real copper."""
+class FinishRefused(RuntimeError):
+    """finish won't start: there's no route to adopt, or adopting it would throw away a change to the board."""
+
+
+def board_changed_since_route(board: Path, routed: Path) -> bool:
+    """Whether the board was changed after `route --by-class` read it, so adopting the route would throw the change away.
+
+    The route records the board it started from, and finish records the board it wrote, so either can be replaced. A
+    route made before that record falls back to the files' times."""
+    from .route_classes import SOURCE, file_sha256
+    now = file_sha256(board)
+    if now == file_sha256(routed):
+        return False
+    record = routed.parent / SOURCE
+    if record.exists():
+        known = json.loads(record.read_text())
+        # A finish that stopped partway left the board as finish wrote it, so the next finish may start it again.
+        return not known.get("finishing") and now not in (known.get("board_sha256"), known.get("finished_sha256"))
+    return board.stat().st_mtime > routed.stat().st_mtime
+
+
+def _note_finish(routed: Path, **fields) -> None:
+    from .route_classes import SOURCE
+    record = routed.parent / SOURCE
+    known = json.loads(record.read_text()) if record.exists() else {}
+    record.write_text(json.dumps({**known, **fields}))
+
+
+def finish(p, as_is: bool = False) -> dict:
+    """Bring the by-class route back, then add the RF fence and stitching around the real copper.
+
+    The route is copied over the board. If the board was changed since the route read it, finish stops rather than
+    throw that away. `as_is` finishes the board as it is instead, for a board routed or edited after `route --by-class`."""
     bench, cfg = _load(p)
     work = p.root / ".edaloop"
     routed = work / "route_classes" / "3_signal.kicad_pcb"
-    if not routed.exists():
-        raise RuntimeError("no by-class route to finish. Run `edaloop route --by-class` first")
-    shutil.copy(routed, p.board)
+    if not as_is:
+        if not routed.exists():
+            raise FinishRefused("no by-class route to finish. Run `edaloop route --by-class` first, or `edaloop finish --as-is` "
+                               "to finish the board as it is")
+        if board_changed_since_route(p.board, routed):
+            raise FinishRefused(f"{p.board.name} has changed since `edaloop route --by-class` read it, and finish would replace it "
+                               f"with {routed.relative_to(p.root)}, losing the change. Route again, write the change to that file "
+                               f"too, or run `edaloop finish --as-is` to finish {p.board.name} as it is")
+        shutil.copy(routed, p.board)
+        _note_finish(routed, finishing=True)
     board = Board(p.board)
     facts = _facts(p.board, work)
     tracks = [((t.start[0], t.start[1]), (t.end[0], t.end[1]), t.width / 2) for t in board.tracks if t.kind != "via" and t.net != "GND"]
@@ -450,6 +488,9 @@ def finish(p) -> dict:
     filled = work / "filled.kicad_pcb"
     _op("fill_zones", p.board, filled)
     shutil.copy(filled, p.board)
+    if not as_is:
+        from .route_classes import file_sha256
+        _note_finish(routed, finishing=False, finished_sha256=file_sha256(p.board))
     final = Board(p.board)
     layout = {**rf_rules.DEFAULTS, **p.section("rf_layout")}
     still = rf_rules.fence_gaps(final.tracks, facts["pads"], rf, pitch, float(layout["fence_band_mm"])) + \

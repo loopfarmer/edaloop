@@ -86,7 +86,9 @@ def main(argv=None):
     cc.add_argument("chains", help="the .py chain spec")
     cc.add_argument("-o", "--output", help="the .yaml to write (default: beside it)")
     sub.add_parser("ground", help="place ground vias at ground pads, before routing")
-    sub.add_parser("finish", help="adopt the by-class route, add the RF fence and stitching, and refill")
+    fi = sub.add_parser("finish", help="adopt the by-class route, add the RF fence and stitching, and refill. It stops if the board "
+                                       "changed since the route read it, so that nothing done to it after the route is lost")
+    fi.add_argument("--as-is", action="store_true", help="finish the board as it is, without copying the by-class route over it")
     args = ap.parse_args(argv)
 
     try:
@@ -182,7 +184,11 @@ def main(argv=None):
             return 0
         if args.cmd == "finish":
             from . import ground
-            _out(ground.finish(p), True, str)
+            try:
+                _out(ground.finish(p, as_is=args.as_is), True, str)
+            except ground.FinishRefused as e:
+                print(f"edaloop: {e}", file=sys.stderr)
+                return 2
             return 0
         if args.cmd == "critic":
             c = checks.placement_critique(p, args.board)

@@ -92,6 +92,8 @@ edaloop -C my_board finish
 
 This adds the fence along the RF line, stitches the pours and refills them. KiCad's DRC has the last word on each new via.
 
+Finish starts from the routed copy in `.edaloop/route_classes/3_signal.kicad_pcb` and copies it over the board. If the board was changed after the route, for example by a script that routed the nets the router left, finish stops instead of throwing the change away. Then route again, or run `edaloop -C my_board finish --as-is` to finish the board as it is.
+
 ![The finished board, with a via fence along the RF line and stitching across the pours.](edaloop/docs/figures/step-7-finish.svg)
 
 ### 8. Verify
