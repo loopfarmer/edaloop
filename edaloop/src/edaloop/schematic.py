@@ -258,14 +258,7 @@ def draw(bench: dict, name: str, sheet: Sheet | None = None) -> Sheet:
         placed.add(ref)
 
     # Each channel's row: connector, then each part, with each hop's taps and its net name between them.
-    channels, current = [], []
-    for step in chain:
-        current.append(step)
-        if step[2].split(".")[0].startswith("J"):
-            channels.append(current)
-            current = []
-    if current:
-        channels.append(current)
+    channels = _channels(chain)
     width = 0.0
     for index, channel in enumerate(channels):
         if index:
@@ -290,6 +283,12 @@ def draw(bench: dict, name: str, sheet: Sheet | None = None) -> Sheet:
             sheet.label(net, (stops[0], _snap(row - 3.81)), 90)
             for t_ref, stop in zip(taps, stops[1:]):
                 tap(t_ref, net, stop)
+            if ref in placed:
+                # Back at a part already drawn, as a path that leaves and returns through one two-port footprint does.
+                # Its pin is already labelled with this net there, so the row ends on the label rather than a second copy.
+                sheet.label(net, (next_in, row), 0)
+                out_x = next_in
+                continue
             chained = [c for c in channel if c[1].split(".")[0] == ref]
             pin_out = chained[0][1].split(".")[1] if chained else None
             placed.add(ref)
@@ -394,13 +393,14 @@ def schematic(bench: dict, name: str) -> str:
 
 
 def _channels(chain: list) -> list[list]:
-    """Rows of the chain, one list per path, as the drawing splits them."""
+    """Rows of the chain, one list per path. A path ends where the next row doesn't start at the part this one reached,
+    so a connector needn't be called J: describe finds connectors by what they are."""
     channels, current = [], []
     for step in chain:
-        current.append(step)
-        if step[2].split(".")[0].startswith("J"):
+        if current and current[-1][2].split(".")[0] != step[1].split(".")[0]:
             channels.append(current)
             current = []
+        current.append(step)
     if current:
         channels.append(current)
     return channels
