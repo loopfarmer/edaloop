@@ -1844,6 +1844,21 @@ def _tiny_project(tmp_path, extra=""):
     return Project(tmp_path)
 
 
+def test_finish_strips_beside_every_net_the_plane_check_judges(tmp_path):
+    from edaloop import ground
+
+    p = _tiny_project(tmp_path, "rf:\n  chains: c.yaml\n")
+    (tmp_path / "c.yaml").write_text("chains:\n  - {net: RF1, entry: J1.1, exit: U1.1}\n  - {net: RF2, entry: U1.2, exit: J2.1}\n"
+                                     "  - {net: LO_P, entry: U3.1, exit: U4.1}\n")
+    bench = {"chain": [["RF1", "J1.1", "U1.1"], ["RF2", "U1.2", "J2.1"]]}
+    # The fence follows the description's chain, as rf_layout's fence audit does; the inner pads come off beside every
+    # chains-file net too, because rf_layout's plane check judges LO_P and an antipad under it is a plane error.
+    assert ground.rf_nets(p, bench) == ({"RF1", "RF2"}, {"RF1", "RF2", "LO_P"})
+    assert ground.rf_nets(p, {"chain": []}) == ({"RF1", "RF2", "LO_P"},) * 2
+    (tmp_path / "c.yaml").unlink()
+    assert ground.rf_nets(p, bench) == ({"RF1", "RF2"},) * 2
+
+
 def test_no_rails_is_not_a_pass(tmp_path):
     p = _tiny_project(tmp_path, "power:\n  rails: []\n")
     o = checks.power_rails(p)

@@ -178,6 +178,19 @@ def _load(p) -> tuple[dict, dict]:
     return bench, bench["layout"].get("ground") or {}
 
 
+def rf_nets(p, bench: dict) -> tuple[set[str], set[str]]:
+    """The RF nets rf_layout judges, as (fenced, planed). Its fence and pad audits read the description's chain, or the
+    chains file without one; its plane check reads every net in the chains file, which can list more (a board's LO
+    distribution, say) than the description's chain."""
+    listed: list[str] = []
+    name = p.section("rf").get("chains")
+    if name and (p.root / name).exists():
+        from .scripts.kicad_pcb import load_chains
+        listed = [c[0] for c in load_chains(p.root / name)[0]]
+    fenced = {c[0] for c in bench.get("chain") or []} or set(listed)
+    return fenced, fenced | set(listed)
+
+
 def _write_vias(board: Path, points: list[tuple], locked: bool, work: Path) -> None:
     spec = work / "new_vias.json"
     spec.write_text(json.dumps([{"x": round(x, 4), "y": round(y, 4), "size": VIA, "drill": DRILL, "net": "GND", "locked": locked}
@@ -401,7 +414,7 @@ def finish(p) -> dict:
     high_ghz = bench["band_mhz"][1] / 1000 if bench.get("band_mhz") else None
     pitch = float(cfg.get("fence_pitch_mm") or rf_rules.fence_pitch(high_ghz, float((bench.get("project") or {}).get("eps_eff", 3.25))))
     gap = float(bench["layout"].get("pour_clearance_mm", 0.3))
-    rf = {c[0] for c in bench["chain"]}
+    rf, planed = rf_nets(p, bench)
     for t in board.tracks:
         if t.kind == "via" or t.net not in rf:
             continue
@@ -445,7 +458,8 @@ def finish(p) -> dict:
         spec = work / "plane_voids.json"
         spec.write_text(json.dumps({"layer": "In1.Cu", "voids": voids}))
         _op("add_voids", p.board, spec, p.board)
-    stripped = _op("strip_inner_pads", p.board, ",".join(sorted(rf)), 1.0, p.board)["changed"]
+    # An unused inner pad beside any line the plane check judges cuts an antipad into the plane under it.
+    stripped = _op("strip_inner_pads", p.board, ",".join(sorted(planed)), 1.0, p.board)["changed"]
     silk = _op("place_silk", p.board, p.board)
     filled = work / "filled.kicad_pcb"
     _op("fill_zones", p.board, filled)
