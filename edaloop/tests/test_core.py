@@ -5176,3 +5176,19 @@ def test_set_properties_changes_a_reference_and_nothing_else():
     assert '(property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (hide yes) (effects (font (size 1 1) (thickness 0.15))))' in out
     with pytest.raises(ValueError, match="no footprint with reference R9"):
         set_properties(board, {"R9": {"Value": {"hide": True}}})
+
+
+def test_footprints_come_first_from_the_kicad_edaloop_is_set_up_with(monkeypatch, tmp_path):
+    from edaloop import boardgen
+    app = tmp_path / "KiCad-nightly.app" / "Contents"
+    (app / "MacOS").mkdir(parents=True)
+    (app / "SharedSupport" / "footprints").mkdir(parents=True)
+    cli = app / "MacOS" / "kicad-cli"
+    cli.write_text("#!/bin/sh\n")
+    cli.chmod(0o755)
+    _toolchain_with(monkeypatch, tmp_path, kicad_cli=str(cli))
+    libs = boardgen.standard_libs()
+    assert libs[0] == str((app / "SharedSupport" / "footprints").resolve())
+    assert libs[1:] == boardgen.STANDARD_LIBS
+    _toolchain_with(monkeypatch, tmp_path, kicad_cli=str(tmp_path / "absent-kicad-cli"))
+    assert boardgen.standard_libs() == boardgen.STANDARD_LIBS

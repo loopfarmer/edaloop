@@ -22,7 +22,24 @@ from . import schematic as drawing
 from .project import ProjectError
 
 OPS = Path(__file__).with_name("kicad_ops.py")
-STANDARD_LIBS = ["/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints", "/usr/share/kicad/footprints"]
+STANDARD_LIBS = ["/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints", "/usr/share/kicad/footprints",
+                 "/usr/share/kicad-nightly/footprints"]
+
+
+def standard_libs() -> list[str]:
+    """KiCad's own footprint libraries: first those installed with the kicad-cli edaloop is set up with, so a board built
+    for KiCad 11 takes KiCad 11's footprints where KiCad 10 is installed too, then the usual places."""
+    found = shutil.which(toolchain.paths()["kicad_cli"])
+    near = []
+    if found:
+        root = Path(found).resolve().parent.parent      # KiCad.app/Contents, or /usr
+        near = [root / "SharedSupport" / "footprints", root / "share" / "kicad" / "footprints",
+                root / "share" / "kicad-nightly" / "footprints"]
+    out = []
+    for d in [*(str(p) for p in near if p.is_dir()), *STANDARD_LIBS]:
+        if d not in out:
+            out.append(d)
+    return out
 # Stand-ins for the shipped testbenches' own land patterns, so they build with nothing fetched. Searched after any folder the
 # caller names, so a real library of the same name wins. data/footprints/README.md says what each one is and what it assumes.
 BUNDLED_FOOTPRINTS = Path(__file__).with_name("data") / "footprints"
@@ -46,7 +63,7 @@ def unresolved_footprints(bench: dict, footprint_dirs: list[Path]) -> list[dict]
     """Each part whose footprint the placer couldn't load, as {ref, footprint, why}. `why` is `none` (no footprint named),
     `no_library` (no `library:` prefix), `no_such_library` (no such .pretty in any folder searched) or `not_in_library`.
     Searched as the placer searches: the --footprints folders, edaloop's stand-ins, then KiCad's own libraries."""
-    roots = [Path(x) for x in [*footprint_dirs, BUNDLED_FOOTPRINTS, *STANDARD_LIBS]]
+    roots = [Path(x) for x in [*footprint_dirs, BUNDLED_FOOTPRINTS, *standard_libs()]]
     given = (bench.get("layout") or {}).get("footprints") or {}
     out = []
     for ref in sorted(bench.get("parts") or {}, key=lambda r: (re.sub(r"\d", "", r), int(re.sub(r"\D", "", r) or 0), r)):
@@ -382,7 +399,7 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
         "parts": bench["parts"], "chain": [*bench["chain"]], "ports": bench.get("ports") or [], "nets": bench["nets"], "pins": drawing.pin_map(bench), "open_pins": bench.get("open_pins") or [], "layout": bench["layout"],
         "rf_line_width_mm": bench["rf_line_width_mm"], "net_width": bench["layout"].get("net_width") or {},
         "rf_layout": {**rf_rules.DEFAULTS, **((bench.get("project") or {}).get("rf_layout") or {})},
-        "outline": bench.get("outline_mm"), "lib_dirs": [str(out), *[str(x) for x in footprint_dirs], *STANDARD_LIBS],
+        "outline": bench.get("outline_mm"), "lib_dirs": [str(out), *[str(x) for x in footprint_dirs], *standard_libs()],
         "uuids": sheets["uuids"], "sheet_of": sheets["placed"], "root": _uid(name, "root"),
         "sheet": "Root"}))
     r = toolchain.kicad_op("build_board", seed, spec, out / f"{name}.kicad_pcb", timeout=600)
