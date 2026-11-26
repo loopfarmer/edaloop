@@ -1094,6 +1094,47 @@ def test_drawn_schematic_keeps_the_described_netlist(name, tmp_path):
     assert schematic.check_netlist(out, bench) == []
 
 
+def test_power_flag_is_wired_to_ground_not_stacked_on_it():
+    import re
+
+    import yaml
+
+    from edaloop import schematic, testbench
+    # KiCad 11's ERC read a PWR_FLAG stacked on the GND symbol's pin, with no wire, as an unconnected ground pin
+    # (pin_not_connected on #PWR002), though KiCad 10 joined them. The flag now sits above ground on a wire.
+    bench = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    sheet = schematic.schematic(bench, "x")
+    flags = re.findall(r'\(symbol \(lib_id "edaloop:PWR_FLAG"\) \(at ([\d.-]+) ([\d.-]+) 0\)', sheet)
+    grounds = {tuple(map(float, xy)) for xy in re.findall(r'\(symbol \(lib_id "edaloop:GND"\) \(at ([\d.-]+) ([\d.-]+) 0\)', sheet)}
+    assert len(flags) == 1
+    flag = tuple(map(float, flags[0]))
+    assert flag not in grounds
+    wires = {frozenset(((float(a), float(b)), (float(c), float(d))))
+             for a, b, c, d in re.findall(r'\(wire \(pts \(xy ([\d.-]+) ([\d.-]+)\) \(xy ([\d.-]+) ([\d.-]+)\)\)', sheet)}
+    assert any(frozenset((flag, g)) in wires for g in grounds)
+
+
+@pytest.mark.parametrize("name", ["gain_block_demo", "four_channel_demo"])
+def test_drawn_schematic_has_no_erc_errors(name, tmp_path):
+    import json
+
+    import yaml
+
+    from edaloop import schematic, testbench
+    # KiCad 10 and 11 judge the drawing differently, so EDALOOP_ERC_CLIS can name more kicad-cli builds to check it with.
+    clis = [toolchain.paths()["kicad_cli"], *filter(None, os.environ.get("EDALOOP_ERC_CLIS", "").split(os.pathsep))]
+    clis = [c for c in clis if shutil.which(str(c))]
+    if not clis:
+        pytest.skip("needs kicad-cli")
+    bench = yaml.safe_load((testbench.BENCHES / f"{name}.yaml").read_text())
+    (tmp_path / "x.kicad_sch").write_text(schematic.schematic(bench, "x"))
+    for i, cli in enumerate(clis):
+        out = tmp_path / f"erc{i}.json"
+        toolchain.run([cli, "sch", "erc", "--format", "json", "--severity-all", "-o", out, tmp_path / "x.kicad_sch"], timeout=120)
+        found = [v for s in json.loads(out.read_text())["sheets"] for v in s["violations"] if v["severity"] == "error"]
+        assert found == [], cli
+
+
 def test_schematic_draws_a_chain_that_ends_on_a_two_pin_part():
     import yaml
 
