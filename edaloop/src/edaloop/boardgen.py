@@ -379,7 +379,7 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
     seed.write_text(seed_board(bench))
     spec = out / ".build_spec.json"
     spec.write_text(json.dumps({
-        "parts": bench["parts"], "chain": [*bench["chain"]], "nets": bench["nets"], "pins": drawing.pin_map(bench), "open_pins": bench.get("open_pins") or [], "layout": bench["layout"],
+        "parts": bench["parts"], "chain": [*bench["chain"]], "ports": bench.get("ports") or [], "nets": bench["nets"], "pins": drawing.pin_map(bench), "open_pins": bench.get("open_pins") or [], "layout": bench["layout"],
         "rf_line_width_mm": bench["rf_line_width_mm"], "net_width": bench["layout"].get("net_width") or {},
         "rf_layout": {**rf_rules.DEFAULTS, **((bench.get("project") or {}).get("rf_layout") or {})},
         "outline": bench.get("outline_mm"), "lib_dirs": [str(out), *[str(x) for x in footprint_dirs], *STANDARD_LIBS],

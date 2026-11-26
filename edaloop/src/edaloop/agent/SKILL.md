@@ -34,7 +34,7 @@ After any actuator, earlier evidence on those files is stale automatically. Neve
 
 ## Starting from a description
 
-An existing design gets a description from `describe_design`. Check its RF path, fill in `required`, and tell a person about `assumed`. `docs/board-description.md` in the edaloop repository lists the layout options, such as `columns` for a board with many channels.
+An existing design gets a description from `describe_design`. A module with no connectors, such as an atopile layout, needs `ports`: the nets each RF path enters and leaves by. Check its RF path, fill in `required`, and tell a person about `assumed`. `docs/board-description.md` in the edaloop repository lists the layout options, such as `columns` for a board with many channels.
 
 `edaloop build` only places parts and draws the schematic. It doesn't route, so DRC and RF checks on its output fail and an EM run there is wasted time. To get a routed board, use `edaloop make`.
 

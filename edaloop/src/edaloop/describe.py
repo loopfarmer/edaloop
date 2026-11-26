@@ -233,7 +233,73 @@ class _Spent(Exception):
     """The chain search ran out of steps."""
 
 
-def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list | None = None) -> list[list[list[str]]]:
+PORT_REF = "~PORT"     # a stand-in connector on a named port net: "~" is in no reference KiCad gives a part
+
+
+def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list | None = None, port_nets: list | None = None,
+                ends: list | None = None) -> list[list[list[str]]]:
+    """Each RF path, as `_find_chains` gives them. `port_nets` names, for a module with no connectors, the nets where each RF path
+    enters and leaves it, as [[NET_IN, NET_OUT]]. Each is searched as if a connector sat on it, and the hop to and from that
+    connector is then taken off, so a path starts at the pad where it enters the module and ends at the pad where it leaves.
+    `ends` gets, for each path returned, {"in": [net, pad], "out": [net, pad]}, or None for a path between connectors."""
+    if not port_nets:
+        found = _find_chains(parts, nets, pairs, notes)
+        if ends is not None:
+            ends.extend([None] * len(found))
+        return found
+    parts, nets, pairs = dict(parts), {n: list(m) for n, m in nets.items()}, [list(p) for p in pairs or []]
+    on: dict[str, str] = {}
+    for a, b in port_nets:
+        if a == b:
+            raise DescribeError(f"a port pair needs two nets, and {a} is named twice")
+        refs = []
+        for net in (a, b):
+            if net not in nets:
+                raise DescribeError(f"the ports name {net}, which isn't a net on this board")
+            if GROUND.match(net):
+                raise DescribeError(f"the ports name {net}, which is ground")
+            ref = f"{PORT_REF}{len(on) + 1}"
+            on[ref] = net
+            parts[ref] = {"value": "port"}
+            nets[net].append(f"{ref}.1")
+            refs.append(ref)
+        pairs.append(refs)
+
+    def named(text: str) -> str:
+        return re.sub(re.escape(PORT_REF) + r"\d+", lambda m: on.get(m.group(0), m.group(0)), text)
+
+    inner: list[str] = []
+    try:
+        found = _find_chains(parts, nets, pairs, inner, set(on.values()))
+    except DescribeError as e:
+        text = str(e).replace(" between connectors through signal parts between the hinted pairs", " between the ports " +
+                              "; ".join(f"{a} and {b}" for a, b in port_nets) + " through signal parts")
+        raise DescribeError(named(text)) from None
+    first = {a for a, _ in port_nets}
+    out = []
+    for chain in found:
+        start, stop = chain[0][1].partition(".")[0], chain[-1][2].partition(".")[0]
+        if start not in on and stop not in on:
+            out.append(chain)
+            if ends is not None:
+                ends.append(None)
+            continue
+        if on.get(start) not in first:
+            # Found from the far end: turn it round, so that it runs from the net named first.
+            chain = [[net, leave, entry] for net, entry, leave in reversed(chain)]
+        net_in, pad_in, net_out, pad_out = chain[0][0], chain[0][2], chain[-1][0], chain[-1][1]
+        chain = chain[1:-1]
+        if not chain:
+            raise DescribeError(f"only {pad_in.partition('.')[0]} lies between the ports {net_in} and {net_out}, and a row needs two parts")
+        out.append(chain)
+        if ends is not None:
+            ends.append({"in": [net_in, pad_in], "out": [net_out, pad_out]})
+    if notes is not None:
+        notes.extend(named(n).replace("hinted pair", "port pair") for n in inner)
+    return out
+
+
+def _find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list | None = None, forced: set | None = None) -> list[list[list[str]]]:
     """Each RF path on the board, longest first, with no part shared between two of them. Each is rows of net, entry pin and exit pin.
 
     The search tries every route between connectors, up to SEARCH_LIMIT steps in all. A board with many connectors and
@@ -261,7 +327,7 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
         connectors = sorted(set(connectors) | set(partner), key=lambda r: (len(r), r))
     # A control or power bus joins many parts, and a signal doesn't travel along one.
     usable = {n for n, m in nets.items() if not GROUND.match(n) and not RAIL.match(n) and not n.startswith("unconnected-") and len(m) <= MAX_RF_NET_PINS
-              and not DIGITAL_NET.search(n)}
+              and not DIGITAL_NET.search(n)} | (forced or set())       # a net a person named as a port is RF, whatever its name
     # One footprint can hold two RF ports, as an in-line part with a plug at one end and a jack at the other does. Each of its signal pins on a
     # net of its own is then a port, and a path can run from one to another. Only a part that says it's an RF port counts: a header's pins aren't.
     multi_port = {r for r in ports if len({n for n in pins[r].values() if n in usable}) >= 2}
@@ -282,7 +348,8 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
                 return found
     radio_end = len(connectors) == 1 and bool(ports) and not multi_port
     if len(connectors) < 2 and not radio_end and not multi_port:
-        raise DescribeError(f"an RF path needs two connectors, and this has {connectors or 'none'}")
+        raise DescribeError(f"an RF path needs two connectors, and this has {connectors or 'none'}. For a module whose path enters and "
+                            "leaves on nets, name them with --ports NET_IN NET_OUT")
     chains: list = []
     used: set[str] = set()
     steps = [0]
@@ -405,32 +472,47 @@ def find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list 
     return chains
 
 
-def load_pairs(path: Path) -> list[list[str]]:
-    """A chains hint: a YAML list of connector pairs, each RF path's two ends, such as [[J1, J2], [J3, J4]]."""
+def load_pairs(path: Path, kind: str = "pairs") -> list[list[str]]:
+    """A chains hint: a YAML list of connector pairs, each RF path's two ends, such as [[J1, J2], [J3, J4]]. With `kind` "ports",
+    a ports file: the same list of net pairs, each RF path's entry and exit net, such as [[RF_IN, RF_OUT]]."""
+    what, example = ("ports file", "net pairs, such as [[RF_IN, RF_OUT]]") if kind == "ports" else ("chains hint", "connector pairs, such as [[J1, J2], [J3, J4]]")
     try:
         data = yaml.safe_load(Path(path).read_text())
     except (OSError, yaml.YAMLError) as e:
-        raise DescribeError(f"couldn't read the chains hint {path}: {e}") from None
+        raise DescribeError(f"couldn't read the {what} {path}: {e}") from None
     if isinstance(data, dict):
-        data = data.get("pairs")
+        data = data.get(kind)
     if not isinstance(data, list) or not data or not all(isinstance(x, list) and len(x) == 2 and x[0] != x[1] for x in data):
-        raise DescribeError(f"the chains hint {path} must be a list of connector pairs, such as [[J1, J2], [J3, J4]]")
+        raise DescribeError(f"the {what} {path} must be a list of {example}")
     return [[str(a), str(b)] for a, b in data]
 
 
-def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "", pairs: list | None = None) -> dict:
+def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "", pairs: list | None = None, ports: list | None = None,
+             ground: str | None = None) -> dict:
     shared: dict[str, int] = {}
     parts, nets = read_board(netlist, shared) if Path(netlist).suffix == ".kicad_pcb" else read_netlist(netlist)
+    renamed = []
+    if ground and ground != "GND":
+        # A module whose ground has another name, as an atopile layout's power interface calls it lv. A build pours GND.
+        if ground not in nets:
+            raise DescribeError(f"the ground named, {ground}, isn't a net on this board")
+        if "GND" in nets:
+            raise DescribeError(f"the board has a GND net already, so {ground} can't be renamed to it")
+        nets["GND"] = nets.pop(ground)
+        ports = [["GND" if n == ground else n for n in pair] for pair in ports or []] or None
+        renamed.append(f"nets: {ground} is the ground, renamed GND")
     # The carrier nets KiCad makes for an unconnected pin mean the pin is open.
     opens = []
     kept = {}
+    named = {n for pair in ports or [] for n in pair}
     for net, members in nets.items():
-        if net.startswith("unconnected-") or net.startswith("Net-(") and len(members) == 1:
+        if net not in named and (net.startswith("unconnected-") or net.startswith("Net-(") and len(members) == 1):
             opens += members
         else:
             kept[net] = members
     notes: list[str] = []
-    channels = find_chains(parts, kept, pairs, notes)
+    ends: list = []
+    channels = find_chains(parts, kept, pairs, notes, ports, ends)
     chain = [row for channel in channels for row in channel]
     footprints = {r: p.pop("footprint") for r, p in parts.items()}
     missing = [r for r, f in footprints.items() if not f]
@@ -456,20 +538,23 @@ def describe(netlist: Path, name: str, band_mhz: list[float], source: str = "", 
         if ref.startswith("J") or ref.startswith("FL") or parts[ref].get("dnp"):
             models[ref] = {"kind": "open", "reason": "no DC path modelled: connector, RF filter or not fitted"}
     facts = board_facts(Path(netlist), chain) if Path(netlist).suffix == ".kicad_pcb" else {}
-    assumed = [k for k in ("stackup", "rf_line_width_mm") if k not in facts] + notes
+    assumed = [k for k in ("stackup", "rf_line_width_mm") if k not in facts] + renamed + notes
     if shared:
         assumed.append("parts: left out footprints that share a reference, so aren't one part: " +
                        ", ".join(f"{r} x{n}" for r, n in sorted(shared.items(), key=lambda x: -x[1])))
     description = {
         "name": name,
         "summary": f"Described from {source or Path(netlist).name}. {len(channels)} RF path(s), the first: " +
-                   " > ".join([channels[0][0][1].split(".")[0], *[c[2].split(".")[0] for c in channels[0]]]),
+                   " > ".join([*([ends[0]["in"][0]] if ends[0] else []), channels[0][0][1].split(".")[0], *[c[2].split(".")[0] for c in channels[0]],
+                               *([ends[0]["out"][0]] if ends[0] else [])]),
         "band_mhz": band_mhz, "supply_v": 5.0,
         "stackup": facts.get("stackup") or {"copper_um": [35, 15.2, 15.2, 35], "dielectric_mm": [0.2104, 1.065, 0.2104], "epsilon_r": 4.3, "loss_tangent": 0.02},
         "rf_line_width_mm": facts.get("rf_line_width_mm", 0.36),
         "assumed": assumed,
         "likely_rails": likely_rails(kept, chain, [x["net"] for x in rails]),
         "parts": parts, "nets": kept, "open_pins": sorted(opens), "chain": chain,
+        # Where a path enters and leaves a module with no connectors: the net and the pad on it, for each path between ports.
+        **({"ports": [e for e in ends if e]} if any(ends) else {}),
         "spice": {"models": models, "bench": {"name": "bias", "stimulus": [f"Vcable {chain[-1][0]} 0 DC 5"],
                                                "measure": [".control", "op", "let i_total_ma = -i(vcable)*1000", "print i_total_ma", "quit", ".endc"]},
                   "expect": {}},
@@ -546,7 +631,7 @@ def board_footprints(board: Path, description: dict, out: Path, replace: bool = 
 
 
 def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: Path, work: Path, replace_footprints: bool = True,
-                       pairs: list | None = None) -> dict:
+                       pairs: list | None = None, ports: list | None = None, ground: str | None = None) -> dict:
     """Write the description from a schematic, through KiCad's netlist, or straight from a board's pads."""
     from .project import FILE
     if Path(out).name == FILE or Path(out).resolve().name == FILE:
@@ -560,7 +645,7 @@ def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: P
         r = toolchain.run([toolchain.paths()["kicad_cli"], "sch", "export", "netlist", "--format", "kicadxml", "-o", netlist, schematic], timeout=120)
         if r.returncode != 0 or not netlist.exists():
             raise DescribeError(f"couldn't export a netlist: {r.stderr.strip()[-300:]}")
-    description = describe(netlist, name, band_mhz, Path(schematic).name, pairs)
+    description = describe(netlist, name, band_mhz, Path(schematic).name, pairs, ports, ground)
     copied = board_footprints(Path(schematic), description, Path(out), replace_footprints) if Path(schematic).suffix == ".kicad_pcb" else None
     head = "# Written by `edaloop describe`. Check the RF path, and supply anything marked REQUIRED.\n"
     if copied and copied["copied"]:
@@ -568,5 +653,5 @@ def describe_schematic(schematic: Path, name: str, band_mhz: list[float], out: P
                  f"Build with: {copied['build']}\n")
     out.write_text(head + yaml.safe_dump(description, sort_keys=False, width=120))
     needed = [f"project.rails.{x['net']}.loads.{k}" for x in description["project"]["rails"] for k, v in x["loads"].items() if v == NEEDED]
-    return {"written": str(out), "chain": description["summary"], "channels": sum(1 for row in description["chain"] if row[2].startswith("J")), "required": needed, "assumed": description["assumed"], "likely_rails": description["likely_rails"], "parts": len(description["parts"]), "nets": len(description["nets"]),
+    return {"written": str(out), "chain": description["summary"], "channels": sum(1 for row in description["chain"] if row[2].startswith("J")) + len(description.get("ports") or []), "required": needed, "assumed": description["assumed"], "likely_rails": description["likely_rails"], "parts": len(description["parts"]), "nets": len(description["nets"]),
             **({"board_footprints": copied} if copied else {})}

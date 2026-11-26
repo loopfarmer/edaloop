@@ -64,17 +64,25 @@ def check_connectivity(bench: dict) -> dict:
 
 
 def check_chain(bench: dict) -> dict:
-    """The RF path runs unbroken from one connector to another, through each part in turn."""
+    """The RF path runs unbroken from one connector to another, through each part in turn. On a module with no connectors, a path
+    may instead start and end at the ports the description names: a part with a pad on the net where the path enters or leaves."""
     chain, nets, problems = bench["chain"], bench["nets"], []
     for net, entry, leave in chain:
         for pin in (entry, leave):
             if pin not in nets.get(net, []):
                 problems.append(f"{pin} isn't on {net}")
-    # A connector ends one channel, and the next row starts another.
+    ports = bench.get("ports") or []
+    for port in ports:
+        for net, pad in (port["in"], port["out"]):
+            if pad not in nets.get(net, []):
+                problems.append(f"port pad {pad} isn't on {net}")
+    starts = {_pin(p["in"][1])[0]: p["in"][0] for p in ports}
+    stops = {_pin(p["out"][1])[0]: p["out"][0] for p in ports}
+    # A connector or a port ends one channel, and the next row starts another.
     channels, current = [], []
     for row in chain:
         current.append(row)
-        if _pin(row[2])[0].startswith("J"):
+        if _pin(row[2])[0].startswith("J") or _pin(row[2])[0] in stops:
             channels.append(current)
             current = []
     if current:
@@ -83,10 +91,12 @@ def check_chain(bench: dict) -> dict:
         for (net_a, _, leave), (net_b, entry, _) in zip(channel, channel[1:]):
             if _pin(leave)[0] != _pin(entry)[0]:
                 problems.append(f"{net_a} ends on {leave}, but {net_b} starts on {entry}")
-        for pin in (channel[0][1], channel[-1][2]):
-            if not _pin(pin)[0].startswith("J"):
-                problems.append(f"the path ends on {pin}, which isn't a connector")
-    path = " > ".join([_pin(chain[0][1])[0], *[_pin(x[2])[0] for x in channels[0]]])
+        for pin, port in ((channel[0][1], starts), (channel[-1][2], stops)):
+            if not _pin(pin)[0].startswith("J") and _pin(pin)[0] not in port:
+                problems.append(f"the path ends on {pin}, which isn't a connector or a port")
+    first = channels[0]
+    path = " > ".join([*([starts[_pin(first[0][1])[0]]] if _pin(first[0][1])[0] in starts else []), _pin(first[0][1])[0],
+                       *[_pin(x[2])[0] for x in first], *([stops[_pin(first[-1][2])[0]]] if _pin(first[-1][2])[0] in stops else [])])
     return _row("rf_chain", problems, f"{len(channels)} channels, the first {path}" if len(channels) > 1 else path)
 
 

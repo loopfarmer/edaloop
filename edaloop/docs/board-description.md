@@ -27,6 +27,16 @@ edaloop describe board.kicad_pcb -o d.yaml --band-mhz 1 3800 --chains-hint pairs
 
 Each path then ends only at its partner, and each pair gets a search budget of its own. A pair whose routes still can't all be tried gets its most direct route, and `assumed` says so. That route can leave out a part on a longer branch, such as a filter beside a bypass, so check it. A pair that can't be joined without parts already on another path is named in `assumed` too. The MCP tool takes the same pairs as `chains_hint`.
 
+### Modules with no connectors
+
+A board laid out from one module of a larger design, as an atopile layout is, has no connectors. Its RF path enters and leaves it on nets, where the module joins the rest of the system, so `describe` finds no ends and refuses. Name each path's entry and exit net with `--ports`, once for each path:
+
+```bash
+edaloop describe module.kicad_pcb -o d.yaml --band-mhz 100 6000 --ports RF_IN RF_OUT --ground lv
+```
+
+`--ports-file` takes the same as a YAML list of net pairs, such as `[[RF_IN, RF_OUT]]`, and the MCP tool takes it as `ports`. Each net is searched as if a connector sat on it, so the path is found through signal parts as between connectors, and runs from the first net to the second. A port net is taken as RF whatever its name. A port is the pad on that net where the path enters or leaves: the description's `chain` starts and ends at the parts that hold them, and its `ports` records the net and the pad for each path, as `{in: [RF_IN, C1.1], out: [RF_OUT, C2.2]}`. A build turns the first part so that its port pad starts the row and the last so that its port pad ends it. A port net with nothing else on it has no hop to route, so no check measures it, and a tap on a port net, such as a termination, isn't on the row. `--ground` names the ground when it isn't called `GND`, as an atopile power interface calls it `lv`: the description calls it `GND`, which a build pours, and `assumed` says so.
+
 A reference that more than one footprint carries, such as stitching vias drawn as footprints all called `GND_VIA`, isn't one part. `describe` leaves those footprints out and lists them in `assumed`.
 
 ## How a board is placed

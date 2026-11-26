@@ -1796,6 +1796,71 @@ def test_describe_follows_a_path_between_two_ports_of_one_footprint(tmp_path):
         describe.describe(_netlist(tmp_path, {"A": ["J1.1", "C1.1"], "B": ["C1.2", "J1.2"]}, {"J1": "header", "C1": "100nF"}), "x", [1, 2])
 
 
+def _module():
+    """A made-up module with no connectors: it joins the rest of the system at RF_IN and RF_OUT. A 50 ohm shunt terminates RF_IN, and
+    the amplifier is fed through a choke from VDD."""
+    parts = {"C1": "100pF", "R1": "49.9", "U1": "LNA", "C2": "100pF", "L1": "56nH", "C3": "100nF"}
+    nets = {"RF_IN": ["C1.1", "R1.1"], "A": ["C1.2", "U1.1"], "B": ["U1.3", "C2.1", "L1.1"], "RF_OUT": ["C2.2"],
+            "VDD": ["L1.2", "C3.1"], "GND": ["R1.2", "U1.2", "C3.2"]}
+    return nets, parts
+
+
+def test_describe_finds_the_path_between_a_modules_named_port_nets(tmp_path):
+    from edaloop import describe
+    nets, parts = _module()
+    with pytest.raises(describe.DescribeError, match="needs two connectors"):
+        describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500])
+    d = describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]])
+    assert [c[1:] for c in d["chain"]] == [["C1.2", "U1.1"], ["U1.3", "C2.1"]]
+    assert d["ports"] == [{"in": ["RF_IN", "C1.1"], "out": ["RF_OUT", "C2.2"]}]
+    assert d["summary"].endswith("RF_IN > C1 > U1 > C2 > RF_OUT")
+    assert "RF_OUT" in d["nets"] and "C2.2" not in d["open_pins"]
+    # Named the other way round, the path still runs from the first net to the second.
+    d = describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_OUT", "RF_IN"]])
+    assert [c[1:] for c in d["chain"]] == [["C2.1", "U1.3"], ["U1.1", "C1.2"]]
+    assert d["ports"] == [{"in": ["RF_OUT", "C2.2"], "out": ["RF_IN", "C1.1"]}]
+    with pytest.raises(describe.DescribeError, match="RF_X, which isn't a net"):
+        describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_X"]])
+    with pytest.raises(describe.DescribeError, match="no path between the ports RF_IN and VDD"):
+        describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "VDD"]])
+
+
+def test_a_modules_described_ports_pass_the_chain_check(tmp_path):
+    from edaloop import describe, testbench
+    nets, parts = _module()
+    d = describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]])
+    row = testbench.check_chain(d)
+    assert row["status"] == "pass" and row["detail"] == "RF_IN > C1 > U1 > C2 > RF_OUT", row
+    d["ports"][0]["out"] = ["RF_OUT", "C2.1"]
+    assert "C2.1 isn't on RF_OUT" in testbench.check_chain(d)["detail"]
+
+
+def test_a_modules_ground_by_another_name_is_described_as_gnd(tmp_path):
+    from edaloop import describe
+    nets, parts = _module()
+    nets["lv"] = nets.pop("GND")        # as an atopile power interface names it
+    d = describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]], ground="lv")
+    assert "lv" not in d["nets"] and d["nets"]["GND"] == ["R1.2", "U1.2", "C3.2"]
+    assert "nets: lv is the ground, renamed GND" in d["assumed"]
+    with pytest.raises(describe.DescribeError, match="isn't a net"):
+        describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]], ground="VSS_X")
+
+
+def test_the_ports_cli_option_and_a_ports_file(tmp_path, monkeypatch):
+    from edaloop import describe
+    from edaloop.cli import main
+    (tmp_path / "p.yaml").write_text("[[RF_IN, RF_OUT]]\n")
+    assert describe.load_pairs(tmp_path / "p.yaml", "ports") == [["RF_IN", "RF_OUT"]]
+    seen = {}
+    monkeypatch.setattr(describe, "describe_schematic", lambda *a, **k: seen.update(k) or {})
+    assert main(["describe", str(tmp_path / "m.kicad_pcb"), "-o", str(tmp_path / "d.yaml"), "--band-mhz", "900", "1500",
+                 "--ports", "A", "B", "--ports-file", str(tmp_path / "p.yaml"), "--ground", "lv"]) == 0
+    assert seen["ports"] == [["A", "B"], ["RF_IN", "RF_OUT"]] and seen["ground"] == "lv"
+    (tmp_path / "p.yaml").write_text("[RF_IN, RF_OUT]\n")
+    with pytest.raises(describe.DescribeError, match="ports file .* list of net pairs"):
+        describe.load_pairs(tmp_path / "p.yaml", "ports")
+
+
 def test_describe_refuses_a_board_with_one_connector(tmp_path):
     from edaloop import describe
     with pytest.raises(describe.DescribeError):

@@ -45,7 +45,7 @@ edaloop next
 | `stage <name>` | Runs the sensors a routing stage names in `edaloop.yaml`. |
 | `release` | Exports fabrication files only if the gate holds on these bytes. |
 | `review`, `report` | Exports the schematic, renders, BOM and gate status for a person, with no Gerbers. Writes the HTML scorecard. |
-| `describe <.kicad_sch or .kicad_pcb>` | Writes a board description from a schematic, or from a board's pads when there's no schematic. Finds the RF paths. |
+| `describe <.kicad_sch or .kicad_pcb>` | Writes a board description from a schematic, or from a board's pads when there's no schematic. Finds the RF paths. For a module with no connectors, `--ports NET_IN NET_OUT` names the nets each path enters and leaves by. |
 | `bench`, `build <description>` | Checks a description's numbers, or makes a placed KiCad project from it. |
 | `make <description>` | Runs the whole flow from a description to a reviewed board. `--quick` leaves out the three-solver EM check, so the result can't be released. |
 | `compare <a> <b>` | Two boards side by side: size, RF length, vias, and whether they join the same pads. |

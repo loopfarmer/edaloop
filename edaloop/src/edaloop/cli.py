@@ -83,6 +83,10 @@ def main(argv=None):
     ds.add_argument("--band-mhz", type=float, nargs=2, required=True, metavar=("LOW", "HIGH"))
     ds.add_argument("--name", help="board name, by default the schematic's")
     ds.add_argument("--chains-hint", type=Path, help="a YAML list of connector pairs each RF path runs between, such as [[J1, J2], [J3, J4]], for a board with too many routes to search")
+    ds.add_argument("--ports", nargs=2, action="append", metavar=("NET_IN", "NET_OUT"),
+                    help="for a module with no connectors, such as an atopile layout: the nets where an RF path enters and leaves it. Repeat it for each path")
+    ds.add_argument("--ports-file", type=Path, help="the same as a YAML list of net pairs, such as [[RF_IN, RF_OUT]]")
+    ds.add_argument("--ground", metavar="NET", help="the ground net, when it isn't called GND, such as an atopile layout's lv. The description calls it GND")
     cc = sub.add_parser("convert-chains", help="turn a Python chain spec (chains.py) into the YAML one edaloop reads")
     cc.add_argument("chains", help="the .py chain spec")
     cc.add_argument("-o", "--output", help="the .yaml to write (default: beside it)")
@@ -147,7 +151,9 @@ def main(argv=None):
             with tempfile.TemporaryDirectory() as tmp:
                 try:
                     pairs = described.load_pairs(args.chains_hint) if args.chains_hint else None
-                    result = described.describe_schematic(args.schematic, args.name or args.schematic.stem, list(args.band_mhz), args.output, Path(tmp), pairs=pairs)
+                    ports = [*(args.ports or []), *(described.load_pairs(args.ports_file, "ports") if args.ports_file else [])] or None
+                    result = described.describe_schematic(args.schematic, args.name or args.schematic.stem, list(args.band_mhz), args.output, Path(tmp),
+                                                          pairs=pairs, ports=ports, ground=args.ground)
                 except described.DescribeError as e:
                     print(f"edaloop: {e}", file=sys.stderr)
                     return 1

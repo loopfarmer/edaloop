@@ -148,12 +148,17 @@ def make_board(description_file: str, output_dir: str, footprint_dirs: list[str]
 
 @_tool
 def describe_design(source_file: str, output_file: str, band_mhz: list[float], name: str | None = None,
-                    chains_hint: list[list[str]] | None = None) -> dict:
+                    chains_hint: list[list[str]] | None = None, ports: list[list[str]] | None = None, ground: str | None = None) -> dict:
     """Write a board description from a .kicad_sch, or a .kicad_pcb if there's no schematic. Read back `required` and `assumed` before building.
 
     `chains_hint` names the connector pairs each RF path runs between, such as [["J1", "J2"]]. Give it when the
     error says there are too many routes to search: the error lists the pairs that have a route. Choose the pairs
     from the design, not from that list alone, as the most direct route between two ports isn't always the RF path.
+
+    `ports` is for a module with no connectors, such as an atopile layout: the nets where each RF path enters and leaves it,
+    such as [["RF_IN", "RF_OUT"]]. The path runs from the first net to the second, and the description's `ports` records the pad
+    on each, so that a build lays the row between them.
+    `ground` names the ground net when it isn't GND, such as an atopile layout's lv: the description calls it GND, as a build pours GND.
 
     `required` lists what the source can't say and a build refuses without. `assumed` lists defaults, such as the stackup, that a person should check.
 
@@ -179,7 +184,7 @@ def describe_design(source_file: str, output_file: str, band_mhz: list[float], n
     with tempfile.TemporaryDirectory() as tmp:
         try:
             return described.describe_schematic(Path(source_file), name or Path(source_file).stem, list(band_mhz), out, Path(tmp),
-                                                replace_footprints=False, pairs=chains_hint)
+                                                replace_footprints=False, pairs=chains_hint, ports=ports, ground=ground)
         except described.DescribeError as e:
             return {"written": False, "error": str(e)}
 

@@ -407,6 +407,9 @@ def _derive_layout(fps, spec, square=False, choice=0):
     widths = spec.get("net_width") or {}
     chain_nets = {c[0] for c in chain}
     on_row = {x.split(".")[0] for c in chain for x in c[1:]}
+    # A module with no connectors: each path's end parts and their pads on the nets where it enters and leaves.
+    port_in = {p["in"][1].split(".")[0]: p["in"][1].split(".")[1] for p in spec.get("ports") or []}
+    port_out = {p["out"][1].split(".")[0]: p["out"][1].split(".")[1] for p in spec.get("ports") or []}
     taps = {}
     legs = _pair_legs(nets, chain)
     for net, entry, leave in chain:
@@ -504,7 +507,10 @@ def _derive_layout(fps, spec, square=False, choice=0):
             walk = []
             rows.append(walk)
             back = _row_end(chain, index)
-            if back[0] == ref and back[1] != entry.split(".")[1]:
+            if ref in port_in:
+                # A module's path starts at the pad on its entry net: the part lies from that pad toward the row.
+                rot = _rot_for(fps[ref], port_in[ref], entry.split(".")[1], travel)
+            elif back[0] == ref and back[1] != entry.split(".")[1]:
                 # A row that comes back to the part it left, through another port, as from one SMA of a two-SMA kit to the
                 # other: the part faces its return port along the row, so that the row runs between the two.
                 rot = _rot_for(fps[ref], entry.split(".")[1], back[1], travel)
@@ -565,6 +571,9 @@ def _derive_layout(fps, spec, square=False, choice=0):
             walk.append([ref, rot, pin, out_pin, [0.0, 0.0], side] if side else [ref, rot, pin, out_pin])
         elif ref == walk[0][0]:
             walk.append([ref, walk[0][1], pin, None])
+        elif ref in port_out:
+            # And ends at the pad on its exit net, which faces on along the row, away from the parts before it.
+            walk.append([ref, _rot_for(fps[ref], pin, port_out[ref], travel), pin, None])
         else:
             walk.append([ref, _rot_for(fps[ref], None, pin, (-travel[0], -travel[1])), pin, None])
     # A person's rotation for a part wins over the derived one. A part whose RF pads sit on opposite corners, like a TT1224
