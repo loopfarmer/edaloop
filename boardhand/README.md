@@ -1,6 +1,6 @@
 # boardhand
 
-An MCP server, in one Rust binary, through which an AI agent reads and edits KiCad 10 board files. Every reply states what was observed in the file or from `kicad-cli`, not what was asked for.
+An MCP server, in one Rust binary, through which an AI agent reads and edits KiCad 10 and 11 board files. A footprint placed as KiCad 11 writes it, `(transform (translate x y) (rotate r) (scale 1 1))`, is read and moved in that form; a transform that scales, mirrors or has a part boardhand doesn't know makes it refuse the board rather than guess. Every reply states what was observed in the file or from `kicad-cli`, not what was asked for.
 
 ## Build and run
 

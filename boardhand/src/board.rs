@@ -91,6 +91,7 @@ pub struct Board {
 pub enum BoardError {
     Parse(ParseError),
     NotABoard(String),
+    Pose(String),
 }
 
 impl std::fmt::Display for BoardError {
@@ -98,6 +99,7 @@ impl std::fmt::Display for BoardError {
         match self {
             BoardError::Parse(e) => write!(f, "{e}"),
             BoardError::NotABoard(h) => write!(f, "the file's root is '{h}', not 'kicad_pcb'"),
+            BoardError::Pose(m) => write!(f, "{m}"),
         }
     }
 }
@@ -124,6 +126,36 @@ pub fn node_uuid(t: &Tree, id: Id) -> Option<String> {
     t.find(id, "uuid").or_else(|| t.find(id, "tstamp")).and_then(|u| t.arg_text(u, 0)).map(|s| s.to_string())
 }
 
+/// A footprint's origin and rotation in degrees.
+///
+/// KiCad 10 and earlier write it as `(at x y rot)`. KiCad 11 (board file version 20261031) writes
+/// `(transform (translate x y) (rotate rot) (scale 1 1))` instead. A flipped footprint still has
+/// scale 1 1 there, its local coordinates already flipped as before. A transform that scales,
+/// mirrors or has a part this doesn't know would put pads somewhere else, so it's an error, never
+/// a guess.
+pub fn footprint_pose(t: &Tree, id: Id) -> Result<((f64, f64), f64), String> {
+    if let Some(a) = t.find(id, "at") {
+        return Ok(((t.arg_num(a, 0).unwrap_or(0.0), t.arg_num(a, 1).unwrap_or(0.0)), t.arg_num(a, 2).unwrap_or(0.0)));
+    }
+    let Some(tr) = t.find(id, "transform") else {
+        return Err("a footprint has neither (at ...) nor (transform ...)".into());
+    };
+    for c in t.args(tr) {
+        if t.kind(c) != Kind::List || !matches!(t.head(c), "translate" | "rotate" | "scale") {
+            return Err(format!("a footprint transform this can't apply: '{}'", String::from_utf8_lossy(t.bytes(c))));
+        }
+    }
+    if let Some(sc) = t.find(tr, "scale") {
+        if (t.arg_num(sc, 0), t.arg_num(sc, 1)) != (Some(1.0), Some(1.0)) {
+            return Err(format!("a footprint transform this can't apply: '{}'", String::from_utf8_lossy(t.bytes(sc))));
+        }
+    }
+    let mv = t.find(tr, "translate");
+    let x = mv.and_then(|m| t.arg_num(m, 0)).unwrap_or(0.0);
+    let y = mv.and_then(|m| t.arg_num(m, 1)).unwrap_or(0.0);
+    Ok(((x, y), t.find(tr, "rotate").and_then(|r| t.arg_num(r, 0)).unwrap_or(0.0)))
+}
+
 fn xy(t: &Tree, id: Id, head: &str) -> Option<(f64, f64)> {
     let n = t.find(id, head)?;
     Some((t.arg_num(n, 0)?, t.arg_num(n, 1)?))
@@ -145,6 +177,11 @@ impl Board {
             return Err(BoardError::NotABoard(head));
         }
         let top: Vec<Id> = tree.args(tree.root).collect();
+        for &c in &top {
+            if tree.kind(c) == Kind::List && tree.head(c) == "footprint" {
+                footprint_pose(&tree, c).map_err(BoardError::Pose)?;
+            }
+        }
         let mut layers = Vec::new();
         if let Some(ls) = tree.find(tree.root, "layers") {
             for l in tree.children(ls) {
@@ -328,7 +365,7 @@ impl Board {
                     }
                 }
             }
-            let at_node = t.find(id, "at");
+            let (at, rotation) = footprint_pose(t, id).unwrap_or(((0.0, 0.0), 0.0));
             let pads = t
                 .find_all(id, "pad")
                 .map(|p| Pad { number: t.arg_text(p, 0).map(|s| s.to_string()).unwrap_or_default(), net: self.node_net(p).0 })
@@ -338,8 +375,8 @@ impl Board {
                 id: t.arg_text(id, 0).map(|s| s.to_string()).unwrap_or_default(),
                 uuid: node_uuid(t, id),
                 reference,
-                at: xy(t, id, "at").unwrap_or((0.0, 0.0)),
-                rotation: at_node.and_then(|a| t.arg_num(a, 2)).unwrap_or(0.0),
+                at,
+                rotation,
                 layer: t.find(id, "layer").and_then(|n| t.arg_text(n, 0)).map(|s| s.to_string()).unwrap_or_default(),
                 locked: node_locked(t, id),
                 pads,
@@ -394,8 +431,7 @@ impl Board {
             if head.starts_with("gr_") {
                 pts.extend(self.edge_points(id));
             } else if head == "footprint" {
-                let at = xy(t, id, "at").unwrap_or((0.0, 0.0));
-                let rot = t.find(id, "at").and_then(|a| t.arg_num(a, 2)).unwrap_or(0.0);
+                let (at, rot) = footprint_pose(t, id).unwrap_or(((0.0, 0.0), 0.0));
                 for c in t.children(id) {
                     if t.kind(c) == Kind::List && t.head(c).starts_with("fp_") {
                         pts.extend(self.edge_points(c).into_iter().map(|p| local_to_board(p, at, rot)));
@@ -647,6 +683,34 @@ mod tests {
   (segment (start 0 0) (end 1 0) (width 0.2) (layer "F.Cu") (net 2) (tstamp aaa))
   (via blind locked (at 3 3) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (tstamp bbb))
 )"#;
+
+    const KICAD11: &str = r#"(kicad_pcb (version 20261031)
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+  (footprint "R" (layer "F.Cu")
+    (transform (translate 10.5 20) (rotate 90) (scale 1 1))
+    (property "Reference" "R1" (at 0 0 90))
+    (pad "1" smd rect (at -1 0 90) (net "N1"))
+    (fp_line (start -2 -1) (end 2 -1) (layer "Edge.Cuts")))
+)"#;
+
+    #[test]
+    fn a_kicad_11_transform_reads_as_the_at_it_replaced() {
+        let b = Board::parse(KICAD11.as_bytes().to_vec()).unwrap();
+        let f = &b.footprints()[0];
+        assert_eq!((f.at, f.rotation), ((10.5, 20.0), 90.0));
+        let old = KICAD11.replace("(transform (translate 10.5 20) (rotate 90) (scale 1 1))", "(at 10.5 20 90)");
+        assert_eq!(Board::parse(old.into_bytes()).unwrap().outline_bbox(), b.outline_bbox());
+        assert_eq!(b.outline_bbox(), Some((9.5, 18.0, 9.5, 22.0)));
+    }
+
+    #[test]
+    fn a_transform_this_cant_apply_refuses_the_board() {
+        for bad in ["(transform (translate 1 2) (rotate 0) (scale -1 1))", "(transform (translate 1 2) (skew 5))", ""] {
+            let text = KICAD11.replace("(transform (translate 10.5 20) (rotate 90) (scale 1 1))", bad);
+            let e = Board::parse(text.into_bytes()).err().expect(bad);
+            assert!(matches!(e, BoardError::Pose(_)), "{bad}: {e}");
+        }
+    }
 
     #[test]
     fn numbered_form_resolves_names() {
