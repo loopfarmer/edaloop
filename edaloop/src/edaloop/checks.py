@@ -288,7 +288,7 @@ def rf_reference(p: Project) -> Outcome:
                    {"crossings": len(findings), "non_ground_on_reference_mm": round(other, 2)}, findings)
 
 
-@check("rf_layout", "verify", needs_board=True, version=2, tools=("kicad_python",))
+@check("rf_layout", "verify", needs_board=True, version=2, tools=("kicad_python", "kicad_cli", "ipc_python"))
 def rf_layout(p: Project) -> Outcome:
     """What RF reviews keep finding and DRC can't: the fence, the plane across a trace's width, pad gaps, limiter ground, supply on top, taps and bypass order."""
     from . import ground, rf_rules
@@ -691,7 +691,7 @@ def power_rails(p: Project) -> Outcome:
     return Outcome({**_files(p, p.board), "power_config": _config(p, "power_config")}, metrics, findings)
 
 
-@check("thermal_field", "verify", version=2, tools=("kicad_python", "boardfield"))
+@check("thermal_field", "verify", version=2, tools=("kicad_python", "kicad_cli", "ipc_python", "boardfield"))
 def thermal_field(p: Project) -> Outcome:
     """Current and temperature solved on the real copper, pours included, for each rail in `power`. A failed solve can't pass."""
     cfg = p.section("thermal")

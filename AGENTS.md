@@ -12,6 +12,7 @@ This file is about changing edaloop. To design a board with it, read [`edaloop/s
 |---|---|---|
 | `edaloop/src/edaloop/` | Python | The checks, the gate, the ledger, placement, routing and the MCP server |
 | `edaloop/src/edaloop/scripts/` | Python | Standalone scripts with no dependencies. `rf_path.py` measures the RF path, and `kicad_pcb.py` reads a board as geometry |
+| `edaloop/src/edaloop/kicad_ops.py`, `kicad_ipc_ops.py` | Python | Board edits, one operation per run: through `pcbnew` under KiCad's Python for KiCad 10, and through the IPC API for KiCad 11. `toolchain.kicad_op` picks one. Keep their operations, arguments and JSON results the same |
 | `edaloop/src/edaloop/export*.py` | Python | KiCad 6.0 and EAGLE 7.7 exports. `export_eagle.py` runs under KiCad's Python, because it needs `pcbnew` |
 | `edaloop/tests/` | Python | The test suite, in `test_core.py` |
 | `edaloop/testbenches/` | YAML | Board descriptions, which run with no KiCad files |

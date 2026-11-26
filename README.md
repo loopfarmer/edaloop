@@ -168,6 +168,7 @@ edaloop drives other tools, and each step needs only some of them. `uv run edalo
 | Rust | 1.91 or later. CI builds with 1.99 | [rustup](https://rustup.rs) | |
 | KiCad | 10. CI uses 10.0.8 | [kicad.org](https://www.kicad.org/download/), or the `kicad/kicad:10.0.8` Docker image | `kicad_cli` |
 | KiCad's Python | The one KiCad ships: 3.9 on macOS, 3.13 in the Docker image | Comes with KiCad. It must import `pcbnew` | `kicad_python` |
+| kicad-python | 0.10 or later, for KiCad 11, which has no `pcbnew`. See [KiCad 11](#kicad-11) | Into edaloop's environment, or any Python with it and shapely | `ipc_python`, and `kicad_backend` |
 | `xmllint` | Any | `libxml2-utils` on Debian and Ubuntu. macOS has it | On `PATH` |
 | [circuitRF](https://github.com/potatobeanradio/circuitRF) | 1.6.5 or later, for EMerge and compare mode | Clone it to `~/.cache/edaloop/circuitRF`, install the .NET 10 SDK, then `dotnet build src/Cli -c Release` | `circuitrf`, and `dotnet_root` for the .NET runtime |
 | EM solvers | As circuitRF installs them | `circuitrf solver install <palace\|openems\|emerge\|gmsh> --yes` | Found by circuitRF |
@@ -192,6 +193,24 @@ ngspice: /usr/bin/ngspice
 ```
 
 `boardhand`'s tests find KiCad through `BOARDHAND_TEST_KICAD_CLI` and `BOARDHAND_TEST_KICAD_PY` instead.
+
+### KiCad 11
+
+KiCad 11 (due about February 2027; tested on the 10.99 nightly of 23 November 2026, c508d01f46) ships no Python and no
+`pcbnew`. Board edits go through its IPC API instead: `kicad_ipc_ops.py` takes the same operations as `kicad_ops.py`, and
+each one starts a headless `kicad-cli api-server` on its board, makes its change in one commit and saves. `kicad_backend`
+in `toolchain.yaml` picks the path: `auto` (the default) uses `pcbnew` wherever `kicad_python` still imports it, `swig`
+and `ipc` force one. `doctor` says which it found.
+
+Until kicad-python 0.10 is on PyPI, build it from a checkout of
+[kicad-python](https://gitlab.com/kicad/code/kicad-python) whose `kicad` submodule is at your KiCad's commit, with
+`protoc` 25 or older (`grpcio-tools` 1.62 has one), and install it into edaloop's environment with
+`uv pip install -e <checkout>`.
+
+Not yet on the IPC API: `build_board`, `place_silk`, `strip_inner_pads` and `export_footprints`, which need `pcbnew`'s
+geometry or its ratsnest, and the EAGLE export. On KiCad 11 they refuse by name, so `make` stops at the build. KiCad 11
+also writes a footprint's place as `(transform ...)` rather than `(at ...)`. edaloop's readers take both, and a board
+goes to KiCadRoutingTools, which reads only `(at ...)`, as a copy written back that way.
 
 ### Running in Docker
 
