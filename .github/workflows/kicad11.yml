@@ -44,10 +44,15 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             kicad-nightly kicad-nightly-footprints kicad-nightly-symbols libxml2-utils
-          cli="$(dpkg -L kicad-nightly | grep -E '/bin/kicad-cli(-nightly)?$' | head -n 1)"
+          dpkg -L kicad-nightly | grep -E '/bin/' || true
+          cli="$(dpkg -L kicad-nightly | grep -E '/kicad-cli[^/]*$' | head -n 1)"
+          echo "kicad-cli: $cli"
           test -x "$cli"
-          "$cli" version
-          short="$("$cli" version | grep -oE 'g[0-9a-f]{7,}' | head -n 1 | cut -c2-)"
+          "$cli" version || true
+          # The package version names the commit: 202611261140+0d4dabc36a~190~ubuntu24.04.1.
+          pkg="$(dpkg-query -W -f='${Version}' kicad-nightly)"
+          short="$(echo "$pkg" | sed -nE 's/^[0-9]+\+([0-9a-f]{7,})~.*/\1/p')"
+          echo "kicad-nightly $pkg, commit $short"
           test -n "$short"
           echo "KICAD_CLI=$cli" >> "$GITHUB_ENV"
           echo "KICAD_SHORT=$short" >> "$GITHUB_ENV"
