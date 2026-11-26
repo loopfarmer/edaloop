@@ -556,7 +556,7 @@ def _pad_land(p: Project, net: str, x_um: float, y_um: float, within_mm: float =
     return f", on the land of {min(near)[1]}" if near else ""
 
 
-@check("impedance", "verify", tools=("circuitrf",))
+@check("impedance", "verify", version=2, tools=("circuitrf",))
 def impedance(p: Project) -> Outcome:
     """circuitRF cross-section Z0 on the real copper; each local dip is priced as return loss at the top of band."""
     cfg = p.section("rf")
@@ -569,7 +569,8 @@ def impedance(p: Project) -> Outcome:
     env = toolchain.circuitrf_env()
     cells = p.work / "crf_cells"
     shutil.rmtree(cells, ignore_errors=True)
-    r = toolchain.run([tp["circuitrf"], "convert", p.board, "-o", cells, "--to", "clay"], env=env, timeout=600)
+    r = toolchain.run([tp["circuitrf"], "convert", toolchain.at_poses(p.board, p.work / "at_poses"), "-o", cells, "--to", "clay"],
+                      env=env, timeout=600)
     clay = toolchain.glob_one(str(cells / p.board.stem / "layout" / "*.clay"))
     if not clay:
         raise RuntimeError(f"circuitRF import failed: {r.stdout.strip()[-200:]} {r.stderr.strip()[-200:]}")
@@ -769,7 +770,7 @@ def thermal_field(p: Project) -> Outcome:
     return Outcome(inputs, metrics, findings, {"boardfield": o["device"]}, [str(x.relative_to(p.root)) for x in (png, *svgs) if x.exists()])
 
 
-@check("em_fast", "route", tools=("circuitrf",))
+@check("em_fast", "route", version=2, tools=("circuitrf",))
 def em_fast(p: Project) -> Outcome:
     """A quick field-solver read for routing iterations: one solver, light mesh, refined where its error estimate asks.
 
@@ -791,7 +792,7 @@ def em_fast(p: Project) -> Outcome:
     return Outcome(inputs, {"zc_ohm": round(zc, 2), "eps_eff": round(eff, 3), "seconds": seconds}, findings, {"solver": fast["solver"]})
 
 
-@check("em_hops", "simulate", needs_board=True, tools=("circuitrf",))
+@check("em_hops", "simulate", needs_board=True, version=2, tools=("circuitrf",))
 def em_hops(p: Project) -> Outcome:
     """Each RF hop as routed, solved as a 2-port with its own pours and vias: what the copper adds, without the parts."""
     from . import em_hops as hops
@@ -932,7 +933,7 @@ def _coupon(p: Project, cfg: dict, ws: Path) -> str:
     tp = toolchain.paths()
     cells = p.work / "em_cells"
     shutil.rmtree(cells, ignore_errors=True)
-    toolchain.run([tp["circuitrf"], "convert", p.board, "-o", cells, "--to", "clay"],
+    toolchain.run([tp["circuitrf"], "convert", toolchain.at_poses(p.board, p.work / "at_poses"), "-o", cells, "--to", "clay"],
                   env=toolchain.circuitrf_env(), timeout=600)
     tech_src = toolchain.glob_one(str(cells / "**" / "*.ctech")) or toolchain.glob_one(str(cells / "*.ctech"))
     if not tech_src:
@@ -1050,7 +1051,7 @@ def _em_run(p: Project, cfg: dict, ws: Path, label: str, layout: str, s: dict) -
 REFERENCE_AGREES_PCT = 2.0
 
 
-@check("em_crosscheck", "simulate", tools=("circuitrf",))
+@check("em_crosscheck", "simulate", version=2, tools=("circuitrf",))
 def em_crosscheck(p: Project) -> Outcome:
     """Independent field solvers on a coupon of the board's own line, with disagreement diagnosed. One solver's number is not evidence."""
     cfg = p.section("em")

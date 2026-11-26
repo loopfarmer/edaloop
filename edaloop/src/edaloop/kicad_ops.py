@@ -1481,37 +1481,16 @@ def fits(span, outline, margin=0.5):
     return left >= margin and top >= margin and right <= outline[0] - margin and bottom <= outline[1] - margin
 
 
-def build_board(seed, spec_path, dst):
-    """Parts, nets, solved positions, outline and ground pours on the seed's stackup. No tracks."""
-    spec = json.load(open(spec_path))
+def _pad_nets(fps, spec):
+    """Each footprint's pads against the description's pins: {ref: {pad number: net}}, the pads listed as open, and the
+    problems. A pin the description leaves open gets the name KiCad gives a no-connect pin, so that schematic parity
+    holds."""
     layout = spec["layout"]
-    board = pcbnew.LoadBoard(seed)
-    nets = {}
-    for pins in spec["pins"].values():
-        for name in pins.values():
-            if name not in nets:
-                nets[name] = pcbnew.NETINFO_ITEM(board, name)
-                board.Add(nets[name])
-    fps, problems, unlisted = {}, [], []
     opens = set(spec["open_pins"])
-    for ref, part in spec["parts"].items():
-        fp = _load_footprint(layout["footprints"][ref], spec["lib_dirs"])
-        fp.SetReference(ref)
-        # As schematic.shown_value: KiCad reads a symbol's empty Value as its reference, so the footprint says the same, or parity fails.
-        fp.SetValue(str(part.get("value") or "").strip() or ref)
-        fp.SetPath(pcbnew.KIID_PATH("/" + spec["uuids"][ref]))
-        on_sheet = (spec.get("sheet_of") or {}).get(ref)
-        fp.SetSheetname(on_sheet["name"] if on_sheet else "/")
-        fp.SetSheetfile(on_sheet["file"] if on_sheet else os.path.basename(dst).replace(".kicad_pcb", ".kicad_sch"))
-        fp.SetDNP(bool(part.get("dnp")))
-        field = pcbnew.PCB_FIELD(fp, pcbnew.FIELD_T_USER, "MPN")
-        field.SetText(str(part.get("mpn", "")))
-        field.SetLayer(pcbnew.F_Fab)
-        field.SetVisible(False)
-        fp.Add(field)
-        board.Add(fp)
-        fps[ref] = fp
+    assigned, problems, unlisted = {}, [], []
+    for ref, fp in fps.items():
         numbers = set()
+        mine = assigned.setdefault(ref, {})
         for pad in fp.Pads():
             number = pad.GetNumber()
             if not number:
@@ -1519,14 +1498,9 @@ def build_board(seed, spec_path, dst):
             numbers.add(number)
             name = spec["pins"][ref].get(number)
             if name:
-                pad.SetNet(nets[name])
+                mine[number] = name
             elif ref + "." + number in opens:
-                # The name KiCad gives a no-connect pin, so that schematic parity holds.
-                name = "unconnected-(%s-Pad%s)" % (ref, number)
-                if name not in nets:
-                    nets[name] = pcbnew.NETINFO_ITEM(board, name)
-                    board.Add(nets[name])
-                pad.SetNet(nets[name])
+                mine[number] = "unconnected-(%s-Pad%s)" % (ref, number)
             elif layout.get("unlisted_pads") == "open":
                 unlisted.append("%s.%s" % (ref, number))
             else:
@@ -1535,6 +1509,15 @@ def build_board(seed, spec_path, dst):
     if problems:
         raise SystemExit("pin and pad counts disagree on %d pads, which may be pins the schematic dropped. Confirm against the datasheet, "
                          "then list them in open_pins, or set layout.unlisted_pads to open. First: %s" % (len(problems), "; ".join(problems[:10])))
+    return assigned, unlisted
+
+
+def solve_placement(fps, spec):
+    """Pose every footprint in `fps` for the description in `spec`, and fit the outline. Returns the parts placed, the
+    parts set square, the span (left, right, top, bottom) and the outline (w, h), in mm.
+
+    Only asks each footprint for its pads and courtyard at a pose, so it runs on pcbnew's footprints or on fpmodel's."""
+    layout = spec["layout"]
     def extent(group):
         boxes = [_courtyard(fp, 0).BBox() for fp in group]
         return (min(pcbnew.ToMM(b.GetLeft()) for b in boxes), max(pcbnew.ToMM(b.GetRight()) for b in boxes),
@@ -1653,6 +1636,45 @@ def build_board(seed, spec_path, dst):
         # As data on stdout for scripts and agents (boardgen reads it into BuildError.detail), and as one line on stderr for people.
         print(json.dumps(over), flush=True)
         raise SystemExit(outline_fit.message(over))
+    return placed, squared, (left, right, top, bottom), (w, h)
+
+
+def build_board(seed, spec_path, dst):
+    """Parts, nets, solved positions, outline and ground pours on the seed's stackup. No tracks."""
+    spec = json.load(open(spec_path))
+    layout = spec["layout"]
+    board = pcbnew.LoadBoard(seed)
+    fps = {}
+    for ref, part in spec["parts"].items():
+        fp = _load_footprint(layout["footprints"][ref], spec["lib_dirs"])
+        fp.SetReference(ref)
+        # As schematic.shown_value: KiCad reads a symbol's empty Value as its reference, so the footprint says the same, or parity fails.
+        fp.SetValue(str(part.get("value") or "").strip() or ref)
+        fp.SetPath(pcbnew.KIID_PATH("/" + spec["uuids"][ref]))
+        on_sheet = (spec.get("sheet_of") or {}).get(ref)
+        fp.SetSheetname(on_sheet["name"] if on_sheet else "/")
+        fp.SetSheetfile(on_sheet["file"] if on_sheet else os.path.basename(dst).replace(".kicad_pcb", ".kicad_sch"))
+        fp.SetDNP(bool(part.get("dnp")))
+        field = pcbnew.PCB_FIELD(fp, pcbnew.FIELD_T_USER, "MPN")
+        field.SetText(str(part.get("mpn", "")))
+        field.SetLayer(pcbnew.F_Fab)
+        field.SetVisible(False)
+        fp.Add(field)
+        board.Add(fp)
+        fps[ref] = fp
+    assigned, unlisted = _pad_nets(fps, spec)
+    nets = {}
+    # In the order they were always added: every described pin's net, then the open pins' names, part by part.
+    for name in [n for pins in spec["pins"].values() for n in pins.values()] + [n for r in fps for n in assigned[r].values()]:
+        if name not in nets:
+            nets[name] = pcbnew.NETINFO_ITEM(board, name)
+            board.Add(nets[name])
+    for ref, fp in fps.items():
+        for pad in fp.Pads():
+            name = assigned[ref].get(pad.GetNumber())
+            if name:
+                pad.SetNet(nets[name])
+    placed, squared, (left, right, top, bottom), (w, h) = solve_placement(fps, spec)
     _outline(board, 0, 0, w, h)
     inset = 0.6
     ground = nets["GND"]

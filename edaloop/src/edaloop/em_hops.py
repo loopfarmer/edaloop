@@ -281,7 +281,8 @@ def _pours_and_vias(p) -> tuple[dict[int, list[Polygon]], list[tuple], dict]:
     tp = toolchain.paths()
     cells = p.work / "hop_cells"
     shutil.rmtree(cells, ignore_errors=True)
-    toolchain.run([tp["circuitrf"], "convert", p.board, "-o", cells, "--to", "clay"], env=toolchain.circuitrf_env(), timeout=600)
+    toolchain.run([tp["circuitrf"], "convert", toolchain.at_poses(p.board, p.work / "at_poses"), "-o", cells, "--to", "clay"],
+                  env=toolchain.circuitrf_env(), timeout=600)
     clay = cells / p.board.stem / "layout" / f"{p.board.stem}.clay"
     tech_file = cells / f"{p.board.stem}.ctech"
     if not clay.exists() or not tech_file.exists():
