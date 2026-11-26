@@ -1885,6 +1885,47 @@ def test_a_modules_described_ports_pass_the_chain_check(tmp_path):
     assert "C2.1 isn't on RF_OUT" in testbench.check_chain(d)["detail"]
 
 
+@pytest.mark.parametrize("supply", ["hv", "power-hv-6", "branch.dsa-VDD", "vin-hv", "+5V/1", "/LO/3V3_LDO2"])
+def test_a_supply_named_as_a_modules_power_interface_names_it_carries_no_rf(tmp_path, supply):
+    from edaloop import describe
+    # Two amplifiers whose only join is their supply, named as atopile names a power interface's high side: no RF path.
+    parts = {"C1": "100pF", "U1": "LNA", "U2": "AMP", "C3": "100pF"}
+    nets = {"RF_IN": ["C1.1"], "A": ["C1.2", "U1.1"], supply: ["U1.4", "U2.4"], "B": ["U2.3", "C3.1"], "RF_OUT": ["C3.2"],
+            "GND": ["U1.2", "U2.2"]}
+    with pytest.raises(describe.DescribeError, match="no path between the ports"):
+        describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]])
+    assert describe.is_rail(supply) and not any(describe.is_rail(n) for n in ("RF_IN", "lna-3", "output", "dsa-1", "Secondary"))
+
+
+@pytest.mark.parametrize("net", ["NC", "branch.lna-NC", "ps", "dsa-PS"])
+def test_a_no_connect_or_a_serial_select_net_carries_no_rf(tmp_path, net):
+    from edaloop import describe
+    # As atopile joins two parts' NC pins, or a step attenuator's parallel/serial select pins, on one net.
+    parts = {"C1": "100pF", "U1": "LNA", "U2": "AMP", "C3": "100pF"}
+    nets = {"RF_IN": ["C1.1"], "A": ["C1.2", "U1.1"], net: ["U1.4", "U2.4"], "B": ["U2.3", "C3.1"], "RF_OUT": ["C3.2"], "GND": ["U1.2", "U2.2"]}
+    with pytest.raises(describe.DescribeError, match="no path between the ports"):
+        describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]])
+
+
+def test_a_series_inductor_in_a_filter_ladder_is_on_the_path_but_a_bias_choke_is_not(tmp_path):
+    from edaloop import describe
+    # U1 into a ladder (L1, shunt C2, L2, shunt C4, series C5) into U2, whose output is fed through L3 from a supply
+    # node with a decoupling capacitor and a resistor to VDD.
+    parts = {"C1": "100pF", "U1": "LNA", "L1": "8.2nH", "C2": "2.2pF", "L2": "8.2nH", "C4": "2.2pF", "C5": "100pF", "U2": "AMP",
+             "C3": "100pF", "L3": "56nH", "C6": "100nF", "R5": "10"}
+    nets = {"RF_IN": ["C1.1"], "A": ["C1.2", "U1.1"], "out": ["U1.3", "L1.1"], "n1": ["L1.2", "C2.1", "L2.1"], "n2": ["L2.2", "C4.1", "C5.1"],
+            "B": ["C5.2", "U2.1"], "D": ["U2.3", "C3.1", "L3.1"], "feed": ["L3.2", "C6.1", "R5.1"], "VDD": ["R5.2", "U1.4", "U2.4"],
+            "RF_OUT": ["C3.2"], "GND": ["C2.2", "C4.2", "C6.2", "U1.2", "U2.2"]}
+    d = describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]])
+    assert [c[1:] for c in d["chain"]] == [["C1.2", "U1.1"], ["U1.3", "L1.1"], ["L1.2", "L2.1"], ["L2.2", "C5.1"], ["C5.2", "U2.1"], ["U2.3", "C3.1"]]
+    # Cut the ladder after L1, and feed L2 from the rail: L1 then has nothing in series beyond its shunt, and L2 is a choke, so
+    # U1 reaches U2 no way at all.
+    nets["n1"] = ["L1.2", "C2.1"]
+    nets["VDD"] = [*nets["VDD"], "L2.1"]
+    with pytest.raises(describe.DescribeError, match="no path"):
+        describe.describe(_netlist(tmp_path, nets, parts), "x", [900, 1500], ports=[["RF_IN", "RF_OUT"]])
+
+
 def test_a_modules_ground_by_another_name_is_described_as_gnd(tmp_path):
     from edaloop import describe
     nets, parts = _module()

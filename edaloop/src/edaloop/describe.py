@@ -17,6 +17,10 @@ from . import toolchain
 
 GROUND = re.compile(r"^(GND|AGND|DGND|PGND|VSS|0|GROUND)$", re.I)
 RAIL = re.compile(r"^(VDD|VCC|VBUS|V\+|\+?\d+V\d*|VIN|VBAT|V[0-9].*)$", re.I)
+# A part of a net's name, split where a hierarchy joins its pieces, that names a supply: "branch.dsa-VDD", "+5V/1", or an atopile
+# power interface's high side, which it calls hv ("hv", "vin-hv", "power-hv-6"), or a part that starts with a voltage ("3V3_LO1_2").
+# Underscores don't split, so RF_IN stays whole.
+RAIL_PART = re.compile(r"^(?:HV|VDD\w*|VCC\w*|VBUS|VIN|VBAT|V\+|\+?\d+V\d*(?:_\w*)?)$", re.I)
 RF_PORT = re.compile(r"\bSMA\b|SMA_|U\.?FL|MMCX|\bBNC\b|IPEX|ANTENNA|\bANT\b|\d\.\dGHZ"   # not SMB: that's also a diode package
                      r"|(?<![A-Z0-9])N[-_ ]?(?:TYPE|FEM(?:ALE)?|MALE|JACK|PLUG|BULKHEAD)(?![A-Z0-9])|TYPE[-_ ]?N(?![A-Z0-9])", re.I)
 CONNECTOR_REF = re.compile(r"^J\d")     # JP is a header or a jumper
@@ -28,8 +32,10 @@ NEEDED = "REQUIRED"
 SEARCH_LIMIT = 200_000
 MAX_RF_NET_PINS = 6
 # A net named for logic: a clock, a serial bus, a strobe, an enable or a mute. A signal path doesn't run along one, whatever it joins.
-DIGITAL_NET = re.compile(r"(?:^|[^A-Z0-9])(?:S?CLK|SCL|SDA|SPI|I2C|MOSI|MISO|SDI|SDO|CS|CSB|CE|SS|GPIO\d*|IO\d+|LE|DATA|DAT|CTRL|CTL|EN|ENABLE|"
+DIGITAL_NET = re.compile(r"(?:^|[^A-Z0-9])(?:S?CLK|SCL|SDA|SPI|I2C|MOSI|MISO|SDI|SDO|CS|CSB|CE|SS|GPIO\d*|IO\d+|LE|PS|DATA|DAT|CTRL|CTL|EN|ENABLE|"
                          r"MUTE|RST|RESET|IRQ|UART|RXD|TXD|PWM|SYNC|LVDS|JESD|LD|LOCK|STROBE|PTT)\d*(?=$|[^A-Z0-9])", re.I)
+# A net named for a no-connect, as atopile names one that joins two parts' NC pins: it carries nothing.
+NO_CONNECT = re.compile(r"(?:^|[./\-])(?:NC|N\.C\.|NO_?CONNECT)\d*$", re.I)
 # A part that is logic or a clock: an FPGA, a processor, a shift register, a clock distributor or an oscillator. A path neither runs
 # through one nor ends at one as at a radio, even when an RF-looking net reaches it, such as a clock chip's reference input.
 DIGITAL_PART = re.compile(r"FPGA|CPLD|\bMCU\b|MICROCONTROLLER|PROCESSOR|^XC[A-Z]?\d|^EP\d|^10M\d|^ICE40|^LFE\d|^STM32F|^ATMEGA|^ATSAM|"
@@ -124,6 +130,11 @@ def read_board(path: Path, shared: dict | None = None) -> tuple[dict, dict]:
     return parts, nets
 
 
+def is_rail(net: str) -> bool:
+    """A supply: named like one, whole or in one of its hierarchy's parts."""
+    return bool(RAIL.match(net)) or any(RAIL_PART.match(x) for x in re.split(r"[./\-]", net) if x)
+
+
 def likely_rails(nets: dict, chain: list, known: list[str]) -> list[str]:
     """Nets that look like supplies: named like one, or with a capacitor to ground on them. Only a list to start from, as a netlist can't give currents."""
     rf = {row[0] for row in chain}
@@ -135,7 +146,7 @@ def likely_rails(nets: dict, chain: list, known: list[str]) -> list[str]:
     for net, members in nets.items():
         if net in rf or net in known or GROUND.match(net) or len(members) < 2:
             continue
-        if RAIL.match(net) or any(m.split(".")[0] in caps_to_ground for m in members):
+        if is_rail(net) or any(m.split(".")[0] in caps_to_ground for m in members):
             out.append(net)
     return sorted(out)
 
@@ -202,13 +213,44 @@ def _row_gaps(board, chain: list) -> list[tuple[float, str, str]]:
     return out
 
 
-def _blocks_rf(ref: str, part: dict, pins: dict[str, str]) -> bool:
-    """A part a signal doesn't pass through: a choke, a real resistor, or anything with a side to ground that's its only other side."""
+def filter_inductors(parts: dict, nets: dict, pins: dict[str, dict[str, str]]) -> set[str]:
+    """Series inductors that are part of a filter, not chokes: an L whose two nets are signal nets, neither a supply, where one is a
+    ladder's node, with a capacitor or inductor to ground and another series capacitor or inductor on it, or both have a capacitor
+    or inductor to ground, as a pi section's do. A bias choke's far side has its decoupling capacitor but nothing in series that
+    carries RF on, and a choke to a named rail is a choke whatever is beside it. A ferrite bead is never a filter's."""
+    def two_pin(ref):
+        return ref in parts and len(pins.get(ref) or {}) == 2 and re.match(r"^(C|L)\d", ref)
+
+    def shunt(member):
+        ref = member.partition(".")[0]
+        return two_pin(ref) and any(GROUND.match(n) for n in pins[ref].values())
+
+    def series(member, own):
+        ref = member.partition(".")[0]
+        return ref != own and two_pin(ref) and not any(GROUND.match(n) or is_rail(n) for n in pins[ref].values())
+
+    out = set()
+    for ref in parts:
+        if not re.match(r"^L\d", ref) or len(pins.get(ref) or {}) != 2:
+            continue
+        sides = list(pins[ref].values())
+        if len(set(sides)) != 2 or any(GROUND.match(n) or is_rail(n) for n in sides):
+            continue
+        shunted = [any(shunt(m) for m in nets.get(n, [])) for n in sides]
+        ladder = [shunted[i] and any(series(m, ref) for m in nets.get(n, [])) for i, n in enumerate(sides)]
+        if any(ladder) or all(shunted):
+            out.add(ref)
+    return out
+
+
+def _blocks_rf(ref: str, part: dict, pins: dict[str, str], passes: set | frozenset = frozenset()) -> bool:
+    """A part a signal doesn't pass through: a choke, a real resistor, or anything with a side to ground that's its only other side.
+    `passes` holds the series inductors that are a filter's, from `filter_inductors`, which a signal does pass through."""
     named = [n for n in pins.values() if not GROUND.match(n)]
     if len(named) < 2:
         return True
     if INDUCTOR_REF.match(ref):
-        return True
+        return ref not in passes
     if _digital_part(ref, part, pins):
         return True
     if RESISTOR_REF.match(ref):
@@ -226,7 +268,7 @@ def _digital_part(ref: str, part: dict, pins: dict[str, str]) -> bool:
 
 def _maybe_rf_end(pins: dict[str, str], usable: set) -> bool:
     """A J that could end an RF path though it doesn't say so: three pins at most, none on a rail, one on a signal net."""
-    return len(pins) <= 3 and not any(RAIL.match(n) for n in pins.values()) and any(n in usable for n in pins.values())
+    return len(pins) <= 3 and not any(is_rail(n) for n in pins.values()) and any(n in usable for n in pins.values())
 
 
 class _Spent(Exception):
@@ -326,11 +368,19 @@ def _find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list
     if partner:
         connectors = sorted(set(connectors) | set(partner), key=lambda r: (len(r), r))
     # A control or power bus joins many parts, and a signal doesn't travel along one.
-    usable = {n for n, m in nets.items() if not GROUND.match(n) and not RAIL.match(n) and not n.startswith("unconnected-") and len(m) <= MAX_RF_NET_PINS
-              and not DIGITAL_NET.search(n)} | (forced or set())       # a net a person named as a port is RF, whatever its name
+    usable = {n for n, m in nets.items() if not GROUND.match(n) and not is_rail(n) and not n.startswith("unconnected-") and len(m) <= MAX_RF_NET_PINS
+              and not DIGITAL_NET.search(n) and not NO_CONNECT.search(n)} | (forced or set())       # a net a person named as a port is RF, whatever its name
     # One footprint can hold two RF ports, as an in-line part with a plug at one end and a jack at the other does. Each of its signal pins on a
     # net of its own is then a port, and a path can run from one to another. Only a part that says it's an RF port counts: a header's pins aren't.
     multi_port = {r for r in ports if len({n for n in pins[r].values() if n in usable}) >= 2}
+    passes = filter_inductors(parts, nets, pins)
+
+    def rank(path: list) -> tuple:
+        """Longest first, but a filter's series inductor adds no length, and of two paths alike the one through fewer comes first.
+        Paths that never pass one rank as they always have. Otherwise a diplexer's arm wins: from an injector's LO port through
+        its lowpass and on out through the combining node, a part or two longer than the path from the antenna to the output."""
+        through = sum(1 for row in path if row[2].partition(".")[0] in passes)
+        return len(path) - through, -through
     # One RF port and a radio: the path ends at the radio, and a series inductor on the way is matching rather than a choke.
     if len(ports) == 1 and not multi_port and not partner:
         # One connector says it's RF. Another J that isn't a supply, such as an antenna's feed studs, may be the
@@ -370,7 +420,7 @@ def _find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list
                     other, _, _ = member.partition(".")
                     if other in prev or other in used or other not in parts or parts[other].get("dnp"):
                         continue
-                    if other != b and (other in connectors or _blocks_rf(other, parts[other], pins[other])):
+                    if other != b and (other in connectors or _blocks_rf(other, parts[other], pins[other], passes)):
                         continue
                     prev[other] = (ref, pin, net, member)
                     queue.append(other)
@@ -410,7 +460,7 @@ def _find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list
                     step = [net, f"{ref}.{pin}", member]
                     if other == start and start in multi_port and path and net != path[0][0]:
                         # Back at the footprint it started from, on another of its ports.
-                        if len(path) + 1 > len(best):
+                        if rank([*path, step]) > rank(best):
                             best = [*path, step]
                         continue
                     if other in seen or other in used or other not in parts or parts[other].get("dnp"):
@@ -421,16 +471,16 @@ def _find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list
                         continue
                     radio = (radio_end or to_radio[0]) and other.startswith(ACTIVE) and len(pins[other]) > 2 and not _digital_part(other, parts[other], pins[other])
                     if (other in connectors and (not partner or other in partner.get(start, ()))) or radio:
-                        if len(path) + 1 > len(best):
+                        if rank([*path, step]) > rank(best):
                             best = [*path, step]
                         if radio and to_radio[0] and other not in connectors:
                             # No connector reached: a radio may end the path, but so may one further on, past an amplifier.
                             walk(other, other_pin, seen | {other}, [*path, step])
                     elif other in connectors:
                         continue        # a connector the hint doesn't pair with this one: a path doesn't run through it
-                    elif radio_end and INDUCTOR_REF.match(other) and len([n for n in pins[other].values() if not GROUND.match(n) and not RAIL.match(n)]) == 2:
+                    elif radio_end and INDUCTOR_REF.match(other) and len([n for n in pins[other].values() if not GROUND.match(n) and not is_rail(n)]) == 2:
                         walk(other, other_pin, seen | {other}, [*path, step])
-                    elif not _blocks_rf(other, parts[other], pins[other]):
+                    elif not _blocks_rf(other, parts[other], pins[other], passes):
                         walk(other, other_pin, seen | {other}, [*path, step])
         try:
             walk(start, None, {start}, [])
@@ -452,7 +502,7 @@ def _find_chains(parts: dict, nets: dict, pairs: list | None = None, notes: list
             continue
         if not found:
             break
-        best = max(found, key=len)
+        best = max(found, key=rank)
         chains.append(best)
         ends = (best[0][1].partition(".")[0], best[-1][2].partition(".")[0])
         if ends in direct and notes is not None:
