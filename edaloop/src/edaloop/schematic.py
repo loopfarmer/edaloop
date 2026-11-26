@@ -187,9 +187,14 @@ def draw(bench: dict, name: str, sheet: Sheet | None = None) -> Sheet:
     first_row = row
     x = _snap(30.48)
     if sheet.power % 1000 == 0 and sheet.power <= 1000:
-        # One flag for the whole project: two on one net is a pin conflict, and pages share ground by name.
-        sheet.flag((_snap(20.32), _snap(row + 25.4)))
-        sheet.ground((_snap(20.32), _snap(row + 25.4)))
+        # One flag for the whole project: two on one net is a pin conflict, and pages share ground by name. The flag sits
+        # 2.54 mm above the ground symbol on a wire: KiCad 11's ERC reads two power pins stacked on one point, with
+        # nothing else there, as an unconnected ground pin, though KiCad 10 joins them.
+        gnd_at = (_snap(20.32), _snap(row + 25.4))
+        flag_at = (gnd_at[0], _snap(gnd_at[1] - 2 * G))
+        sheet.flag(flag_at)
+        sheet.wire(flag_at, gnd_at)
+        sheet.ground(gnd_at)
 
     def gnd(at: tuple) -> None:
         sheet.ground(at)
