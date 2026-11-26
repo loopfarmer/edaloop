@@ -211,7 +211,7 @@ Placement runs on `fpmodel.py`, which reads footprints from their libraries and 
 them (pads and courtyards at a pose) as `pcbnew` does, with no KiCad. The board is then written as text, KiCad fills
 its pours and saves it, and KiCad reads every footprint and pad back: one that isn't where placement put it fails the
 build. Footprints never go through the API's `UpdateItems`, which on the nightly saves a turned footprint's texts at
-the wrong angle. On every board tried, placement matches `pcbnew`'s to the micrometre, except where `pcbnew`'s own
+the wrong angle ([KiCad #26164](https://gitlab.com/kicad/code/kicad/-/work_items/26164)). On every board tried, placement matches `pcbnew`'s to the micrometre, except where `pcbnew`'s own
 nanometre rounding decides whether two courtyards exactly the clearance apart touch.
 
 The EAGLE export reads the board through `boardread.py`, a read-only parse of the file, where there is no `pcbnew`.

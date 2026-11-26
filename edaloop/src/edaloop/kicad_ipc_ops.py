@@ -480,7 +480,7 @@ def place_silk(src, dst):
 
     KiCad measures: each reference's box once for each angle (the box moves with the text), and every pad and silk
     line. The chosen places are then written into the file, not sent back through UpdateItems, which on the 10.99
-    nightly (c508d01f46) saves a turned footprint's texts at the wrong angle. KiCad then reads the file back, and any
+    nightly (c508d01f46) saves a turned footprint's texts at the wrong angle (KiCad #26164). KiCad then reads the file back, and any
     reference that isn't where it was put fails the op."""
     margin, clear = from_mm(0.35), from_mm(0.12)
     size, thickness = 0.8, 0.12
