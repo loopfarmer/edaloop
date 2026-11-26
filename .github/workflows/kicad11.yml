@@ -1,0 +1,153 @@
+name: KiCad 11 nightly
+
+# The KiCad half of the flow on KiCad 11, which has no pcbnew: board edits go through the IPC API
+# (kicad_ipc_ops.py) and boards are saved with footprint (transform ...) poses. The nightly moves every
+# day, so this runs daily and on changes to the code it exercises, apart from the main CI. A failure
+# here is a change in edaloop or in KiCad; the log names the nightly it ran.
+
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "edaloop/src/edaloop/kicad_ipc_ops.py"
+      - "edaloop/src/edaloop/fpmodel.py"
+      - "edaloop/src/edaloop/boardread.py"
+      - "edaloop/src/edaloop/boardgen.py"
+      - "edaloop/src/edaloop/toolchain.py"
+      - "edaloop/src/edaloop/export*.py"
+      - "edaloop/src/edaloop/scripts/kicad_pcb.py"
+      - "boardhand/src/**"
+      - ".github/workflows/kicad11.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kicad11-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kicad11:
+    name: KiCad 11 nightly
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: always
+      # kicad-python's own source, pinned. The API definitions it builds against come from KiCad itself,
+      # at the nightly's commit, so the two always agree.
+      KICAD_PYTHON_REF: d66d502183cdcb9b33cc35624b62d592639342e0
+    steps:
+      - name: Install the KiCad nightly
+        run: |
+          sudo add-apt-repository -y ppa:kicad/kicad-dev-nightly
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            kicad-nightly kicad-nightly-footprints kicad-nightly-symbols libxml2-utils
+          dpkg -L kicad-nightly | grep -E '/bin/' || true
+          cli="$(dpkg -L kicad-nightly | grep -E '/kicad-cli[^/]*$' | head -n 1)"
+          echo "kicad-cli: $cli"
+          test -x "$cli"
+          "$cli" version || true
+          # The package version names the commit: 202611261140+0d4dabc36a~190~ubuntu24.04.1.
+          pkg="$(dpkg-query -W -f='${Version}' kicad-nightly)"
+          short="$(echo "$pkg" | sed -nE 's/^[0-9]+\+([0-9a-f]{7,})~.*/\1/p')"
+          echo "kicad-nightly $pkg, commit $short"
+          test -n "$short"
+          echo "KICAD_CLI=$cli" >> "$GITHUB_ENV"
+          echo "KICAD_SHORT=$short" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: edaloop/uv.lock
+      - name: Sync edaloop
+        working-directory: edaloop
+        run: uv sync --extra dev --locked --python 3.13
+      # Until kicad-python 0.10 is on PyPI: its checkout, with KiCad's api/ folder at the nightly's commit
+      # in place of the kicad submodule. Its build brings its own protoc. After this, nothing may run
+      # `uv run` without --no-sync, or uv takes kicad-python out again.
+      - name: Build kicad-python against this KiCad's API
+        run: |
+          sha="$(curl -fsS "https://gitlab.com/api/v4/projects/kicad%2Fcode%2Fkicad/repository/commits/$KICAD_SHORT" | jq -r .id)"
+          echo "KiCad commit $sha"
+          kp="$RUNNER_TEMP/kicad-python"
+          git clone -q https://gitlab.com/kicad/code/kicad-python.git "$kp"
+          git -C "$kp" checkout -q "$KICAD_PYTHON_REF"
+          rm -rf "$kp/kicad" && mkdir "$kp/kicad"
+          curl -fsSL "https://gitlab.com/api/v4/projects/kicad%2Fcode%2Fkicad/repository/archive.tar.gz?sha=$sha&path=api" \
+            | tar xz -C "$kp/kicad" --strip-components=1
+          git -C "$kp/kicad" init -q
+          uv pip install --python edaloop/.venv/bin/python "$kp"
+      # kicad_backend is ipc, not auto, so a pcbnew found by accident can't stand in for the API.
+      - name: Point edaloop at the nightly
+        run: |
+          mkdir -p "$HOME/.config/edaloop"
+          cat > "$HOME/.config/edaloop/toolchain.yaml" <<EOF
+          kicad_cli: $KICAD_CLI
+          kicad_backend: ipc
+          EOF
+      - name: edaloop doctor
+        working-directory: edaloop
+        run: |
+          uv run --no-sync edaloop doctor
+          uv run --no-sync edaloop --json doctor > "$RUNNER_TEMP/doctor.json"
+          python3 - "$RUNNER_TEMP/doctor.json" <<'EOF'
+          import json, sys
+          probes = {p["name"]: p for p in json.load(open(sys.argv[1]))}
+          missing = [n for n in ("kicad-cli", "pcbnew") if not probes.get(n, {}).get("ok")]
+          if missing:
+              sys.exit(f"doctor can't run: {', '.join(missing)}")
+          if "IPC API" not in probes["pcbnew"].get("detail", ""):
+              sys.exit(f"board edits aren't on the IPC API: {probes['pcbnew']}")
+          EOF
+      - name: Build gain_block_demo
+        working-directory: edaloop
+        run: |
+          echo "DEMO=$RUNNER_TEMP/demo" >> "$GITHUB_ENV"
+          uv run --no-sync edaloop build testbenches/gain_block_demo.yaml -o "$RUNNER_TEMP/demo"
+          board="$(ls "$RUNNER_TEMP"/demo/*.kicad_pcb | head -n 1)"
+          grep -q "(transform" "$board" || { echo "the board isn't in KiCad 11's format"; exit 1; }
+      - name: Ground vias on gain_block_demo
+        working-directory: edaloop
+        run: |
+          uv run --no-sync edaloop --json -C "$DEMO" ground | tee "$RUNNER_TEMP/ground.json"
+          "$KICAD_CLI" pcb drc --format json --severity-all -o "$RUNNER_TEMP/ground_drc.json" "$(ls "$DEMO"/*.kicad_pcb | head -n 1)"
+          python3 - "$RUNNER_TEMP/ground_drc.json" <<'EOF'
+          import json, sys
+          placement = {"clearance", "hole_clearance", "hole_to_hole", "shorting_items", "items_not_allowed", "copper_edge_clearance"}
+          bad = [f"{v['type']}: {v['description']}" for v in json.load(open(sys.argv[1]))["violations"]
+                 if v["type"] in placement and any(i["description"].startswith("Via") and "[GND]" in i["description"] for i in v.get("items", []))]
+          print(f"DRC objections to ground vias: {len(bad)}")
+          if bad:
+              sys.exit("\n".join(bad[:20]))
+          EOF
+      - name: KiCad checks on gain_block_demo
+        working-directory: edaloop
+        run: |
+          uv run --no-sync edaloop -C "$DEMO" run project_files
+          uv run --no-sync edaloop -C "$DEMO" run erc
+      - name: Export gain_block_demo
+        working-directory: edaloop
+        run: uv run --no-sync edaloop -C "$DEMO" export
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gain-block-demo-kicad11
+          path: ${{ env.DEMO }}
+          include-hidden-files: true
+          if-no-files-found: warn
+      # boardhand on a board KiCad 11 saved. Its pcbnew comparisons skip: there is no pcbnew.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: boardhand
+          key: kicad11
+      - name: boardhand tests on the KiCad 11 board
+        working-directory: boardhand
+        run: |
+          BOARDHAND_FIXTURE_SMALL="$(ls "$DEMO"/*.kicad_pcb | head -n 1)"
+          export BOARDHAND_FIXTURE_SMALL BOARDHAND_TEST_KICAD_CLI="$KICAD_CLI"
+          cargo test --locked -- --nocapture
