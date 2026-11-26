@@ -20,15 +20,17 @@ import shutil
 import sys
 from contextlib import contextmanager
 
+from scripts.kicad_pcb import set_properties, to_local
+
 try:
     from kipy import KiCad
     from kipy.board_types import Net, RuleAreaSettings, Track, Via, Zone
     from kipy.common_types import PolygonWithHoles
     from kipy.geometry import PolyLine, PolyLineNode, Vector2
     from kipy.proto.board import board_commands_pb2, board_jobs_pb2
-    from kipy.proto.board.board_types_pb2 import BoardLayer, ViaType, ZoneType
-    from kipy.proto.common.commands import editor_commands_pb2
-    from kipy.proto.common.types import base_types_pb2, jobs_pb2
+    from kipy.proto.board.board_types_pb2 import BoardLayer, UnconnectedLayerRemoval, ViaType, ZoneType
+    from kipy.proto.common.commands import base_commands_pb2, editor_commands_pb2
+    from kipy.proto.common.types import KIID, base_types_pb2, jobs_pb2
     from kipy.util import pack_any
     from kipy.util.units import from_mm, to_mm
 except ImportError as missing:      # refused in main(), with how to install it
@@ -41,8 +43,6 @@ REQUEST_TIMEOUT_MS = 900_000
 
 UNPORTED = {
     "build_board": "it poses each footprint many times while it solves a row, reading pads and courtyards after each pose",
-    "place_silk": "it measures each reference's text box at every place it tries",
-    "strip_inner_pads": "it reads the board's unconnected count after each via it changes, and the IPC API has no ratsnest",
     "export_footprints": "it writes footprints to a library with pcbnew's own writer",
 }
 
@@ -324,6 +324,104 @@ def add_voids(src, spec, dst):
     print(json.dumps({"voids": len(data["voids"])}))
 
 
+def update(board, items):
+    """Change items on the board, failing unless KiCad changed every one. Direct, for the reason `create` gives."""
+    cmd = editor_commands_pb2.UpdateItems()
+    cmd.header.document.CopyFrom(board.document)
+    cmd.items.extend(pack_any(item.proto) for item in items)
+    r = board.client.send(cmd, editor_commands_pb2.UpdateItemsResponse)
+    bad = [x.status.error_message or editor_commands_pb2.ItemStatusCode.Name(x.status.code)
+           for x in r.updated_items if x.status.code != editor_commands_pb2.ItemStatusCode.ISC_OK]
+    if r.status != base_types_pb2.ItemRequestStatus.IRS_OK or bad or len(r.updated_items) != len(cmd.items):
+        raise SystemExit("KiCad changed %d of %d items: %s" % (len(r.updated_items) - len(bad), len(cmd.items),
+                                                               "; ".join(bad) or base_types_pb2.ItemRequestStatus.Name(r.status)))
+
+
+def unconnected(board):
+    """The ratsnest's count, which the IPC API doesn't give: each net's pads in copper-joined groups, less one a net.
+
+    pcbnew's GetUnconnectedCount(False) counts the ratsnest's edges, and a net's ratsnest joins its groups in a tree,
+    so the two agree wherever every group holds a pad. Copper joined to no pad isn't in either."""
+    by_net = {}
+    for pad in board.get_pads():
+        if pad.net.name:
+            by_net.setdefault(pad.net.name, []).append(pad.id.value)
+    count = 0
+    for pads in by_net.values():
+        left = set(pads)
+        while left:
+            seed = next(iter(left))
+            reached = {item.id.value for item in board.get_connected_items(KIID(value=seed))}
+            left -= reached | {seed}
+            count += 1
+        count -= 1
+    return count
+
+
+def _distance(x, y, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    length = dx * dx + dy * dy
+    s = 0.0 if length == 0 else max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length))
+    return math.hypot(x - x1 - s * dx, y - y1 - s * dy)
+
+
+def ends_to_centre(via_xy, via_width, ends, tol=0.001):
+    """As kicad_ops.ends_to_centre: the track ends to move onto a via's centre before its unused inner pads come off."""
+    vx, vy = via_xy
+    return [key for key, x, y, width in ends if tol < math.hypot(x - vx, y - vy) <= (via_width + width) / 2]
+
+
+def strip_inner_pads(src, nets_csv, radius, dst):
+    """Take the unused inner-layer pads off signal vias beside an RF line, as kicad_ops.strip_inner_pads does.
+
+    A track end on an inner layer that reaches the ring off its centre is moved onto the centre first, so KiCad sees it
+    joined. If the strip still opens a net, the pads go back on the vias that opened it, and they're listed."""
+    nets, radius = set(nets_csv.split(",")), float(radius)
+    with board_at(src) as board:
+        tracks = [t for t in board.get_tracks() if isinstance(t, Track)]
+        lines = [(*mm(t.start), *mm(t.end)) for t in tracks if t.net.name in nets]
+        before = unconnected(board)
+        inner = [t for t in tracks if not t.locked and t.layer not in (BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu)]
+        changed, moved, ends_moved = [], [], 0
+        for via in board.get_vias():
+            stack = via.padstack
+            if via.net.name == "GND" or stack.unconnected_layer_removal != UnconnectedLayerRemoval.ULR_KEEP:
+                continue
+            x, y = mm(via.position)
+            if not any(_distance(x, y, *line) < radius for line in lines):
+                continue
+            ends = [((t, end), *mm(getattr(t, end)), to_mm(t.width)) for t in inner if t.net.name == via.net.name
+                    for end in ("start", "end")]
+            for t, end in ends_to_centre((x, y), to_mm(via.diameter), ends):
+                setattr(t, end, Vector2.from_xy(via.position.x, via.position.y))
+                moved.append(t)
+                ends_moved += 1
+            stack.unconnected_layer_removal = UnconnectedLayerRemoval.ULR_REMOVE_EXCEPT_START_AND_END
+            changed.append(via)
+        kept = []
+        if changed:
+            with commit(board, "strip_inner_pads"):
+                update(board, list({id(t): t for t in moved}.values()) + changed)
+            if unconnected(board) > before:
+                # One via at a time, the strips that opened something are given back.
+                for via in changed:
+                    now = unconnected(board)
+                    via.padstack.unconnected_layer_removal = UnconnectedLayerRemoval.ULR_KEEP
+                    with commit(board, "strip_inner_pads: give back"):
+                        update(board, [via])
+                    if unconnected(board) < now:
+                        x, y = mm(via.position)
+                        kept.append({"net": via.net.name, "at": [round(x, 3), round(y, 3)]})
+                    else:
+                        via.padstack.unconnected_layer_removal = UnconnectedLayerRemoval.ULR_REMOVE_EXCEPT_START_AND_END
+                        with commit(board, "strip_inner_pads: strip again"):
+                            update(board, [via])
+        after = unconnected(board)
+        save(board, src, dst)
+    print(json.dumps({"changed": len(changed) - len(kept), "track_ends_centred": ends_moved, "kept_pads": kept,
+                      "unconnected_before": before, "unconnected_after": after}))
+
+
 # ---------------------------------------------------------------- reading what only KiCad knows
 
 def _local_clearance(pad, fp):
@@ -355,6 +453,125 @@ def _keepouts(zones, ref, fp=None):
     return out
 
 
+def _front_courtyard(board, fp):
+    """A footprint's F.CrtYd outline as a box in nm (left, top, right, bottom), as pcbnew's _courtyard(fp, 0).BBox()
+    gives it: (0, 0, 0, 0) when there's none, which is also what a flipped footprint, its courtyard on B.CrtYd, gets."""
+    shapes = [s for s in fp.definition.shapes if s.layer == BoardLayer.BL_F_CrtYd]
+    if not shapes:
+        return 0, 0, 0, 0
+    # KiCad's box round a shape takes in half its line width each side; pcbnew's courtyard is the line itself.
+    boxes = [(board.get_item_bounding_box(s), s.attributes.stroke.width // 2) for s in shapes]
+    return (min(b.pos.x + w for b, w in boxes), min(b.pos.y + w for b, w in boxes),
+            max(b.pos.x + b.size.x - w for b, w in boxes), max(b.pos.y + b.size.y - w for b, w in boxes))
+
+
+def _box(b):
+    return b.pos.x, b.pos.y, b.pos.x + b.size.x, b.pos.y + b.size.y
+
+
+def _box2(b):
+    """A Box2 message from GetTextExtents as (left, top, right, bottom), nm."""
+    return b.position.x_nm, b.position.y_nm, b.position.x_nm + b.size.x_nm, b.position.y_nm + b.size.y_nm
+
+
+def place_silk(src, dst):
+    """Put each reference where it clears pads, other references and the edge, as kicad_ops.place_silk does. One that fits
+    nowhere is hidden, and reported.
+
+    KiCad measures: each reference's box once for each angle (the box moves with the text), and every pad and silk
+    line. The chosen places are then written into the file, not sent back through UpdateItems, which on the 10.99
+    nightly (c508d01f46) saves a turned footprint's texts at the wrong angle. KiCad then reads the file back, and any
+    reference that isn't where it was put fails the op."""
+    margin, clear = from_mm(0.35), from_mm(0.12)
+    size, thickness = 0.8, 0.12
+    with board_at(src) as board:
+        ex1, ey1, ex2, ey2 = (from_mm(v) for v in edge_box(board))
+        fps = sorted(board.get_footprints(), key=lambda f: f.reference_field.text.value)
+        pads = [p for fp in fps for p in fp.definition.pads]
+        obstacles = [_box(b) for b in board.get_item_bounding_box(pads)] if pads else []
+        silk = [s for fp in fps for s in fp.definition.shapes if s.layer == BoardLayer.BL_F_SilkS]
+        obstacles += [_box(b) for b in board.get_item_bounding_box(silk)] if silk else []
+
+        def hits(box, others):
+            x1, y1, x2, y2 = box
+            return any(x1 - clear < o[2] and x2 + clear > o[0] and y1 - clear < o[3] and y2 + clear > o[1] for o in others)
+        placed, hidden, wanted = [], [], {}
+        for fp in fps:
+            ref = fp.reference_field.text.value
+            text = fp.reference_field.text
+            attrs = text.attributes
+            attrs.size = Vector2.from_xy(from_mm(size), from_mm(size))
+            attrs.stroke_width = from_mm(thickness)
+            attrs.keep_upright = True
+            yx1, yy1, yx2, yy2 = _front_courtyard(board, fp)
+            cx, cy = (yx1 + yx2) // 2, (yy1 + yy2) // 2
+            at, choice = text.position, None
+            for angle in (0, 90):
+                b = _box2(_text_box(board, text, angle))
+                hw, hh = (b[2] - b[0]) // 2, (b[3] - b[1]) // 2
+                for extra in (0.1, 0.4, 0.8, 1.2, 1.8, 2.6):
+                    e = from_mm(extra)
+                    for x, y in ((cx, yy1 - hh - e), (cx, yy2 + hh + e), (yx1 - hw - e, cy), (yx2 + hw + e, cy)):
+                        dx, dy = int(x) - at.x, int(y) - at.y
+                        box = (b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy)
+                        inside = box[0] > ex1 + margin and box[2] < ex2 - margin and box[1] > ey1 + margin and box[3] < ey2 - margin
+                        if inside and not hits(box, obstacles) and not hits(box, placed):
+                            placed.append(box)
+                            choice = (int(x), int(y), angle)
+                            break
+                    if choice:
+                        break
+                if choice:
+                    break
+            fx, fy = mm(fp.position)
+            change = {"font": (size, size, thickness), "hide": choice is None}
+            if choice:
+                change["at"] = (*to_local(fx, fy, fp.orientation.degrees, to_mm(choice[0]), to_mm(choice[1])), choice[2])
+            else:
+                hidden.append(ref)
+            wanted[ref] = {"Reference": change, "Value": {"hide": True}}
+    text = set_properties(open(src).read(), wanted)
+    _write_beside(src, dst, text)
+    # KiCad reads back what was written: every reference where it was put, at its angle, shown or hidden as chosen.
+    with board_at(dst) as board:
+        wrong = []
+        for fp in board.get_footprints():
+            ref = fp.reference_field.text.value
+            change = wanted.get(ref, {}).get("Reference")
+            if change is None:
+                continue
+            field = fp.reference_field
+            if field.visible == change["hide"] or fp.value_field.visible:
+                wrong.append("%s shown or hidden wrongly" % ref)
+            if "at" in change:
+                lx, ly, angle = change["at"]
+                gx, gy = mm(field.text.position)
+                fx, fy = mm(fp.position)
+                ex, ey = to_local(fx, fy, fp.orientation.degrees, gx, gy)
+                if math.hypot(ex - lx, ey - ly) > 1e-5 or abs((field.text.attributes.angle - angle + 180) % 360 - 180) > 1e-6:
+                    wrong.append("%s at (%.4f, %.4f) %.1f deg, not (%.4f, %.4f) %.1f deg" % (ref, ex, ey, field.text.attributes.angle, lx, ly, angle))
+        if wrong:
+            raise SystemExit("place_silk: KiCad reads the references back elsewhere: " + "; ".join(wrong[:6]))
+    print(json.dumps({"placed": len(placed), "hidden": hidden}))
+
+
+def _write_beside(src, dst, text):
+    """Write a board's text to `dst` with the source's project beside it, as `save` does."""
+    with open(dst, "w") as f:
+        f.write(text)
+    theirs, project = os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro"
+    if os.path.exists(theirs) and os.path.abspath(theirs) != os.path.abspath(project):
+        shutil.copyfile(theirs, project)
+
+
+def _text_box(board, text, angle):
+    """The box KiCad draws a text in, at its own position and attributes and at `angle` on the board, in nm."""
+    cmd = base_commands_pb2.GetTextExtents()
+    cmd.text.CopyFrom(text.as_text().proto)
+    cmd.text.attributes.angle.value_degrees = angle
+    return board.client.send(cmd, base_types_pb2.Box2)
+
+
 def board_facts(src, out):
     """True pad shapes, angles and courtyards, which the file reader only approximates at odd rotations."""
     with board_at(src) as board:
@@ -362,15 +579,7 @@ def board_facts(src, out):
         for fp in board.get_footprints():
             ref = fp.reference_field.text.value
             back = fp.layer == BoardLayer.BL_B_Cu
-            yard_layer = BoardLayer.BL_B_CrtYd if back else BoardLayer.BL_F_CrtYd
-            shapes = [s for s in fp.definition.shapes if s.layer == yard_layer]
-            if shapes:
-                # KiCad's box round a shape takes in half its line width each side; pcbnew's courtyard is the line itself.
-                boxes = [(board.get_item_bounding_box(s), to_mm(s.attributes.stroke.width) / 2) for s in shapes]
-                x1, y1 = min(to_mm(b.pos.x) + w for b, w in boxes), min(to_mm(b.pos.y) + w for b, w in boxes)
-                x2, y2 = max(to_mm(b.pos.x + b.size.x) - w for b, w in boxes), max(to_mm(b.pos.y + b.size.y) - w for b, w in boxes)
-            else:
-                x1 = y1 = x2 = y2 = 0.0      # as pcbnew's empty courtyard
+            x1, y1, x2, y2 = (to_mm(v) for v in _front_courtyard(board, fp))
             yards.append({"ref": ref, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "rot": fp.orientation.degrees,
                           "back": back, "value": fp.value_field.text.value})
             for pad in fp.definition.pads:
@@ -434,7 +643,7 @@ def plane_coverage(src, nets_csv, layer_name, out):
 
 OPS = {"export_dsn": export_dsn, "import_ses": import_ses, "add_locked": add_locked, "fill_zones": fill_zones,
        "board_facts": board_facts, "add_vias": add_vias, "remove_vias": remove_vias, "plane_coverage": plane_coverage,
-       "z_coupon": z_coupon, "add_voids": add_voids, "remove_tracks": remove_tracks}
+       "z_coupon": z_coupon, "add_voids": add_voids, "remove_tracks": remove_tracks, "strip_inner_pads": strip_inner_pads, "place_silk": place_silk}
 
 
 def main(argv):

@@ -108,6 +108,120 @@ def poses_as_at(text):
     return out
 
 
+def spans(s, i=0):
+    """One s-expression from s[i:] with where it sits: (tag, start, end, children), and the index after it."""
+    n = len(s)
+    while s[i] in " \t\r\n":
+        i += 1
+    if s[i] != "(":
+        raise ValueError("expected ( at %d" % i)
+    start, i, children, tag = i, i + 1, [], None
+    while True:
+        while s[i] in " \t\r\n":
+            i += 1
+        c = s[i]
+        if c == ")":
+            return (tag, start, i + 1, children), i + 1
+        if c == "(":
+            child, i = spans(s, i)
+            children.append(child)
+        elif c == '"':
+            j = i + 1
+            while s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            if tag is None:
+                tag = s[i + 1:j]
+            i = j + 1
+        else:
+            j = i
+            while j < n and s[j] not in ' \t\r\n()"':
+                j += 1
+            if tag is None:
+                tag = s[i:j]
+            i = j
+
+
+def _num(v):
+    t = ("%.6f" % v).rstrip("0").rstrip(".")
+    return "0" if t in ("-0", "") else t
+
+
+def _quoted(s, node):
+    """The quoted strings directly in a node, in order: a property's name and value."""
+    _, a, b, children = node
+    out, i = [], a + 1
+    for child in children + [(None, b, b, [])]:
+        body = s[i:child[1]]
+        k = 0
+        while True:
+            k = body.find('"', k)
+            if k < 0:
+                break
+            j = k + 1
+            while body[j] != '"':
+                j += 2 if body[j] == "\\" else 1
+            out.append(body[k + 1:j])
+            k = j + 1
+        i = child[2]
+    return out
+
+
+def set_properties(text, edits):
+    """A board's text with footprint properties changed and nothing else: what place_silk sets, written into the file
+    so that no footprint goes through KiCad's UpdateItems, which loses text angles on save (10.99, c508d01f46).
+
+    `edits` maps a reference to {property name: change}, a change holding any of: at = (x, y, angle) in the
+    footprint's own frame, angle on the board as both KiCad 10 and 11 write it; hide = bool; font = (w, h, thickness)
+    mm. A property that isn't there, or a reference no footprint has, is an error: nothing is added."""
+    root, _ = spans(text)
+    out, seen = [], set()
+    for fp in (c for c in root[3] if c[0] == "footprint"):
+        props = {(_quoted(text, c) or [""])[0]: c for c in fp[3] if c[0] == "property"}
+        ref = _quoted(text, props["Reference"])[1] if "Reference" in props else None
+        if ref not in edits:
+            continue
+        seen.add(ref)
+        for name, change in edits[ref].items():
+            if name not in props:
+                raise ValueError("%s has no %s property" % (ref, name))
+            node = props[name]
+            kids = {c[0]: c for c in node[3]}
+            if "at" in change:
+                x, y, a = change["at"]
+                at = kids["at"]
+                out.append((at[1], at[2], "(at %s %s %s)" % (_num(x), _num(y), _num(a))))
+            if "unlocked" in kids:
+                out.append((kids["unlocked"][1], kids["unlocked"][2], ""))
+            if "hide" in change:
+                if "hide" in kids:
+                    out.append((kids["hide"][1], kids["hide"][2], "(hide yes)" if change["hide"] else ""))
+                elif change["hide"]:
+                    layer = kids.get("layer") or kids["at"]
+                    out.append((layer[2], layer[2], " (hide yes)"))
+            if "font" in change:
+                w, h, t = change["font"]
+                font = {c[0]: c for c in kids["effects"][3]}["font"]
+                fkids = {c[0]: c for c in font[3]}
+                out.append((fkids["size"][1], fkids["size"][2], "(size %s %s)" % (_num(h), _num(w))))
+                if "thickness" in fkids:
+                    out.append((fkids["thickness"][1], fkids["thickness"][2], "(thickness %s)" % _num(t)))
+                else:
+                    out.append((fkids["size"][2], fkids["size"][2], " (thickness %s)" % _num(t)))
+    missing = sorted(set(edits) - seen)
+    if missing:
+        raise ValueError("no footprint with reference %s" % ", ".join(missing))
+    for a, b, new in sorted(out, reverse=True):
+        text = text[:a] + new + text[b:]
+    return text
+
+
+def to_local(fx, fy, frot_deg, ax, ay):
+    """A board point in a footprint's own frame: the inverse of the pad transform at the top of this file."""
+    t = math.radians(frot_deg)
+    dx, dy = ax - fx, ay - fy
+    return dx * math.cos(t) - dy * math.sin(t), dx * math.sin(t) + dy * math.cos(t)
+
+
 # ==========================================================================
 # geometry
 # ==========================================================================
