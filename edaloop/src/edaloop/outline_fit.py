@@ -7,9 +7,11 @@ from __future__ import annotations
 MARGIN_MM = 0.5
 
 
-def overflow(span: tuple, outline: tuple, axis: str, squared: list | None = None, margin: float = MARGIN_MM) -> dict | None:
+def overflow(span: tuple, outline: tuple, axis: str, squared: list | None = None, margin: float = MARGIN_MM,
+             folded: bool = False) -> dict | None:
     """None when parts spanning (left, right, top, bottom) sit inside a w x h outline from the origin. Otherwise the overflow:
-    how far past each edge, the row's length along `axis` and its width across, and a hint naming what to change."""
+    how far past each edge, the row's length along `axis` and its width across, and a hint naming what to change. `folded` says
+    the placer tried to fold the row into the outline, and no fold fit."""
     left, right, top, bottom = (float(v) for v in span)
     w, h = (float(v) for v in outline)
     over = {"left": margin - left, "right": right - (w - margin), "top": margin - top, "bottom": bottom - (h - margin)}
@@ -27,7 +29,8 @@ def overflow(span: tuple, outline: tuple, axis: str, squared: list | None = None
                 f"the row fits along {other}. Set layout.axis: {other}")
     elif along > room[axis]:
         hint = (f"the RF row is {along:.2f} mm long along {axis}, {along - room[axis]:.2f} mm more than the {room[axis]:g} mm inside the "
-                f"margins. Shorten it: layout.gap_mm sets the space between parts")
+                f"margins{', and no fold of it fits the outline either' if folded else ''}. Shorten it: layout.gap_mm sets the space "
+                f"between parts")
     elif across > room[other]:
         hint = (f"the parts are {across:.2f} mm wide across the row, {across - room[other]:.2f} mm more than the {room[other]:g} mm "
                 f"inside the margins along {other}")
@@ -48,7 +51,7 @@ def overflow(span: tuple, outline: tuple, axis: str, squared: list | None = None
             hint += f", and the row is {along:.2f} mm long along {axis}, which fits"
     return {"error": "outline_overflow", "span_mm": {"x": [round(left, 2), round(right, 2)], "y": [round(top, 2), round(bottom, 2)]},
             "outline_mm": [w, h], "margin_mm": margin, "axis": axis, "row_mm": round(along, 2), "across_mm": round(across, 2),
-            "over_mm": over, "squared": list(squared or []), "fits_on_axis": other if turned else None, "hint": hint}
+            "over_mm": over, "squared": list(squared or []), "fits_on_axis": other if turned else None, "folded": bool(folded), "hint": hint}
 
 
 def message(report: dict) -> str:

@@ -577,11 +577,12 @@ def _derive_layout(fps, spec, square=False, choice=0):
     return rows, attach
 
 
-def _solve_row(fps, layout, trace=None):
+def _solve_row(fps, layout, trace=None, laid=None):
     """Walk the cascade along its line: each input pad goes on the line as close as the courtyards allow.
 
     `lines`, from `_row_lines`, gives the line at each part where it jogs. Left out, the line is straight. A row folded to fit
-    between a loop-through part's ports adds its line's segments, as point pairs, to `trace`."""
+    between a loop-through part's ports adds its line's segments, as point pairs, to `trace`. A straight row adds each part after
+    the first to `laid`, with its stack and where the line enters and leaves it, for `_fold_into`."""
     axis = 1 if layout["axis"] == "y" else 0
     line, start = layout["line"], layout["start"]
     lines = layout.get("lines") or [line] * len(layout["walk"])
@@ -666,6 +667,8 @@ def _solve_row(fps, layout, trace=None):
         if not (previous is not None and (ox, oy) != (0.0, 0.0)):
             previous = _pad_xy(fp, leave)[axis] if leave else None
         last_ref, last_pad = ref, leave
+    if laid is not None and back is None:
+        laid.extend(records)
     return placed
 
 
@@ -754,6 +757,103 @@ def _turned(p, pivot, degrees):
     return (pivot[0] + x * math.cos(a) + y * math.sin(a), pivot[1] - x * math.sin(a) + y * math.cos(a))
 
 
+def _lay_fold(records, start, heads, turns, extra, straight, gap, done, finish=None, cap=None):
+    """Lay a row's records, as placed straight, along a folded line: part i on heading `heads[k]`, k the turns at or before i. Each
+    part and its stack turn about its input point as one piece, and each hop keeps at least its straight length, growing in
+    FOLD_STEP_MM steps where a part would touch one in `done`, then by `extra[i]`. A hop grows to 30 mm at most, or, with `cap`,
+    a hop not into a turn to `cap` mm over its straight length, so that a hop that can only clear an earlier leg by running on along
+    its own fails fast. `finish` is the point the line ends at, a return port's pad, or None for a row that ends at its last part.
+    Returns (the line's last point, its segments, the parts placed), or the index of the record that found no room."""
+    n = len(records)
+    here, heading, done, segments = start, heads[0], list(done), []
+    at = {}                                     # each record's point on the line, and the way the hop into it runs
+    for i, r in enumerate(records):
+        new = heads[sum(1 for t in turns if t <= i)]
+        degrees = _angle(new) - _angle(heads[0])
+        pivot = r["in"]
+        for fp in r["units"]:
+            fp.Rotate(pcbnew.VECTOR2I(pcbnew.FromMM(pivot[0]), pcbnew.FromMM(pivot[1])), pcbnew.EDA_ANGLE(degrees, pcbnew.DEGREES_T))
+        out = _turned(r["out"], pivot, degrees)
+        turning = new != heading
+        main = r["main"]
+        moved = [0.0, 0.0]
+
+        def put(target, pivot=pivot, moved=moved, r=r, main=main):
+            dx, dy = target[0] - pivot[0] - moved[0], target[1] - pivot[1] - moved[1]
+            _shift(r["units"], dx, dy)
+            moved[0] += dx
+            moved[1] += dy
+            return _hit(main, done, gap) or next(
+                (h for h in (_hit(u, done + [o for o in r["units"] if o is not u], 0.1) for u in r["units"] if u is not main) if h), None)
+
+        # A corner part, where the line turns, is a two-pad part such as a coupling capacitor, turned to stand along the new
+        # heading. The hop into it arrives straight along the old heading at the side of its first pad, and the line leaves its
+        # second pad along the new one, so no hop bends. That's how lna915's released board turns at C5.
+        way = heading if turning else new
+        hop = straight[i]
+        limit = 30.0 if cap is None or turning else min(30.0, hop + cap)
+        while put((here[0] + hop * way[0], here[1] + hop * way[1])) and hop <= limit:
+            hop += FOLD_STEP_MM
+        # Extra length, to even the legs, goes on after the hop has found room, so that it always lengthens the line.
+        hop += extra.get(i, 0.0)
+        while True:
+            target = (here[0] + hop * way[0], here[1] + hop * way[1])
+            clash = put(target)
+            if not clash:
+                break
+            hop += FOLD_STEP_MM
+            if hop > (30.0 if cap is None or turning else min(30.0, limit + extra.get(i, 0.0))):
+                return i
+        segments.append((here, target))
+        at[i] = (target, way)
+        if r.get("beside"):
+            # A tap beside the line: the line runs on from where it was, and the tap's stub isn't part of it.
+            segments.pop()
+            done.extend(r["units"])
+            continue
+        here = (out[0] + moved[0], out[1] + moved[1])
+        if r["in"] != r["out"]:
+            segments.append((target, here))
+        heading = new
+        done.extend(r["units"])
+    end = finish if finish is not None else here
+    if finish is not None:
+        segments.append((here, finish))
+    # A tap beside the line hangs off the next part's input pad, as lna915's released board hangs L2 off P1.3: its stub then
+    # joins the line where a pad already is, which adds nothing to the hop's path over its floor. Where it would touch something
+    # there, it tries the other side of the line at that pad, turned about the line with its stack, and only then slides back
+    # along the line toward where it was placed, which may be short of the pad or past it.
+    for i, r in enumerate(records):
+        if not r.get("beside"):
+            continue
+        j = next((k for k in range(i + 1, n) if not records[k].get("beside")), None)
+        goal = at[j][0] if j is not None else end
+        point, way = at[i]
+        reach = (goal[0] - point[0]) * way[0] + (goal[1] - point[1]) * way[1]
+        others = [fp for fp in done if fp not in r["units"]]
+        spot, flipped = point, False
+
+        def flip(about, units=r["units"]):
+            for fp in units:
+                fp.Rotate(pcbnew.VECTOR2I(pcbnew.FromMM(about[0]), pcbnew.FromMM(about[1])), pcbnew.EDA_ANGLE(180.0, pcbnew.DEGREES_T))
+        back = math.copysign(FOLD_STEP_MM, reach)
+        tries = [(reach, False), (reach, True)] + [(reach - k * back, False) for k in range(1, int(abs(reach) / FOLD_STEP_MM) + 1)]
+        for d, other_side in tries:
+            try_at = (point[0] + d * way[0], point[1] + d * way[1])
+            _shift(r["units"], try_at[0] - spot[0], try_at[1] - spot[1])
+            spot = try_at
+            if other_side != flipped:
+                flip(spot)
+                flipped = other_side
+            if not (_hit(r["main"], others, gap) or any(_hit(u, others, 0.1) for u in r["units"] if u is not r["main"])):
+                break
+        else:
+            if flipped:
+                flip(spot)
+            _shift(r["units"], point[0] - spot[0], point[1] - spot[1])
+    return here, segments, done
+
+
 def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judge=None):
     """Fold a row that's too long for the gap between a loop-through part's ports into a U: along the row, across it, along, back
     across, and along into the return port, the way lna915's released board snakes its amplifier between its two SMAs.
@@ -816,89 +916,10 @@ def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judg
         """Place the row along the U; None if a part finds no room within 30 mm, else (miss across, room left, segments)."""
         restore()
         heads = [travel, (sign * across[0], sign * across[1]), travel, (-sign * across[0], -sign * across[1]), travel]
-        here, heading, done, segments = start, travel, [port], []
-        at = {}                                     # each record's point on the line, and the way the hop into it runs
-        for i, r in enumerate(records):
-            new = heads[sum(1 for t in turns if t <= i)]
-            degrees = _angle(new) - _angle(travel)
-            pivot = r["in"]
-            for fp in r["units"]:
-                fp.Rotate(pcbnew.VECTOR2I(pcbnew.FromMM(pivot[0]), pcbnew.FromMM(pivot[1])), pcbnew.EDA_ANGLE(degrees, pcbnew.DEGREES_T))
-            out = _turned(r["out"], pivot, degrees)
-            turning = new != heading
-            main = r["main"]
-            moved = [0.0, 0.0]
-
-            def put(target, pivot=pivot, moved=moved, r=r, main=main):
-                dx, dy = target[0] - pivot[0] - moved[0], target[1] - pivot[1] - moved[1]
-                _shift(r["units"], dx, dy)
-                moved[0] += dx
-                moved[1] += dy
-                return _hit(main, done, gap) or next(
-                    (h for h in (_hit(u, done + [o for o in r["units"] if o is not u], 0.1) for u in r["units"] if u is not main) if h), None)
-
-            # A corner part, where the line turns, is a two-pad part such as a coupling capacitor, turned to stand along the new
-            # heading. The hop into it arrives straight along the old heading at the side of its first pad, and the line leaves its
-            # second pad along the new one, so no hop bends. That's how lna915's released board turns at C5.
-            way = heading if turning else new
-            hop = straight[i]
-            while put((here[0] + hop * way[0], here[1] + hop * way[1])) and hop <= 30.0:
-                hop += FOLD_STEP_MM
-            # Extra length, to even the legs, goes on after the hop has found room, so that it always lengthens the line.
-            hop += extra.get(i, 0.0)
-            while True:
-                target = (here[0] + hop * way[0], here[1] + hop * way[1])
-                clash = put(target)
-                if not clash:
-                    break
-                hop += FOLD_STEP_MM
-                if hop > 30.0:
-                    return None
-            segments.append((here, target))
-            at[i] = (target, way)
-            if r.get("beside"):
-                # A tap beside the line: the line runs on from where it was, and the tap's stub isn't part of it.
-                segments.pop()
-                done.extend(r["units"])
-                continue
-            here = (out[0] + moved[0], out[1] + moved[1])
-            if r["in"] != r["out"]:
-                segments.append((target, here))
-            heading = new
-            done.extend(r["units"])
-        segments.append((here, finish))
-        # A tap beside the line hangs off the next part's input pad, as lna915's released board hangs L2 off P1.3: its stub then
-        # joins the line where a pad already is, which adds nothing to the hop's path over its floor. Where it would touch something
-        # there, it tries the other side of the line at that pad, turned about the line with its stack, and only then slides back
-        # along the line toward where it was placed, which may be short of the pad or past it.
-        for i, r in enumerate(records):
-            if not r.get("beside"):
-                continue
-            j = next((k for k in range(i + 1, n) if not records[k].get("beside")), None)
-            goal = at[j][0] if j is not None else finish
-            point, way = at[i]
-            reach = (goal[0] - point[0]) * way[0] + (goal[1] - point[1]) * way[1]
-            others = [fp for fp in done if fp not in r["units"]]
-            spot, flipped = point, False
-
-            def flip(about, units=r["units"]):
-                for fp in units:
-                    fp.Rotate(pcbnew.VECTOR2I(pcbnew.FromMM(about[0]), pcbnew.FromMM(about[1])), pcbnew.EDA_ANGLE(180.0, pcbnew.DEGREES_T))
-            back = math.copysign(FOLD_STEP_MM, reach)
-            tries = [(reach, False), (reach, True)] + [(reach - k * back, False) for k in range(1, int(abs(reach) / FOLD_STEP_MM) + 1)]
-            for d, other_side in tries:
-                try_at = (point[0] + d * way[0], point[1] + d * way[1])
-                _shift(r["units"], try_at[0] - spot[0], try_at[1] - spot[1])
-                spot = try_at
-                if other_side != flipped:
-                    flip(spot)
-                    flipped = other_side
-                if not (_hit(r["main"], others, gap) or any(_hit(u, others, 0.1) for u in r["units"] if u is not r["main"])):
-                    break
-            else:
-                if flipped:
-                    flip(spot)
-                _shift(r["units"], point[0] - spot[0], point[1] - spot[1])
+        got = _lay_fold(records, start, heads, turns, extra, straight, gap, [port], finish)
+        if isinstance(got, int):
+            return None
+        here, segments, done = got
         return cross(finish) - cross(here), along(finish) - along(here), segments, done
 
     sides = [side] if side in (1, -1) else [-1, 1]
@@ -932,6 +953,116 @@ def _fold_between(port, out_pad, back_pad, records, travel, gap, side=None, judg
         return None
     # The best fold, placed again.
     return attempt(best[1], best[2], best[3])[2]
+
+
+FOLD_LEGS = 6            # the most legs along the row an outline fold tries
+FOLD_BEAM = 3            # turn parts tried at each end of a leg: the latest that fit along, the earliest across
+FOLD_PLANS = 2000        # turn choices gathered before the best are tried
+FOLD_CAP_MM = 3.0        # how far a hop along a later leg may grow past its straight length before its leg moves further across
+FOLD_GROW_MM = 0.5       # and how far it moves each time
+FOLD_GROWS = 24
+FOLD_SLACK_MM = 0.01     # kept inside the margin, so that a part placed exactly on it isn't read as past it
+
+
+def _fold_into(first, start, records, travel, axis, room, gap, judge=None):
+    """Fold a row that's too long for the board outline along one line into a serpentine: along, across, back, across, along, and
+    so on, each leg along the row within `room[0]` mm, and all the legs within `room[1]` mm across it.
+
+    `first` is the row's first part, which stays where it is, `start` its exit pad, and `records` the rest of the row as placed
+    straight, as for `_fold_between`. No leg runs back past the first part, so the row starts at the board's edge, as a straight
+    row does: a connector there stays there. The line turns only at a two-pad part on it, which stands across the turn, and each part turns
+    with its bias stack, so each leg is laid as a straight row is. Each later leg moves further across, FOLD_GROW_MM at a time,
+    until it clears the legs before it. Turn choices are gathered by the row's straight lengths, fewest legs first, then the least
+    length across, and tried on each side of the line. Of the folds whose parts fit the room, the one `judge` scores best wins, as
+    for `_fold_between`. Returns (the line's segments, the turn parts' references), or None when no fold fits."""
+    n = len(records)
+    if n < 2:
+        return None
+    across = (-travel[1], travel[0]) if travel[1] else (0.0, 1.0)
+    along = lambda p: p[0] * travel[0] + p[1] * travel[1]
+    saved = [[(fp, fp.GetPosition(), fp.GetOrientationDegrees()) for fp in r["units"]] for r in records]
+    straight, last = [], start
+    for r in records:
+        straight.append(along(r["in"]) - along(last))
+        if not r.get("beside"):
+            last = r["out"]
+    s_in = [along(r["in"]) for r in records]
+    s_out = [along(r["out"]) for r in records]
+
+    def leg(a, b):
+        return (s_in[b] if b < n else s_out[-1]) - (s_out[a - 1] if a > 0 else along(start))
+
+    corners = sorted(i for i, r in enumerate(records) if r["in"] != r["out"] and len(list(r["main"].Pads())) == 2)
+    plans = []
+
+    def gather(turns, i0, pos, sense, wide):
+        # A leg along the row from record i0, at `pos` along it from the start, running `sense`.
+        if len(plans) >= FOLD_PLANS:
+            return
+        end = pos + sense * leg(i0, n)
+        if turns and 0.0 <= end <= room[0]:
+            plans.append(((len(turns), wide), tuple(turns)))
+        if len(turns) // 2 + 1 >= FOLD_LEGS:
+            return
+        fit = [t for t in corners if t >= i0 + (1 if turns else 0) and 0.0 <= pos + sense * leg(i0, t) <= room[0]]
+        for t in fit[-FOLD_BEAM:][::-1]:
+            at = pos + sense * leg(i0, t)
+            for t2 in [c for c in corners if c > t][:FOLD_BEAM]:
+                if wide + leg(t, t2) <= room[1]:
+                    gather(turns + [t, t2], t2, at, -sense, wide + leg(t, t2))
+
+    gather([], 0, 0.0, 1, 0.0)
+    plans.sort()
+
+    def restore():
+        for group in saved:
+            for fp, pos, rot in group:
+                fp.SetOrientationDegrees(rot)
+                fp.SetPosition(pos)
+
+    def lay(turns, sign):
+        """The row laid along the serpentine, each later leg as little further across as clears the legs before it; None if a
+        part finds no room."""
+        heads, sense = [travel], 1
+        for _ in range(len(turns) // 2):
+            sense = -sense
+            heads += [(sign * across[0], sign * across[1]), (sense * travel[0], sense * travel[1])]
+        extra = {}
+        for _ in range(FOLD_GROWS):
+            restore()
+            got = _lay_fold(records, start, heads, turns, extra, straight, gap, [first], None, FOLD_CAP_MM)
+            if not isinstance(got, int):
+                return got
+            # The leg the stuck part is on: on a leg across, nothing is left to move; on a later leg along, the hop into its
+            # turn part, which runs across, grows.
+            k = sum(1 for t in turns if t <= got)
+            if k == 0 or k % 2:
+                return None
+            extra[turns[k - 1]] = extra.get(turns[k - 1], 0.0) + FOLD_GROW_MM
+        return None
+
+    along_axis, across_axis = ("y", "x") if axis == "x" else ("x", "y")
+    begin = _extent([first], along_axis)[0]
+    best = None
+    for _score, turns in plans[:FOLD_TRIES]:
+        for sign in (-1, 1):
+            got = lay(turns, sign)
+            if got is None:
+                continue
+            _here, segments, done = got
+            lo, hi = _extent(done, along_axis)
+            lo2, hi2 = _extent(done, across_axis)
+            if hi - lo > room[0] or hi2 - lo2 > room[1] or lo < begin - 0.01:
+                continue
+            length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in segments)
+            score = (*(judge(done) if judge else (0, 0.0)), len(turns), round(length, 2))
+            if best is None or score < best[0]:
+                best = (score, turns, sign)
+    if best is None:
+        restore()
+        return None
+    # The best fold, laid again.
+    return lay(best[1], best[2])[1], [records[t]["main"].GetReference() for t in best[1]]
 
 
 def _stack(fps, items):
@@ -1128,8 +1259,29 @@ def _place_rows(fps, layout, rows, attach, spec=None):
         folded = []
         hops = {"chain": spec["chain"], "pins": spec["pins"], "width": float(spec.get("rf_line_width_mm") or 0.3),
                 "net_width": spec.get("net_width") or {}} if spec else None
+        laid = []
         row = _solve_row(fps, {**layout, "walk": walk, "attach": attach, "start": layout.get("start", 0.9 - low), "lines": lines,
-                               "hops": hops}, folded)
+                               "hops": hops}, folded, laid)
+        into = spec and spec.get("fold_outline") and spec.get("outline") and not folded
+        if into:
+            # A row too long for the outline along one line, folded to fit it: see build_board. It starts where a straight row
+            # would, and has the outline's length from there, inside the margin, and its width less the margin and the 0.9 mm a
+            # folded row keeps from the edge.
+            outline = spec["outline"]
+            length, width = (outline[0], outline[1]) if layout["axis"] == "x" else (outline[1], outline[0])
+            along_axis = "y" if layout["axis"] == "x" else "x"
+            lo, hi = _extent(row, along_axis)
+            begin = 0.9 if "start" not in layout else lo
+            limit = length - outline_fit.MARGIN_MM
+            if hi + (begin - lo) > limit:
+                travel = (0.0, 1.0) if layout["axis"] == "y" else (1.0, 0.0)
+                got = _fold_into(fps[walk[0][0]], _pad_xy(fps[walk[0][0]], str(walk[0][3])), laid, travel, layout["axis"],
+                                 (limit - begin - FOLD_SLACK_MM, width - 0.9 - outline_fit.MARGIN_MM - FOLD_SLACK_MM),
+                                 float(layout.get("gap_mm", 0.1)),
+                                 _hop_judge(fps, hops))
+                if got:
+                    folded[:] = got[0]
+                    spec.setdefault("folds", []).append({"row": index, "turns": got[1]})
         if folded:
             # A fold's legs can reach behind its connector, which the row's start is set from, and across the board past an edge
             # its line never comes near. Move the row along so that nothing sits before where its first part's courtyard begins, as
@@ -1138,8 +1290,15 @@ def _place_rows(fps, layout, rows, attach, spec=None):
             along_at = _extent(row, "y" if layout["axis"] == "x" else "x")[0]
             across_at = _extent(row, "x" if layout["axis"] == "x" else "y")[0]
             behind = (0.9 if "start" not in layout else along_at) - along_at
-            over = 0.9 - across_at
-            dx, dy = (max(behind, 0.0), max(over, 0.0)) if layout["axis"] == "x" else (max(over, 0.0), max(behind, 0.0))
+            over = max(0.9 - across_at, 0.0)
+            if into:
+                # Folded to fit the outline, it also keeps inside the far edge across, as near to it as fits.
+                outline = spec["outline"]
+                width = outline[1] if layout["axis"] == "x" else outline[0]
+                far = _extent(row, "x" if layout["axis"] == "x" else "y")[1]
+                if far + over > width - outline_fit.MARGIN_MM - FOLD_SLACK_MM:
+                    over = max(0.9 - across_at, width - outline_fit.MARGIN_MM - FOLD_SLACK_MM - far)
+            dx, dy = (max(behind, 0.0), over) if layout["axis"] == "x" else (over, max(behind, 0.0))
             if dx or dy:
                 _shift(row, dx, dy)
                 folded[:] = [((a[0] + dx, a[1] + dy), (b[0] + dx, b[1] + dy)) for a, b in folded]
@@ -1325,6 +1484,29 @@ def build_board(seed, spec_path, dst):
             placed, span = placed2, span2
         else:
             rows, placed, span = place(False)
+    fold_tried = False
+    if spec["outline"] is not None and not fits(span, spec["outline"]):
+        over = outline_fit.overflow(span, spec["outline"], layout["axis"], squared)
+        length = spec["outline"][0] if layout["axis"] == "x" else spec["outline"][1]
+        if over and over["row_mm"] > length - 2 * outline_fit.MARGIN_MM and not over["fits_on_axis"]:
+            # Still too long along its axis, and it wouldn't fit turned: fold each row that's too long for the outline along one
+            # line. Without its parts set square first, as a fold has room across for an odd angle, then with them. A row that
+            # fits turned isn't folded: a straight row along the other axis is better, and the hint says so.
+            fold_tried = True
+            turned = {w[0]: w[1] for row in rows for w in row}
+            spec["fold_outline"] = True
+            for square in ([False, True] if squared else [False]):
+                spec["folds"] = []
+                rows2, placed2, span2 = place(square, 0)
+                if spec["folds"] and fits(span2, spec["outline"]):
+                    rows, placed, span = rows2, placed2, span2
+                    rotations = {w[0]: w[1] for row in rows for w in row}
+                    squared = sorted(r for r in rotations if rotations[r] != turned.get(r)) if square else []
+                    break
+            else:
+                # No fold fits: placed again as before, to report.
+                spec["fold_outline"], spec["folds"] = False, []
+                rows, placed, span = place(bool(squared), 0)
     left, right, top, bottom = span
     if spec["outline"] is None:
         # No outline given: the smallest that holds the parts with room for the pour and stitching, with the parts moved to suit.
@@ -1334,7 +1516,7 @@ def build_board(seed, spec_path, dst):
         left, right, top, bottom = left + dx, right + dx, top + dy, bottom + dy
         spec["outline"] = [round(right + side + 0.05, 1), round(bottom + side + 0.05, 1)]
     w, h = spec["outline"]
-    over = outline_fit.overflow((left, right, top, bottom), (w, h), layout["axis"], squared)
+    over = outline_fit.overflow((left, right, top, bottom), (w, h), layout["axis"], squared, folded=fold_tried)
     if over:
         # As data on stdout for scripts and agents (boardgen reads it into BuildError.detail), and as one line on stderr for people.
         print(json.dumps(over), flush=True)
@@ -1346,7 +1528,7 @@ def build_board(seed, spec_path, dst):
         _pour(board, ground, layer, inset, inset, w - inset, h - inset, layout.get("pour_clearance_mm", 0.3))
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     pcbnew.SaveBoard(dst, board)
-    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "taps_beside": spec.get("taps_beside") or {}, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
+    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "folds": spec.get("folds") or [], "taps_beside": spec.get("taps_beside") or {}, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
                       "outline_mm": [w, h], "positions": {r: [round(pcbnew.ToMM(f.GetPosition().x), 3),
                                                               round(pcbnew.ToMM(f.GetPosition().y), 3),
                                                               f.GetOrientationDegrees()] for r, f in fps.items()}}))

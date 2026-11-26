@@ -1375,6 +1375,45 @@ def test_a_tap_beside_a_folded_line_tries_the_other_side_of_the_next_pad(tmp_pat
     assert critique.metrics["rf_hops_over"] == 0, critique.findings
 
 
+def _outline_bench(tmp_path, outline):
+    import yaml
+
+    from edaloop import testbench
+    b = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    b["outline_mm"] = outline
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "gain_block_demo.yaml").write_text(yaml.safe_dump(b, sort_keys=False))
+    return tmp_path / "gain_block_demo.yaml"
+
+
+def test_a_row_too_long_for_its_outline_folds_to_fit_it(tmp_path):
+    """gain_block_demo's row is 32 mm along x, and won't fit a 26 x 26 mm outline either way, straight or set square. It folds
+    into a U: it turns at coupling capacitors that stand across the turn, so no hop bends, the input connector stays at the edge it
+    starts from, and the critic finds no hop over. On a 26 x 14 mm outline no fold fits, and the refusal says so."""
+    from edaloop import boardgen
+    from edaloop.scripts.kicad_pcb import Board as GeometryBoard
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    built = boardgen.build(_outline_bench(tmp_path, [26, 26]), tmp_path / "b", [])
+    assert built["outline_mm"] == [26, 26] and len(built["folds"]) == 1
+    assert built["folds"] == [{"row": 0, "turns": ["C2", "C3"]}] and built["set_square"] == []
+    left, top, right, bottom = built["span_mm"]
+    assert left >= 0.5 and top >= 0.5 and right <= 25.5 and bottom <= 25.5
+    board = GeometryBoard(str(tmp_path / "b" / "gain_block_demo.kicad_pcb"))
+    xy = {str(p).split("@")[0]: tuple(float(v) for v in str(p).split("@(")[1].rstrip(")").split(",")) for p in board.pads}
+    # C2 stands across the row, the hop into it straight along x; U2 runs down from it; C3 takes the line straight down from U2
+    # and lies back along the row, so the line comes back the other way and the two connectors sit on one side.
+    assert abs(xy["C2.1"][0] - xy["C2.2"][0]) < 0.01 and abs(xy["C2.1"][1] - xy["U1.1"][1]) < 0.01
+    assert abs(xy["U2.3"][0] - xy["U2.1"][0]) < 0.01 and abs(xy["C3.1"][0] - xy["U2.1"][0]) < 0.01
+    assert abs(xy["C3.1"][1] - xy["C3.2"][1]) < 0.01 and abs(xy["J2.1"][1] - xy["C3.2"][1]) < 0.01
+    assert min(x for x, _y in xy.values()) == pytest.approx(min(xy["J1.1"][0], xy["J1.2"][0]), abs=2.0)
+    assert xy["J2.1"][0] < xy["U1.1"][0]
+    critique = checks.placement_critique(Project(tmp_path / "b"))
+    assert critique.metrics["rf_hops_over"] == 0, critique.findings
+    with pytest.raises(boardgen.BuildError, match=r"32.34 mm long along x.*and no fold of it fits the outline either"):
+        boardgen.build(_outline_bench(tmp_path / "small", [26, 14]), tmp_path / "c", [])
+
+
 def test_tap_stub_mm_can_name_the_taps_it_sets_beside_the_line(tmp_path):
     """rf_layout.tap_stub_mm as {REF: mm}: the chokes named sit beside the line, and the rest stay on it."""
     import yaml
@@ -1536,6 +1575,9 @@ def test_an_overflow_says_how_far_and_what_to_change():
     assert off["over_mm"] == {"top": 5.19} and "past the top edge: move layout.line 5.19 mm" in off["hint"]
     # Past an end of the row only, with its length fitting, as a folded row's leg once reached behind its connector: said, not a
     # KeyError looking for an edge across the row.
+    assert long["folded"] is False and "no fold" not in long["hint"]
+    tried = outline_fit.overflow((0.90, 69.24, 4.32, 14.49), (40, 20), "x", ["U1", "U2"], folded=True)
+    assert tried["folded"] is True and "29.34 mm more than the 39 mm inside the margins, and no fold of it fits the outline" in tried["hint"]
     end = outline_fit.overflow((0.03, 14.89, 7.27, 24.12), (60, 40), "x")
     assert end["over_mm"] == {"left": 0.47} and "0.47 mm past the left edge, though they span 14.86 mm along x" in end["hint"]
 
