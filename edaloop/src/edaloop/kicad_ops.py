@@ -107,8 +107,17 @@ def _at_pad(fp, rot, number, x, y):
 
 
 def _courtyard(fp, gap):
+    """A part's courtyard, grown by half the gap. A courtyard KiCad can't close, such as lines that don't meet, reads as empty: a
+    part with no size, which sat at the board's origin in the parts' span and touched nothing. Such a part takes its own box,
+    pads and drawing, instead."""
     fp.BuildCourtyardCaches()
     s = pcbnew.SHAPE_POLY_SET(fp.GetCourtyard(pcbnew.F_CrtYd))
+    if s.OutlineCount() == 0:
+        b = fp.GetBoundingBox(False)
+        s = pcbnew.SHAPE_POLY_SET()
+        s.NewOutline()
+        for x, y in ((b.GetLeft(), b.GetTop()), (b.GetRight(), b.GetTop()), (b.GetRight(), b.GetBottom()), (b.GetLeft(), b.GetBottom())):
+            s.Append(x, y)
     s.Inflate(pcbnew.FromMM(gap / 2.0), pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS, pcbnew.FromMM(0.01))
     return s
 
@@ -1359,6 +1368,86 @@ def _shelf(extras, placed, layout):
     return list(extras)
 
 
+SHELF_GAP_MM = 0.8          # between parts packed off the rows, as on the shelf
+SHELF_CLEAR_MM = 1.5        # from the rows to the first of them, as on the shelf
+SHELF_STRIP = 2.0           # how much longer than wide a board with no outline is before the shelf counts as a strip: a choice,
+                            # not a measurement. four_channel_demo's is 1.47
+
+
+def _pack(extras, placed, region):
+    """Parts on no row packed round the rows into `region` (x0, y0, x1, y1), y1 None for no limit: a skyline, each part, largest
+    first, at whichever of its two turns and of the places along the skyline puts its far edge highest up, then furthest left. The
+    rows, and anything else already placed, raise the skyline under them, SHELF_CLEAR_MM clear, so parts go beside the rows where
+    the region is wider than they are, and below them. Returns the parts packed, or None if one doesn't fit the region."""
+    x0, y0, x1, y1 = region
+    gap, clear = SHELF_GAP_MM, SHELF_CLEAR_MM
+    boxes = [_box_mm(fp) for fp in placed]
+    # The skyline as breakpoints: from each x to the next, or to x1, at height y.
+    cuts = sorted({x0, *(min(max(b[0] - clear, x0), x1) for b in boxes), *(min(max(b[2] + clear, x0), x1) for b in boxes)})
+    sky = []
+    for a, b in zip(cuts, cuts[1:] + [x1]):
+        if b - a <= 1e-9:
+            continue
+        under = [box[3] + clear for box in boxes if box[0] - clear < b - 1e-9 and box[2] + clear > a + 1e-9]
+        sky.append([a, max([y0] + under)])
+
+    def size(fp, rot):
+        _pose(fp, 0, 0, rot)
+        b = _box_mm(fp)
+        return b[2] - b[0], b[3] - b[1], b
+
+    def spot(w):
+        best = None
+        for i, (x, _y) in enumerate(sky):
+            if x + w > x1 + 1e-9:
+                break
+            top, j = 0.0, i
+            while j < len(sky) and sky[j][0] < x + w - 1e-9:
+                top = max(top, sky[j][1])
+                j += 1
+            if best is None or top < best[1] - 1e-9:
+                best = (x, top)
+        return best
+
+    out = []
+    for fp in sorted(extras, key=lambda f: -max(size(f, 0.0)[:2])):
+        choice = None
+        for rot in (0.0, 90.0):
+            w, h, _b = size(fp, rot)
+            got = spot(w)
+            if got is None:
+                continue
+            key = (got[1] + h, got[0])
+            if choice is None or key < choice[0]:
+                choice = (key, rot, got, w, h)
+        if choice is None or (y1 is not None and choice[0][0] > y1 + 1e-9):
+            return None
+        _key, rot, (x, y), w, h = choice
+        _w, _h, b = size(fp, rot)
+        _pose(fp, x - b[0], y - b[1], rot)
+        out.append(fp)
+        # The part's box and its gap raise the skyline from x to x + w + gap.
+        end = min(x + w + gap, x1)
+        rest = [s for s in sky if s[0] < x - 1e-9]
+        after = next((s[1] for s in reversed(sky) if s[0] <= end + 1e-9), y0)
+        rest.append([x, y + h + gap])
+        if end < x1 - 1e-9:
+            rest.append([end, after])
+        rest += [s for s in sky if s[0] > end + 1e-9]
+        sky[:] = rest
+    return out
+
+
+def _over_the_board(overlays, span):
+    """A footprint with no pads, such as a shield cover or a logo, joins no net and takes no room on the board of its own: it sits
+    over the parts, centred on them, and doesn't size the board. Its courtyard can then overlap theirs, as a cover's does."""
+    left, right, top, bottom = span
+    for fp in overlays:
+        _pose(fp, 0, 0, 0)
+        b = _box_mm(fp)
+        _pose(fp, (left + right) / 2 - (b[0] + b[2]) / 2, (top + bottom) / 2 - (b[1] + b[3]) / 2, 0)
+
+
 def _outline(board, x1, y1, x2, y2):
     shape = pcbnew.PCB_SHAPE(board)
     shape.SetShape(pcbnew.SHAPE_T_RECT)
@@ -1446,15 +1535,49 @@ def build_board(seed, spec_path, dst):
     if problems:
         raise SystemExit("pin and pad counts disagree on %d pads, which may be pins the schematic dropped. Confirm against the datasheet, "
                          "then list them in open_pins, or set layout.unlisted_pads to open. First: %s" % (len(problems), "; ".join(problems[:10])))
+    def extent(group):
+        boxes = [_courtyard(fp, 0).BBox() for fp in group]
+        return (min(pcbnew.ToMM(b.GetLeft()) for b in boxes), max(pcbnew.ToMM(b.GetRight()) for b in boxes),
+                min(pcbnew.ToMM(b.GetTop()) for b in boxes), max(pcbnew.ToMM(b.GetBottom()) for b in boxes))
+
     def place(square, choice=0):
+        spec["packed"] = False
         rows, attach = _derive_layout(fps, spec, square, choice)
         placed = _place_rows(fps, layout, rows, attach, spec)
-        extras = [x for x in fps.values() if x not in placed]
-        placed += _shelf(extras, placed, layout)
+        rest = [x for x in fps.values() if x not in placed]
+        overlays = [x for x in rest if not len(list(x.Pads()))]
+        extras = [x for x in rest if x not in overlays]
+        on_rows = list(placed)
+        placed += _shelf(extras, on_rows, layout)
+        if extras:
+            # The shelf is one strip as wide as the rows, which on a board with hundreds of parts off its rows is far longer than
+            # the rows are. Where it overflows a fixed outline, the parts are packed into the outline round the rows instead. With
+            # no outline, where the shelf makes a strip, a board more than SHELF_STRIP times as long as it's wide, they're packed
+            # beside and below the rows into a square, and kept so if its longer side is shorter. Otherwise the board is placed as
+            # before.
+            outline = spec["outline"]
+            span = extent(placed)
+            if outline is not None and not fits(span, outline):
+                packed = _pack(extras, on_rows, (0.9, 0.9, outline[0] - 0.9, outline[1] - 0.9))
+                if packed is None:
+                    _shelf(extras, on_rows, layout)
+                else:
+                    spec["packed"] = True
+            elif outline is None and max(span[1] - span[0], span[3] - span[2]) > SHELF_STRIP * min(span[1] - span[0], span[3] - span[2]):
+                left, right, top, bottom = extent(on_rows)
+                need = (right - left) * (bottom - top) + sum((_box_mm(f)[2] - _box_mm(f)[0] + SHELF_GAP_MM) *
+                                                             (_box_mm(f)[3] - _box_mm(f)[1] + SHELF_GAP_MM) for f in extras)
+                width = max(right - left, 20.0, math.sqrt(need))
+                _pack(extras, on_rows, (left, top, left + width, None))
+                l2, r2, t2, b2 = extent(on_rows + extras)
+                if max(r2 - l2, b2 - t2) < max(span[1] - span[0], span[3] - span[2]):
+                    spec["packed"] = True
+                else:
+                    _shelf(extras, on_rows, layout)
         _offset(fps, placed, layout.get("place") or {})
-        boxes = [_courtyard(fp, 0).BBox() for fp in placed]
-        return rows, placed, (min(pcbnew.ToMM(b.GetLeft()) for b in boxes), max(pcbnew.ToMM(b.GetRight()) for b in boxes),
-                              min(pcbnew.ToMM(b.GetTop()) for b in boxes), max(pcbnew.ToMM(b.GetBottom()) for b in boxes))
+        span = extent(placed)
+        _over_the_board(overlays, span)
+        return rows, placed + overlays, span
 
     try:
         rows, placed, span = place(False)
@@ -1537,7 +1660,7 @@ def build_board(seed, spec_path, dst):
         _pour(board, ground, layer, inset, inset, w - inset, h - inset, layout.get("pour_clearance_mm", 0.3))
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     pcbnew.SaveBoard(dst, board)
-    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "folds": spec.get("folds") or [], "taps_beside": spec.get("taps_beside") or {}, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
+    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "folds": spec.get("folds") or [], "packed": bool(spec.get("packed")), "taps_beside": spec.get("taps_beside") or {}, "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)],
                       "outline_mm": [w, h], "positions": {r: [round(pcbnew.ToMM(f.GetPosition().x), 3),
                                                               round(pcbnew.ToMM(f.GetPosition().y), 3),
                                                               f.GetOrientationDegrees()] for r, f in fps.items()}}))

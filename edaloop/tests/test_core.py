@@ -1414,6 +1414,56 @@ def test_a_row_too_long_for_its_outline_folds_to_fit_it(tmp_path):
         boardgen.build(_outline_bench(tmp_path / "small", [26, 14]), tmp_path / "c", [])
 
 
+def _crowded_bench(tmp_path, outline, extra=300):
+    """gain_block_demo with `extra` 0603 capacitors on ground alone, off its row, and a 50 mm square cover with no pads: a board
+    whose parts off the row far outnumber those on it, as LibreVNA's 592 and LimeRFE's 1,327 do."""
+    import yaml
+
+    from edaloop import testbench
+    b = yaml.safe_load((testbench.BENCHES / "gain_block_demo.yaml").read_text())
+    for i in range(extra):
+        ref = f"C{100 + i}"
+        b["parts"][ref] = {"value": "100nF"}
+        b["layout"]["footprints"][ref] = b["layout"]["footprints"]["C1"]
+        b["nets"]["GND"] += [ref + ".1", ref + ".2"]
+    b["parts"]["N1"] = {"value": "Cover"}
+    b["layout"]["footprints"]["N1"] = "mech:COVER"
+    if outline:
+        b["outline_mm"] = outline
+    else:
+        b.pop("outline_mm")
+    folder = tmp_path / "mech.pretty"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "COVER.kicad_mod").write_text('(footprint "COVER" (version 20240108) (generator "pcbnew") (layer "F.Cu")\n'
+                                            '(fp_rect (start -25 -25) (end 25 25) (stroke (width 0.05) (type default)) (fill no) '
+                                            '(layer "F.CrtYd"))\n)\n')
+    (tmp_path / "crowded.yaml").write_text(yaml.safe_dump(b, sort_keys=False))
+    return tmp_path / "crowded.yaml"
+
+
+def test_parts_off_the_rows_pack_round_them_into_the_outline(tmp_path, monkeypatch):
+    """300 parts off a 33 mm row. The shelf put them in one strip as wide as the row, about 90 mm long, with the pad-less cover
+    shelved as a 50 mm block too. With no outline they now pack beside and below the row into a board about as wide as it is
+    tall, and a 62 x 62 mm outline holds them. The cover sits over the parts, centred, and sizes nothing."""
+    from edaloop import boardgen
+    if not shutil.which(str(toolchain.paths()["kicad_cli"])) or not Path(toolchain.paths()["kicad_python"]).exists():
+        pytest.skip("needs KiCad")
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda netlist, bench: [])
+    built = boardgen.build(_crowded_bench(tmp_path / "open", None), tmp_path / "a", [tmp_path / "open"])
+    w, h = built["outline_mm"]
+    assert max(w, h) / min(w, h) < 1.3 and max(w, h) < 62, (w, h)
+    assert built["packed"]
+    left, top, right, bottom = built["span_mm"]
+    cx, cy = built["positions"]["N1"][:2]
+    assert cx == pytest.approx((left + right) / 2, abs=0.01) and cy == pytest.approx((top + bottom) / 2, abs=0.01)
+    built = boardgen.build(_crowded_bench(tmp_path / "fixed", [62, 62]), tmp_path / "b", [tmp_path / "fixed"])
+    assert built["packed"] and built["outline_mm"] == [62, 62]
+    left, top, right, bottom = built["span_mm"]
+    assert left >= 0.5 and top >= 0.5 and right <= 61.5 and bottom <= 61.5
+    # The row is placed where it was: packing moves only the parts off it.
+    assert built["positions"]["J1"] == boardgen.build(_outline_bench(tmp_path / "plain", [62, 62]), tmp_path / "c", [])["positions"]["J1"]
+
+
 def test_tap_stub_mm_can_name_the_taps_it_sets_beside_the_line(tmp_path):
     """rf_layout.tap_stub_mm as {REF: mm}: the chokes named sit beside the line, and the rest stay on it."""
     import yaml

@@ -415,6 +415,9 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
             (out / "edaloop.yaml").write_text(yaml.safe_dump(project, sort_keys=False, width=120))
         print(f"  build: the RF path only fits folded between its connector's ports with {len(moved)} tap(s) beside the line "
               f"({', '.join(sorted(moved))}), which measured worse than on it on gain_block_demo", file=sys.stderr)
+    if result.get("packed"):
+        print("  build: the parts off the RF rows were packed round them, as the shelf below them would have made a strip "
+              + ("past the outline" if bench.get("outline_mm") else "far longer than wide"), file=sys.stderr)
     for fold in result.get("folds") or []:
         print(f"  build: RF row {fold['row'] + 1} is too long for the outline along one line, so it's folded, turning at "
               f"{', '.join(fold['turns'])}", file=sys.stderr)
