@@ -4280,7 +4280,7 @@ def test_no_via_is_placed_inside_a_pads_own_clearance():
 def test_make_names_missing_tools_before_it_places_anything(tmp_path, monkeypatch):
     from edaloop import boardgen
     monkeypatch.setattr(toolchain, "paths", lambda: {"kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "py"),
-                                                     "circuitrf": str(tmp_path / "crf"), "krt": str(tmp_path / "krt")})
+                                                     "kicad_backend": "swig", "circuitrf": str(tmp_path / "crf"), "krt": str(tmp_path / "krt")})
     (tmp_path / "kicad-cli").write_text("")
     (tmp_path / "py").write_text("")
     out = tmp_path / "board"
@@ -4868,3 +4868,174 @@ def test_describe_reads_kicads_escaped_net_names_as_a_drawn_label_gives_them_bac
                        tmp_path / "x.kicad_sch"], timeout=120)
     assert r.returncode == 0
     assert drawing.check_netlist(tmp_path / "n2.xml", bench) == []
+
+
+# ---------------------------------------------------------------- KiCad 11: the IPC API in place of pcbnew, and its file format
+
+_POSED = '''(kicad_pcb (version {version})
+  (net 0 "") (net 1 "N1")
+  (footprint "Lib:R" (layer "F.Cu") {pose}
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -1 0.5 30) (size 1 0.6) (layers "F.Cu") (net 1 "N1"))
+    (pad "2" smd rect (at 1 -0.5 30) (size 1 0.6) (layers "F.Cu") (net 0 ""))
+    (fp_rect (start -2 -1) (end 2 1) (layer "F.CrtYd") (stroke (width 0.05) (type solid)))))
+'''
+
+
+def _posed(path, pose, version="20260206"):
+    path.write_text(_POSED.format(version=version, pose=pose))
+    return path
+
+
+def test_a_kicad_11_footprint_transform_reads_as_the_at_it_replaced(tmp_path):
+    from edaloop.scripts.kicad_pcb import Board as Geometry
+    old = _posed(tmp_path / "at.kicad_pcb", "(at 10 20 30)")
+    new = _posed(tmp_path / "tr.kicad_pcb", "(transform (translate 10 20) (rotate 30) (scale 1 1))", "20261031")
+    assert Board(old).all_pads() == Board(new).all_pads() and Board(old).courtyards() == Board(new).courtyards()
+    assert [(p.x, p.y) for p in Geometry(str(old)).pads] == [(p.x, p.y) for p in Geometry(str(new)).pads]
+    pad = Board(new).all_pads()[0]
+    assert (pad["x"], pad["y"]) == (round(10 + -1 * math.cos(math.radians(30)) + 0.5 * math.sin(math.radians(30)), 5),
+                                    round(20 + 1 * math.sin(math.radians(30)) + 0.5 * math.cos(math.radians(30)), 5))
+
+
+@pytest.mark.parametrize("transform", ["(transform (translate 1 2) (rotate 0) (scale -1 1))",
+                                       "(transform (translate 1 2) (skew 5))"])
+def test_a_footprint_transform_this_reader_cant_apply_is_refused(tmp_path, transform):
+    with pytest.raises(ValueError, match="can't apply"):
+        Board(_posed(tmp_path / "x.kicad_pcb", transform, "20261031")).all_pads()
+
+
+def test_the_kicad_6_export_writes_a_transform_back_as_at():
+    from edaloop.export_kicad6 import pcb_v6, read, write
+    node, _ = read(_POSED.format(version="20261031", pose="(transform (translate 10.5 20) (rotate -90) (scale 1 1))"))
+    text = write(pcb_v6(node))
+    assert "(at 10.5 20 -90)" in text and "transform" not in text
+
+
+def _toolchain_with(monkeypatch, tmp_path, **over):
+    paths = {**toolchain.DEFAULTS, "kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "kpy"),
+             "ipc_python": str(tmp_path / "ipy"), **over}
+    monkeypatch.setattr(toolchain, "paths", lambda: paths)
+    getattr(toolchain._imports, "cache_clear", lambda: None)()
+    ran = []
+
+    def fake_run(cmd, cwd=None, env=None, timeout=None):
+        ran.append((list(map(str, cmd)), env or {}))
+        import subprocess
+        return subprocess.CompletedProcess(cmd, 0, "{}", "")
+    monkeypatch.setattr(toolchain, "run", fake_run)
+    return ran
+
+
+def test_board_edits_go_through_pcbnew_where_kicads_python_has_it_and_the_ipc_api_where_it_doesnt(tmp_path, monkeypatch):
+    ran = _toolchain_with(monkeypatch, tmp_path)
+    monkeypatch.setattr(toolchain, "_imports", lambda python, module: python.endswith("kpy") and module == "pcbnew")
+    assert toolchain.kicad_backend() == "swig"
+    toolchain.kicad_op("fill_zones", "a", "b")
+    assert ran[-1][0][:2] == [str(tmp_path / "kpy"), str(toolchain.SWIG_OPS)]
+    monkeypatch.setattr(toolchain, "_imports", lambda python, module: False)
+    assert toolchain.kicad_backend() == "ipc"
+    toolchain.kicad_op("fill_zones", "a", "b")
+    cmd, env = ran[-1]
+    assert cmd[:3] == [str(tmp_path / "ipy"), str(toolchain.IPC_OPS), "fill_zones"] and env["EDALOOP_KICAD_CLI"] == str(tmp_path / "kicad-cli")
+
+
+def test_a_named_kicad_backend_is_kept_and_a_misspelt_one_refused(tmp_path, monkeypatch):
+    _toolchain_with(monkeypatch, tmp_path, kicad_backend="ipc")
+    monkeypatch.setattr(toolchain, "_imports", lambda python, module: True)
+    assert toolchain.kicad_backend() == "ipc"
+    _toolchain_with(monkeypatch, tmp_path, kicad_backend="swg")
+    with pytest.raises(ValueError, match="auto, swig or ipc"):
+        toolchain.kicad_backend()
+
+
+def test_make_without_pcbnew_asks_for_kicad_python_not_kicads_python(tmp_path, monkeypatch):
+    _toolchain_with(monkeypatch, tmp_path, krt=str(tmp_path))
+    (tmp_path / "kicad-cli").write_text("")
+    (tmp_path / "rust_router").mkdir()
+    (tmp_path / "rust_router" / "grid_router.so").write_text("")
+    monkeypatch.setattr(toolchain, "_imports", lambda python, module: False)
+    missing = {m["tool"]: m for m in toolchain.missing_for_make() if m["tool"] != "circuitRF"}
+    assert list(missing) == ["kicad-python"] and "IPC API" in missing["kicad-python"]["for"]
+
+
+def test_the_ipc_ops_refuse_what_they_cant_do_yet_by_name(tmp_path):
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, str(toolchain.IPC_OPS), "build_board", "a", "b", "c"], capture_output=True, text=True)
+    assert r.returncode != 0 and "build_board isn't on KiCad 11's IPC API yet" in r.stderr
+    assert sorted(toolchain._unported()) == ["build_board", "export_footprints", "place_silk", "strip_inner_pads"]
+
+
+def test_the_ipc_ops_take_the_same_ops_as_pcbnews(tmp_path):
+    import ast
+    def ops(path):
+        tree = ast.parse(Path(path).read_text())
+        found = [n for n in ast.walk(tree) if isinstance(n, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "fill_zones" for k in n.keys)]
+        return {k.value for k in found[0].keys}
+    assert ops(toolchain.IPC_OPS) | set(toolchain._unported()) == ops(toolchain.SWIG_OPS)
+
+
+def _kicad_11_cli():
+    cli = os.environ.get("EDALOOP_TEST_KICAD11_CLI") or toolchain.paths()["kicad_cli"]
+    ok = toolchain.has_api_server(cli)
+    try:
+        import kipy  # noqa: F401
+    except ImportError:
+        ok = False
+    return cli if ok else None
+
+
+def test_kicad_10s_cli_isnt_taken_for_one_with_an_api_server(tmp_path, monkeypatch):
+    import subprocess
+    cli = tmp_path / "kicad-cli"
+    cli.write_text("#!/bin/sh\necho 'Usage: kicad-cli [--version] [--help] {fp,jobset,pcb,sch,sym,version}'\n")
+    cli.chmod(0o755)
+    assert toolchain.has_api_server(str(cli)) is False
+    cli.write_text("#!/bin/sh\necho 'Run the KiCad IPC API server in headless mode'\n")
+    assert toolchain.has_api_server(str(cli)) is True
+    assert subprocess.run([str(cli)]).returncode == 0
+
+
+def test_the_ipc_api_adds_and_removes_a_via_and_reads_it_back(tmp_path):
+    import subprocess
+    import sys
+    cli = _kicad_11_cli()
+    if not cli:
+        pytest.skip("needs KiCad 11's kicad-cli api-server and kicad-python")
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text('(kicad_pcb (version 20260206) (generator "pcbnew") (general (thickness 1.6)) (paper "A4")\n'
+                   '  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))\n'
+                   '  (net 0 "") (net 1 "GND")\n'
+                   '  (gr_rect (start 0 0) (end 20 10) (stroke (width 0.1) (type solid)) (fill no) (layer "Edge.Cuts")))\n')
+    (tmp_path / "v.json").write_text(json.dumps([{"x": 5.0, "y": 5.0, "size": 0.6, "drill": 0.3, "net": "GND", "locked": True}]))
+    env = {**os.environ, "EDALOOP_KICAD_CLI": cli}
+
+    def op(*args):
+        r = subprocess.run([sys.executable, str(toolchain.IPC_OPS), *map(str, args)], capture_output=True, text=True, env=env, timeout=600)
+        assert r.returncode == 0, r.stderr[-600:]
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    assert op("add_vias", src, tmp_path / "v.json", tmp_path / "a.kicad_pcb") == {"added": 1}
+    vias = [t for t in Board(tmp_path / "a.kicad_pcb").tracks if t.kind == "via"]
+    assert [(v.start, v.net, v.locked) for v in vias] == [((5.0, 5.0), "GND", True)]
+    (tmp_path / "p.json").write_text(json.dumps([[5.0, 5.0]]))
+    assert op("remove_vias", tmp_path / "a.kicad_pcb", tmp_path / "p.json", tmp_path / "r.kicad_pcb") == {"removed": 1}
+    assert not [t for t in Board(tmp_path / "r.kicad_pcb").tracks if t.kind == "via"]
+    assert op("board_facts", tmp_path / "r.kicad_pcb", tmp_path / "f.json") == {"pads": 0}
+    # The box takes in half the outline's 0.1 mm line, as pcbnew's GetBoardEdgesBoundingBox() does on this board.
+    assert json.loads((tmp_path / "f.json").read_text())["outline"] == [-0.05, -0.05, 20.05, 10.05]
+
+
+def test_a_kicad_11_board_goes_to_kicadroutingtools_with_its_poses_as_at(tmp_path):
+    from edaloop.route_classes import _krt_readable
+    from edaloop.scripts.kicad_pcb import poses_as_at
+    pose = "(transform\n\t\t\t(translate 10 20)\n\t\t\t(rotate -0)\n\t\t\t(scale 1 1)\n\t\t)"
+    new = _posed(tmp_path / "b.kicad_pcb", pose, "20261031")
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    handed = _krt_readable(new, tmp_path / "out" / "b.kicad_pcb")
+    assert handed != new and "(at 10 20)" in handed.read_text() and "(transform" not in handed.read_text()
+    assert handed.with_suffix(".kicad_pro").exists() and Board(handed).all_pads() == Board(new).all_pads()
+    old = _posed(tmp_path / "a.kicad_pcb", "(at 1 2 90)")
+    assert _krt_readable(old, tmp_path / "out" / "a.kicad_pcb") == old
+    with pytest.raises(ValueError, match=r"can't be written as \(at"):
+        poses_as_at(_POSED.format(version="20261031", pose="(transform (translate 1 2) (rotate 0) (scale -1 1))"))

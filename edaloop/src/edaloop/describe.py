@@ -636,7 +636,7 @@ def export_board_footprints(board: Path, folder: Path) -> Path:
     library. A board imported from EAGLE names footprints with no `library:` prefix, so these copies are the only
     library its parts can be placed from. Needs KiCad's Python."""
     lib = Path(folder) / f"{IMPORTED}.pretty"
-    r = toolchain.run([toolchain.paths()["kicad_python"], Path(__file__).with_name("kicad_ops.py"), "export_footprints", board, lib], timeout=300)
+    r = toolchain.kicad_op("export_footprints", board, lib, timeout=300)
     if r.returncode != 0 or not lib.is_dir():
         raise DescribeError(f"couldn't copy the board's footprints: {(r.stdout + r.stderr).strip()[-300:]}")
     return lib

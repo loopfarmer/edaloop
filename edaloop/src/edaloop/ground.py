@@ -15,7 +15,6 @@ import yaml
 from . import rf_rules, route_classes, toolchain
 from .pcbfile import Board
 
-OPS = Path(__file__).with_name("kicad_ops.py")
 VIA, DRILL = 0.61, 0.254     # the fabricator's preferred drill, with its 0.178 mm annular ring
 RADIUS = VIA / 2
 CLEAR = 0.2                 # copper to copper, the net class
@@ -27,7 +26,7 @@ PLACEMENT_FAULTS = {"clearance", "hole_clearance", "hole_to_hole", "shorting_ite
 
 
 def _op(*args) -> dict:
-    r = toolchain.run([toolchain.paths()["kicad_python"], OPS, *args], timeout=600)
+    r = toolchain.kicad_op(*args, timeout=600)
     lines = toolchain.json_lines(r.stdout)
     if r.returncode != 0 or not lines:
         raise RuntimeError(f"{args[0]} failed: {(r.stdout + r.stderr).strip()[-300:]}")

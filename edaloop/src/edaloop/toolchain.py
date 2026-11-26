@@ -6,11 +6,13 @@ tool name below.
 """
 from __future__ import annotations
 
+import functools
 import glob
 import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +25,12 @@ _CONFIG = HOME / ".config" / "edaloop" / "toolchain.yaml"
 DEFAULTS = {
     "kicad_cli": "/opt/homebrew/bin/kicad-cli",
     "kicad_python": "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
+    # How board edits reach KiCad: "swig" runs kicad_ops.py under kicad_python with KiCad 10's pcbnew module; "ipc" runs
+    # kicad_ipc_ops.py under ipc_python through KiCad 11's IPC API, which replaces pcbnew. "auto" takes swig wherever
+    # kicad_python still imports pcbnew, and ipc otherwise.
+    "kicad_backend": "auto",
+    # A Python with kicad-python 0.10+ and shapely; edaloop's own by default.
+    "ipc_python": sys.executable,
     "java": "java",
     "freerouting_jar": str(HOME / ".kicad-mcp/freerouting.jar"),
     # 1.6.5 or later: earlier versions have no EMerge or compare mode.
@@ -85,6 +93,42 @@ def run(cmd, cwd=None, env=None, timeout=None) -> subprocess.CompletedProcess:
                           f"for how to set it up, or set {name} in ~/.config/edaloop/toolchain.yaml") from e
 
 
+SWIG_OPS = Path(__file__).with_name("kicad_ops.py")
+IPC_OPS = Path(__file__).with_name("kicad_ipc_ops.py")
+BACKENDS = ("swig", "ipc")
+
+
+@functools.lru_cache(maxsize=None)
+def _imports(python: str, module: str) -> bool:
+    """Whether `python` imports `module`. Run once per pair: every board edit asks."""
+    if not (Path(python).exists() or shutil.which(python)):
+        return False
+    try:
+        return run([python, "-c", f"import {module}"], timeout=120).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def kicad_backend() -> str:
+    """"swig" or "ipc": which way this install's board edits reach KiCad. See `kicad_backend` in DEFAULTS."""
+    p = paths()
+    want = p.get("kicad_backend", "auto")
+    if want in BACKENDS:
+        return want
+    if want != "auto":
+        raise ValueError(f"kicad_backend is {want!r} in {_CONFIG}; it takes auto, swig or ipc")
+    return "swig" if _imports(p["kicad_python"], "pcbnew") else "ipc"
+
+
+def kicad_op(*args, timeout=600) -> subprocess.CompletedProcess:
+    """Run one board edit, `op arg...`, on whichever backend this install has. Both print one JSON line and exit
+    non-zero when the edit didn't happen."""
+    p = paths()
+    if kicad_backend() == "swig":
+        return run([p["kicad_python"], SWIG_OPS, *args], timeout=timeout)
+    return run([p["ipc_python"], IPC_OPS, *args], env={"EDALOOP_KICAD_CLI": p["kicad_cli"]}, timeout=timeout)
+
+
 def missing_for_make() -> list[dict]:
     """The tools `edaloop make` needs that aren't where edaloop looks, found without running anything.
 
@@ -92,16 +136,24 @@ def missing_for_make() -> list[dict]:
     missing router stops it at the start rather than after placement and grounding.
     """
     p = paths()
-    wanted = [("kicad_cli", "kicad-cli", "placement, DRC and fabrication", "install KiCad 10"),
-              ("kicad_python", "KiCad's Python", "board edits through pcbnew", "install KiCad 10"),
+    edits = (("kicad_python", "KiCad's Python", "board edits through pcbnew", "install KiCad 10") if kicad_backend() == "swig" else
+             ("ipc_python", "kicad-python", "board edits through KiCad 11's IPC API", IPC_FIX))
+    wanted = [("kicad_cli", "kicad-cli", "placement, DRC and fabrication", "install KiCad 10 or 11"), edits,
               ("circuitrf", "circuitRF", "the RF line width", "clone potatobeanradio/circuitRF to ~/.cache/edaloop/circuitRF, then dotnet build src/Cli -c Release"),
               ("krt", "KiCadRoutingTools", "power and signal routing", "clone it to ~/.cache/edaloop/ext and run build_router.py")]
     out = []
     for key, name, role, fix in wanted:
         where = Path(p[key]) / "rust_router/grid_router.so" if key == "krt" else Path(p[key])
-        if not (where.exists() or (key == "kicad_cli" and shutil.which(p[key]))):
+        found = where.exists() or (key == "kicad_cli" and shutil.which(p[key]))
+        if key == "ipc_python":
+            found = _imports(p[key], "kipy")
+        if not found:
             out.append({"tool": name, "key": key, "for": role, "looked_at": str(where), "fix": fix})
     return out
+
+
+IPC_FIX = ("install kicad-python 0.10 or later into edaloop's environment (uv pip install kicad-python, or from a "
+           "gitlab.com/kicad/code/kicad-python checkout until 0.10 is on PyPI), or set ipc_python to a Python that has it")
 
 
 def circuitrf_env() -> dict[str, str]:
@@ -184,10 +236,7 @@ def doctor() -> list[Probe]:
     out.append(Probe("kicad-cli", "DRC, ERC and fabrication authority", bool(r and r.returncode == 0),
                      _first_line(r.stdout) if r else "not found"))
 
-    r = run([p["kicad_python"], "-c", "import pcbnew;print(pcbnew.Version())"]) \
-        if Path(p["kicad_python"]).exists() else None
-    out.append(Probe("pcbnew", "board edits, Specctra round trip", bool(r and r.returncode == 0),
-                     f"pcbnew {_first_line(r.stdout)}" if r and r.returncode == 0 else "KiCad Python not usable"))
+    out.append(_board_edits(p))
 
     jar_ok = Path(p["freerouting_jar"]).exists() and shutil.which(p["java"]) is not None
     r = run([p["java"], "-jar", p["freerouting_jar"], "--version"], env=freerouting_env(), timeout=60) if jar_ok else None
@@ -245,6 +294,49 @@ def doctor() -> list[Probe]:
     out.append(Probe("ngspice", "transient and noise, which circuitRF lacks", bool(ng), ng or "not installed",
                      "brew install ngspice"))
     return out
+
+
+def _board_edits(p) -> Probe:
+    """The backend board edits will take, and whether it runs. Named pcbnew, as it was before KiCad 11 had another way."""
+    role = "board edits, Specctra round trip"
+    try:
+        backend = kicad_backend()
+    except ValueError as e:
+        return Probe("pcbnew", role, False, str(e))
+    if backend == "swig":
+        r = run([p["kicad_python"], "-c", "import pcbnew;print(pcbnew.Version())"]) if Path(p["kicad_python"]).exists() else None
+        ok = bool(r and r.returncode == 0)
+        return Probe("pcbnew", role, ok, f"pcbnew {_first_line(r.stdout)}, through KiCad's Python" if ok else "KiCad Python not usable",
+                     "" if ok else "install KiCad 10, or KiCad 11 with kicad-python for the IPC API")
+    if not _imports(p["ipc_python"], "kipy"):
+        return Probe("pcbnew", role, False, f"KiCad's Python has no pcbnew, and {p['ipc_python']} has no kicad-python", IPC_FIX)
+    if not has_api_server(p["kicad_cli"]):
+        return Probe("pcbnew", role, False, "this kicad-cli has no api-server: the IPC API runs headless from KiCad 11",
+                     "install KiCad 11, or KiCad 10 for pcbnew")
+    v = run([p["ipc_python"], "-c", "import importlib.metadata as m;print(m.version('kicad-python'))"])
+    return Probe("pcbnew", role, True, f"IPC API through kicad-cli api-server, kicad-python {_first_line(v.stdout)}; "
+                 f"{', '.join(_unported())} still need KiCad 10")
+
+
+def has_api_server(cli: str) -> bool:
+    """Whether this kicad-cli serves the IPC API headless, as KiCad 11's does. KiCad 10's answers an unknown subcommand with
+    its general help and exit status 0, so the status alone doesn't say."""
+    if not shutil.which(cli):
+        return False
+    try:
+        r = run([cli, "api-server", "--help"], timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and "IPC API server" in r.stdout
+
+
+def _unported() -> list[str]:
+    """The ops kicad_ipc_ops.py refuses, read from its source: it imports kicad-python, which this process may not have."""
+    import ast
+    for node in ast.parse(IPC_OPS.read_text()).body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "UNPORTED":
+            return sorted(ast.literal_eval(node.value))
+    return []
 
 
 def fix() -> list[str]:

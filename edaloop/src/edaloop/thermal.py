@@ -12,8 +12,6 @@ from pathlib import Path
 from . import toolchain
 from .pcbfile import Board, _child, _val
 
-OPS = Path(__file__).with_name("kicad_ops.py")
-
 
 def _edge_bbox(board: Board) -> list[float]:
     xs, ys = [], []
@@ -241,11 +239,10 @@ def export_problem(board_path: Path, rails: list[dict], parts: list[dict] | None
 
 def fill_copy(board_path: Path, out: Path) -> Path:
     """A copy with zones filled now, so that pours match the copper. The original isn't touched."""
-    py = toolchain.paths()["kicad_python"]
     for ext in (".kicad_pro", ".kicad_prl", ".kicad_dru"):
         if board_path.with_suffix(ext).exists():
             shutil.copy(board_path.with_suffix(ext), out.with_suffix(ext))
-    r = toolchain.run([py, OPS, "fill_zones", board_path, out], timeout=900)
+    r = toolchain.kicad_op("fill_zones", board_path, out, timeout=900)
     if r.returncode != 0 or not out.exists():
         raise RuntimeError(f"zone fill failed: {(r.stdout + r.stderr).strip()[-300:]}")
     return out

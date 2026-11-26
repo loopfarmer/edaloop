@@ -16,8 +16,6 @@ from .ledger import sha_file
 from .pcbfile import Board, compare_copper
 from .project import Project
 
-OPS = Path(__file__).with_name("kicad_ops.py")
-
 # OrthoRoute's own README and the PCBWorld benchmark limit it to very large,
 # regular boards: 1-2% clean pass and 30-51% routability on ordinary ones.
 ORTHOROUTE_MIN_NETS = 1000
@@ -37,8 +35,7 @@ def classify(board: Board) -> dict:
 
 
 def _kicad_op(*args, timeout=900) -> dict:
-    py = toolchain.paths()["kicad_python"]
-    r = toolchain.run([py, OPS, *args], timeout=timeout)
+    r = toolchain.kicad_op(*args, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(f"pcbnew {args[0]} failed: {(r.stderr + r.stdout).strip()[-400:]}")
     found = toolchain.json_lines(r.stdout)    # pcbnew prints its own chatter around ours

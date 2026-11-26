@@ -385,7 +385,7 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
         "outline": bench.get("outline_mm"), "lib_dirs": [str(out), *[str(x) for x in footprint_dirs], *STANDARD_LIBS],
         "uuids": sheets["uuids"], "sheet_of": sheets["placed"], "root": _uid(name, "root"),
         "sheet": "Root"}))
-    r = toolchain.run([toolchain.paths()["kicad_python"], OPS, "build_board", seed, spec, out / f"{name}.kicad_pcb"], timeout=600)
+    r = toolchain.kicad_op("build_board", seed, spec, out / f"{name}.kicad_pcb", timeout=600)
     netlist = out / ".schematic_netlist.xml"
     x = toolchain.run([toolchain.paths()["kicad_cli"], "sch", "export", "netlist", "--format", "kicadxml", "-o", netlist, out / f"{name}.kicad_sch"], timeout=120)
     if x.returncode != 0 or not netlist.exists():

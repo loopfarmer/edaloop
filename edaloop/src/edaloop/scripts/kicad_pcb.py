@@ -66,6 +66,48 @@ def kid(node, tag):
     return g[0] if g else None
 
 
+def footprint_pose(fp):
+    """A footprint's origin and rotation, degrees: (x, y, rot).
+
+    KiCad 10 and earlier write it as (at x y rot). KiCad 11 (board file version 20261031) writes
+    (transform (translate x y) (rotate rot) (scale 1 1)) instead; a flipped footprint still has scale 1 1
+    there, its local coordinates already flipped as before, so the transform above serves both. A
+    transform that scales, mirrors or has a part this doesn't know would put pads somewhere else, so it
+    raises rather than guess.
+    """
+    at = kid(fp, "at")
+    if at is not None:
+        return float(at[1]), float(at[2]), float(at[3]) if len(at) > 3 else 0.0
+    tr = kid(fp, "transform")
+    if tr is None:
+        raise ValueError("a footprint with neither (at ...) nor (transform ...)")
+    other = [c[0] for c in tr[1:] if isinstance(c, list) and c[0] not in ("translate", "rotate", "scale")]
+    scale = kid(tr, "scale")
+    if other or (scale is not None and (float(scale[1]), float(scale[2])) != (1.0, 1.0)):
+        raise ValueError("a footprint transform this reader can't apply: %s" % (other or ["scale %s %s" % (scale[1], scale[2])]))
+    move, turn = kid(tr, "translate"), kid(tr, "rotate")
+    return (float(move[1]) if move else 0.0, float(move[2]) if move else 0.0, float(turn[1]) if turn else 0.0)
+
+
+_TRANSFORM = re.compile(r"\(transform\s*\(translate\s+(\S+)\s+(\S+)\)\s*\(rotate\s+(\S+)\)\s*\(scale\s+1\s+1\)\s*\)")
+
+
+def poses_as_at(text):
+    """A board's text with each KiCad 11 footprint (transform ...) written back as the (at x y rot) it replaced.
+
+    For a tool that finds a footprint's place only by its (at ...), as KiCadRoutingTools does: given a
+    KiCad 11 board, it puts every pad at the origin's frame and routes nothing that joins. KiCad 11 still
+    reads (at ...). A transform with a scale or a part this can't write is refused, never passed on.
+    """
+    def at(m):
+        x, y, rot = m.group(1), m.group(2), m.group(3)
+        return "(at %s %s)" % (x, y) if float(rot) == 0 else "(at %s %s %s)" % (x, y, rot)
+    out = _TRANSFORM.sub(at, text)
+    if "(transform" in out:
+        raise ValueError("a footprint transform that can't be written as (at ...): %s" % out[out.index("(transform"):][:120])
+    return out
+
+
 # ==========================================================================
 # geometry
 # ==========================================================================
@@ -171,9 +213,7 @@ class Board(object):
         root, _ = sexp(self.text)
         self.pads, self.segs, self.vias = [], [], []
         for fp in kids(root, "footprint"):
-            at = kid(fp, "at")
-            fx, fy = float(at[1]), float(at[2])
-            frot = float(at[3]) if len(at) > 3 else 0.0
+            fx, fy, frot = footprint_pose(fp)
             ref = ""
             for pr in kids(fp, "property"):
                 if len(pr) > 2 and pr[1] == "Reference":

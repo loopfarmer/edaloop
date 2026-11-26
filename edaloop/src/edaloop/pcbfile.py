@@ -6,6 +6,11 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from .scripts.kicad_pcb import footprint_pose
+except ImportError:      # export_eagle.py imports this file as a top-level module, under KiCad's Python
+    from scripts.kicad_pcb import footprint_pose
+
 
 def parse_sexpr(text: str):
     """Parse KiCad's s-expression format into nested lists of strings."""
@@ -124,9 +129,7 @@ class Board:
         for fp in self.tree:
             if not (isinstance(fp, list) and fp and fp[0] == "footprint"):
                 continue
-            at = _child(fp, "at")
-            fx, fy = float(at[1]), float(at[2])
-            frot = float(at[3]) if len(at) > 3 else 0.0
+            fx, fy, frot = footprint_pose(fp)
             props = [x for x in fp if isinstance(x, list) and x[0] == "property" and len(x) > 2 and x[1] == "Reference"]
             ref = props[0][2] if props else (_val(fp, "fp_text") or "?")
             th = math.radians(frot)
@@ -163,9 +166,8 @@ class Board:
         for fp in self.tree:
             if not (isinstance(fp, list) and fp and fp[0] == "footprint"):
                 continue
-            at = _child(fp, "at")
-            fx, fy = float(at[1]), float(at[2])
-            th = math.radians(float(at[3]) if len(at) > 3 else 0.0)
+            fx, fy, rot = footprint_pose(fp)
+            th = math.radians(rot)
             points = []
             for shape in fp:
                 if not (isinstance(shape, list) and shape and str(shape[0]).startswith("fp_") and _val(shape, "layer") == "F.CrtYd"):
