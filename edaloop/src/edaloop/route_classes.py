@@ -595,6 +595,8 @@ def _krt_readable(board_in: Path, board_out: Path) -> Path:
     """The board as KiCadRoutingTools can read it. It places a footprint only by its (at ...), so a board KiCad 11 saved,
     with (transform ...) poses, goes to it as a copy with those written back as (at ...), its project beside it."""
     from .scripts.kicad_pcb import poses_as_at
+    if not board_in.is_file():
+        return board_in                     # the router reports a missing board as it always has
     text = board_in.read_text()
     if "(transform" not in text:
         return board_in
