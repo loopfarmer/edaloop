@@ -48,6 +48,8 @@ import shutil
 import subprocess
 import tempfile
 
+from .scripts.kicad_pcb import footprint_pose
+
 CLI = "kicad-cli"
 
 SCH_V6 = "20211123"
@@ -133,6 +135,12 @@ def _atom(a):
     if isinstance(a, Q):
         return '"%s"' % str(a).replace("\\", "\\\\").replace('"', '\\"')
     return str(a)
+
+
+def _num(v):
+    """A coordinate as KiCad writes one: no trailing zeros, no exponent."""
+    text = ("%.6f" % v).rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
 
 
 def tag(node):
@@ -718,6 +726,14 @@ def pcb_v6(node):
                 continue
             if t == "uuid":
                 out.append([Bare("tstamp"), Bare(str(c[1]))])
+                continue
+            if t == "transform" and parent == "footprint":
+                # KiCad 11 writes a footprint's pose as a transform; 6.0
+                # reads only (at x y rot). Read through the one place
+                # poses are read, which refuses a scale it can't write.
+                x, y, rot = footprint_pose([Bare("footprint"), c])
+                out.append([Bare("at"), Bare(_num(x)), Bare(_num(y))] +
+                           ([Bare(_num(rot))] if rot else []))
                 continue
             if t == "property" and parent == "footprint":
                 name = str(c[1])

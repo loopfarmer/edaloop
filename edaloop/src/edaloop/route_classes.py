@@ -21,7 +21,6 @@ from pathlib import Path
 from . import power, toolchain
 from .pcbfile import Board
 
-OPS = Path(__file__).with_name("kicad_ops.py")
 KRT_PYTHON = Path.home() / ".cache/edaloop/krt-venv/bin/python"
 MIN_POWER_WIDTH_MM = 0.2
 SIGNAL_ATTEMPTS = 4
@@ -561,7 +560,7 @@ def _load_chains(path: Path) -> tuple[list, float, dict]:
 
 
 def _op(*args, timeout=600) -> dict:
-    r = toolchain.run([toolchain.paths()["kicad_python"], OPS, *args], timeout=timeout)
+    r = toolchain.kicad_op(*args, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(f"{args[0]} failed: {(r.stdout + r.stderr).strip()[-400:]}")
     found = toolchain.json_lines(r.stdout)
@@ -592,6 +591,22 @@ def krt_rule_args(rules: dict) -> list[str]:
     return args
 
 
+def _krt_readable(board_in: Path, board_out: Path) -> Path:
+    """The board as KiCadRoutingTools can read it. It places a footprint only by its (at ...), so a board KiCad 11 saved,
+    with (transform ...) poses, goes to it as a copy with those written back as (at ...), its project beside it."""
+    from .scripts.kicad_pcb import poses_as_at
+    text = board_in.read_text()
+    if "(transform" not in text:
+        return board_in
+    folder = board_out.parent / ".krt_in"
+    folder.mkdir(parents=True, exist_ok=True)
+    copy = folder / board_in.name
+    copy.write_text(poses_as_at(text))
+    if board_in.with_suffix(".kicad_pro").exists():
+        shutil.copy(board_in.with_suffix(".kicad_pro"), copy.with_suffix(".kicad_pro"))
+    return copy
+
+
 def _krt(board_in: Path, board_out: Path, nets: list[str], extra: list[str] | None = None, timeout=1800,
          project: Path | None = None) -> dict:
     """Run the router, with rules pinned when a project is given. The project file is always put back."""
@@ -599,6 +614,7 @@ def _krt(board_in: Path, board_out: Path, nets: list[str], extra: list[str] | No
     js = board_out.with_suffix(".krt.json")
     rules = project_rules(project) if project else {}
     pinned = krt_rule_args(rules) if project else []
+    board_in = _krt_readable(Path(board_in), Path(board_out))
     r = toolchain.run([KRT_PYTHON, krt / "py_router/route.py", board_in, board_out, "--nets", *nets,
                        "--json-out", js, *pinned, *(extra or [])], cwd=krt, env={"PYTHONDONTWRITEBYTECODE": "1"}, timeout=timeout)
     data = json.loads(js.read_text()) if js.exists() else {}
