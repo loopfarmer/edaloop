@@ -4912,6 +4912,17 @@ def test_the_kicad_6_export_writes_a_transform_back_as_at():
     assert "(at 10.5 20 -90)" in text and "transform" not in text
 
 
+@pytest.mark.parametrize("rotate", ["0", "-90"])
+def test_the_kicad_6_geometry_check_reads_a_transform_as_the_at_written_for_it(tmp_path, rotate):
+    from edaloop import export_kicad6
+    src = _posed(tmp_path / "k11.kicad_pcb", "(transform (translate 10.5 20) (rotate %s) (scale 1 1))" % rotate, "20261031")
+    out = tmp_path / "k6.kicad_pcb"
+    export_kicad6.convert_pcb(str(src), str(out))
+    assert export_kicad6.pcb_geometry(str(src)) == export_kicad6.pcb_geometry(str(out))
+    out.write_text(out.read_text().replace("(at 10.5 20", "(at 10.6 20"))
+    assert export_kicad6.pcb_geometry(str(src)) != export_kicad6.pcb_geometry(str(out))
+
+
 def _toolchain_with(monkeypatch, tmp_path, **over):
     paths = {**toolchain.DEFAULTS, "kicad_cli": str(tmp_path / "kicad-cli"), "kicad_python": str(tmp_path / "kpy"),
              "ipc_python": str(tmp_path / "ipy"), **over}

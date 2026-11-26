@@ -40,10 +40,14 @@ import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 
-import pcbnew
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+try:
+    import pcbnew
+except ImportError:
+    # KiCad 11 ships no pcbnew. boardread reads the board from its file and answers what this exporter asks; the round
+    # trip has kicad-cli import the EAGLE file. See boardread.py.
+    import boardread as pcbnew
 from pcbfile import parse_sexpr  # noqa: E402
 
 VERSION = "7.7.0"
@@ -811,8 +815,29 @@ def roundtrip(orig, brd, report):
     if imp is None:
         return {"FAIL": "KiCad's EAGLE importer returned nothing"}
     out = Counter()
-    ofp = {fp.GetReference(): fp for fp in orig.GetFootprints()}
-    ifp = {fp.GetReference(): fp for fp in imp.GetFootprints()}
+    def by_ref(board):
+        # One footprint a reference. Where a board repeats a reference, the one nearest the origin stands for it, so the
+        # check doesn't depend on the order a reader lists footprints in, which pcbnew and a file don't share.
+        out = {}
+        for fp in sorted(board.GetFootprints(), key=lambda f: (f.GetReference(), f.GetPosition().x, f.GetPosition().y)):
+            out.setdefault(fp.GetReference(), fp)
+        return out
+    ofp, ifp = by_ref(orig), by_ref(imp)
+    # WHERE THE IMPORTER PUTS THE BOARD.  KiCad 10's EAGLE importer leaves a board where EAGLE has it; KiCad 11's moves the
+    # whole of it, centred on its sheet: on one 55 x 38 mm board every pad and the outline by the same (182.4945, 129.5011)
+    # mm. That isn't the export's error, so where the outline comes back the same size it is taken off everything the
+    # importer read before it's compared, and reported. An outline that comes back another size isn't shifted at all, and
+    # fails below as it always has.
+    ob, ib = orig.GetBoardEdgesBoundingBox(), imp.GetBoardEdgesBoundingBox()
+    same_size = abs((ob.GetRight() - ob.GetLeft()) - (ib.GetRight() - ib.GetLeft())) <= pcbnew.FromMM(TOL) and \
+        abs((ob.GetBottom() - ob.GetTop()) - (ib.GetBottom() - ib.GetTop())) <= pcbnew.FromMM(TOL)
+    sx, sy = (ib.GetLeft() - ob.GetLeft(), ib.GetTop() - ob.GetTop()) if same_size else (0, 0)
+    if sx or sy:
+        out["importer moved the whole board by mm (taken off)"] = "(%s, %s)" % (f(mm(sx)), f(mm(sy)))
+
+    def at(item):
+        q = item.GetPosition()
+        return q.x - sx, q.y - sy
     out["footprints missing"] = len(set(ofp) - set(ifp))
     out["footprints extra"] = len(set(ifp) - set(ofp))
     worst = 0.0
@@ -828,11 +853,14 @@ def roundtrip(orig, brd, report):
             out["footprints with a different copper pad count"] += 1
         for p in op:
             pos = p.GetPosition()
-            q = min(ip, key=lambda r: (r.GetPosition().x - pos.x) ** 2 +
-                    (r.GetPosition().y - pos.y) ** 2) if ip else None
+            # Nearest; among pads stacked at one point, which are one piece of copper, one on the same net, then the same
+            # number. By distance alone a tie went to whichever the importer listed first, which pcbnew's importer and
+            # kicad-cli's file don't share: a GND pad stacked with two netless paste pads failed or passed on list order.
+            q = min(ip, key=lambda r: ((at(r)[0] - pos.x) ** 2 + (at(r)[1] - pos.y) ** 2,
+                                       r.GetNetname() != p.GetNetname(), r.GetNumber() != p.GetNumber())) if ip else None
             if q is None:
                 continue
-            d = math.hypot(mm(q.GetPosition().x - pos.x), mm(q.GetPosition().y - pos.y))
+            d = math.hypot(mm(at(q)[0] - pos.x), mm(at(q)[1] - pos.y))
             worst = max(worst, d)
             if d > TOL:
                 out["pads displaced > 1 um"] += 1
@@ -896,7 +924,7 @@ def roundtrip(orig, brd, report):
         1 for n in set(ol) | set(il) if abs(mm(ol.get(n, 0) - il.get(n, 0))) > TOL)
     ov = {(round(mm(v.GetPosition().x), 3), round(mm(v.GetPosition().y), 3))
           for v in orig.GetTracks() if v.GetClass() == "PCB_VIA"}
-    iv = {(round(mm(v.GetPosition().x), 3), round(mm(v.GetPosition().y), 3))
+    iv = {(round(mm(at(v)[0]), 3), round(mm(at(v)[1]), 3))
           for v in imp.GetTracks() if v.GetClass() == "PCB_VIA"}
     out["vias: source"] = len(ov)
     out["vias missing after import"] = len(ov - iv)
@@ -942,7 +970,7 @@ def roundtrip(orig, brd, report):
     # KiCad's own TransformShapeToPolygon, stroke included, and the
     # tolerance is 0.10 mm: above that corner, far below a transform
     # error, which moves a marker by the size of its part.
-    def silk(fp):
+    def silk(fp, dx=0, dy=0):
         ps = pcbnew.SHAPE_POLY_SET()
         found = False
         for g in fp.GraphicalItems():
@@ -953,12 +981,12 @@ def roundtrip(orig, brd, report):
         if not found:
             return None
         bb = ps.BBox()
-        return (mm(bb.GetLeft()), mm(bb.GetTop()), mm(bb.GetRight()), mm(bb.GetBottom()))
+        return (mm(bb.GetLeft() - dx), mm(bb.GetTop() - dy), mm(bb.GetRight() - dx), mm(bb.GetBottom() - dy))
     moved, worst_silk = 0, 0.0
     for ref, fo in ofp.items():
         if ref not in ifp:
             continue
-        s, t = silk(fo), silk(ifp[ref])
+        s, t = silk(fo), silk(ifp[ref], sx, sy)
         if (s is None) != (t is None):
             moved += 1
             continue
@@ -969,10 +997,9 @@ def roundtrip(orig, brd, report):
                 moved += 1
     out["footprints whose silkscreen moved > 0.10 mm"] = moved
     out["worst silkscreen extent difference um"] = round(worst_silk * 1000.0, 1)
-    ob, ib = orig.GetBoardEdgesBoundingBox(), imp.GetBoardEdgesBoundingBox()
     out["outline bbox error um"] = round(1000.0 * max(
-        abs(mm(ob.GetLeft() - ib.GetLeft())), abs(mm(ob.GetRight() - ib.GetRight())),
-        abs(mm(ob.GetTop() - ib.GetTop())), abs(mm(ob.GetBottom() - ib.GetBottom()))), 3)
+        abs(mm(ob.GetLeft() - ib.GetLeft() + sx)), abs(mm(ob.GetRight() - ib.GetRight() + sx)),
+        abs(mm(ob.GetTop() - ib.GetTop() + sy)), abs(mm(ob.GetBottom() - ib.GetBottom() + sy))), 3)
     return out
 
 
@@ -1125,6 +1152,7 @@ def export(src, bd, dst, schematic_path=None):
 
 if __name__ == "__main__":
     CLI = sys.argv[4]
+    os.environ["EDALOOP_KICAD_CLI"] = CLI          # the kicad-cli boardread's round trip imports the EAGLE file with
     _fails = export(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[5] if len(sys.argv) > 5 else None)
     sys.stdout.flush()
     os._exit(1 if _fails else 0)    # pcbnew's bindings can segfault during interpreter shutdown, after the work is saved
