@@ -457,3 +457,64 @@ fn adding_to_a_board_with_no_tracks_uses_its_layout_and_net_form() {
     assert_eq!(r["result"]["item"]["net"], "X");
     assert!(fs::read_to_string(&old).unwrap().contains("(net 7)"));
 }
+
+#[test]
+fn footprint_move_rewrites_a_kicad_11_transform_in_place() {
+    let dir = work("t5_move_k11");
+    let board = dir.join("k11.kicad_pcb");
+    let text = r#"(kicad_pcb
+	(version 20261031)
+	(generator "pcbnew")
+	(layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+	(footprint "R"
+		(layer "F.Cu")
+		(uuid "10000000-0000-4000-8000-000000000001")
+		(transform
+			(translate 10 20)
+			(rotate 0)
+			(scale 1 1)
+		)
+		(property "Reference" "R1" (at 0 -1 0) (layer "F.SilkS") (uuid "10000000-0000-4000-8000-000000000002"))
+		(pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net "N1") (uuid "10000000-0000-4000-8000-000000000003"))
+	)
+)
+"#;
+    fs::write(&board, text).unwrap();
+    let mut m = Mcp::start(&dir, &[]);
+    m.initialize();
+    m.load(json!("board_edit"));
+    let r = m.call(
+        "footprint_move",
+        json!({"board": board, "expected_revision": sha(&board), "reference": "R1", "position": {"x": 20, "y": 30}, "rotation": 45}),
+    );
+    assert_eq!(r["outcome"], "complete", "{r}");
+    assert_eq!(r["result"]["footprint"]["position"]["x"].as_f64(), Some(20.0));
+    assert_eq!(r["result"]["footprint"]["rotation"].as_f64(), Some(45.0));
+    let now = fs::read_to_string(&board).unwrap();
+    assert!(now.contains("\t\t\t(translate 20 30)\n\t\t\t(rotate 45)\n\t\t\t(scale 1 1)\n"), "{now}");
+    assert!(!now.contains("\t\t(at "), "a footprint-level (at) was added: {now}");
+    assert!(now.contains("(pad \"1\" smd rect (at -1 0 45)"), "{now}");
+    // Moving it back without a rotation leaves the rotate alone.
+    let r = m.call(
+        "footprint_move",
+        json!({"board": board, "expected_revision": sha(&board), "reference": "R1", "position": {"x": 10, "y": 20}}),
+    );
+    assert_eq!(r["outcome"], "complete", "{r}");
+    assert!(fs::read_to_string(&board).unwrap().contains("(translate 10 20)\n\t\t\t(rotate 45)"));
+}
+
+#[test]
+fn a_board_with_a_transform_boardhand_cant_apply_is_refused_not_guessed() {
+    let dir = work("t5_k11_scale");
+    let board = dir.join("scaled.kicad_pcb");
+    fs::write(
+        &board,
+        "(kicad_pcb (version 20261031) (layers (0 \"F.Cu\" signal))\n  (footprint \"R\" (layer \"F.Cu\") (transform (translate 1 2) (rotate 0) (scale -1 1))\n    (property \"Reference\" \"R1\" (at 0 0 0))))\n",
+    )
+    .unwrap();
+    let mut m = Mcp::start(&dir, &[]);
+    m.initialize();
+    let r = m.call("board_summary", json!({"board": board}));
+    assert_ne!(r["outcome"], "complete", "{r}");
+    assert!(r.to_string().contains("scale -1 1"), "{r}");
+}

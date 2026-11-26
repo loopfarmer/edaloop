@@ -637,22 +637,41 @@ pub fn footprint_move(args: &Value, hook: Hook<'_>) -> Reply {
             .target(&path)
             .revs(Some(&rev), Some(&rev));
     }
-    let Some(at_node) = t.find(fp.node, "at") else {
-        return Reply::refused(SRC, "parse_error", format!("Footprint {reference} has no position.")).target(&path);
-    };
     let mut splices = vec![];
-    let (s, e) = t.span(at_node);
-    let rot_text = if rotation.is_some() {
-        let r = norm_angle(new_rot);
-        if r == 0.0 {
-            String::new()
+    if let Some(at_node) = t.find(fp.node, "at") {
+        let (s, e) = t.span(at_node);
+        let rot_text = if rotation.is_some() {
+            let r = norm_angle(new_rot);
+            if r == 0.0 {
+                String::new()
+            } else {
+                format!(" {}", fmt_mm(r))
+            }
         } else {
-            format!(" {}", fmt_mm(r))
+            t.arg(at_node, 2).map(|a| format!(" {}", t.text(a))).unwrap_or_default()
+        };
+        splices.push(Splice { start: s, end: e, text: format!("(at {} {}{rot_text})", fmt_mm(to.0), fmt_mm(to.1)).into_bytes() });
+    } else if let Some(mv) = t.find(fp.node, "transform").and_then(|tr| t.find(tr, "translate")) {
+        // KiCad 11's pose: the translate and the rotate are rewritten in place, the scale (1 1,
+        // which Board::parse has checked) left as it is.
+        let tr = t.find(fp.node, "transform").unwrap_or(fp.node);
+        let turn = t.find(tr, "rotate");
+        let mut text = format!("(translate {} {})", fmt_mm(to.0), fmt_mm(to.1));
+        if rotation.is_some() {
+            let r = fmt_mm(norm_angle(new_rot));
+            match turn {
+                Some(rn) => {
+                    let (s, e) = t.span(rn);
+                    splices.push(Splice { start: s, end: e, text: format!("(rotate {r})").into_bytes() });
+                }
+                None => text.push_str(&format!(" (rotate {r})")),
+            }
         }
+        let (s, e) = t.span(mv);
+        splices.push(Splice { start: s, end: e, text: text.into_bytes() });
     } else {
-        t.arg(at_node, 2).map(|a| format!(" {}", t.text(a))).unwrap_or_default()
-    };
-    splices.push(Splice { start: s, end: e, text: format!("(at {} {}{rot_text})", fmt_mm(to.0), fmt_mm(to.1)).into_bytes() });
+        return Reply::refused(SRC, "parse_error", format!("Footprint {reference} has no position.")).target(&path);
+    }
 
     for c in t.children(fp.node) {
         if t.kind(c) != Kind::List {
