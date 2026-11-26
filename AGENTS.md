@@ -14,7 +14,7 @@ This file is about changing edaloop. To design a board with it, read [`edaloop/s
 | `edaloop/src/edaloop/scripts/` | Python | Standalone scripts with no dependencies. `rf_path.py` measures the RF path, and `kicad_pcb.py` reads a board as geometry |
 | `edaloop/src/edaloop/kicad_ops.py`, `kicad_ipc_ops.py` | Python | Board edits, one operation per run: through `pcbnew` under KiCad's Python for KiCad 10, and through the IPC API for KiCad 11. `toolchain.kicad_op` picks one. Keep their operations, arguments and JSON results the same |
 | `edaloop/src/edaloop/fpmodel.py` | Python | Footprints read from their libraries, answering what `kicad_ops.solve_placement` asks (pads and courtyards at a pose) as `pcbnew` does, so placement runs on KiCad 11 with no KiCad; and the text a placed footprint is written as. Change it only with a comparison against `pcbnew` on real boards |
-| `edaloop/src/edaloop/export*.py` | Python | KiCad 6.0 and EAGLE 7.7 exports. `export_eagle.py` runs under KiCad's Python, because it needs `pcbnew` |
+| `edaloop/src/edaloop/export*.py` | Python | KiCad 6.0 and EAGLE 7.7 exports. `export_eagle.py` reads the board through `pcbnew` on KiCad 10 and through `boardread.py`, a read-only parse of the file, where there is no `pcbnew` |
 | `edaloop/tests/` | Python | The test suite, in `test_core.py` |
 | `edaloop/testbenches/` | YAML | Board descriptions, which run with no KiCad files |
 | `edaloop/evaluation/` | YAML | Production boards to test edaloop against, fetched at pinned commits |

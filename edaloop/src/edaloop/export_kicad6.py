@@ -816,6 +816,15 @@ def pcb_geometry(path):
                     if w is not None:
                         key.append(("width", num(w[1])))
                     continue
+                # KiCad 11 writes a footprint's pose as (transform ...),
+                # which the 6.0 file writes as (at x y rot). Key both as
+                # the (at) the converter writes, or every footprint reads
+                # as one lost and one new.
+                if tag(c) == "transform" and tag(nd) == "footprint":
+                    x, y, rot = footprint_pose([Bare("footprint"), c])
+                    key.append(tuple(["at", num(_num(x)), num(_num(y))] +
+                                     ([num(_num(rot))] if rot else [])))
+                    continue
                 if isinstance(c, list) and tag(c) in (
                         "at", "start", "end", "size", "drill", "width",
                         "layer", "layers", "pts"):
