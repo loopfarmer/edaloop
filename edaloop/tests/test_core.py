@@ -4959,12 +4959,12 @@ def test_make_without_pcbnew_asks_for_kicad_python_not_kicads_python(tmp_path, m
     assert list(missing) == ["kicad-python"] and "IPC API" in missing["kicad-python"]["for"]
 
 
-def test_the_ipc_ops_refuse_what_they_cant_do_yet_by_name(tmp_path):
+def test_the_ipc_ops_refuse_an_op_they_dont_have_by_name(tmp_path):
     import subprocess
     import sys
-    r = subprocess.run([sys.executable, str(toolchain.IPC_OPS), "build_board", "a", "b", "c"], capture_output=True, text=True)
-    assert r.returncode != 0 and "build_board isn't on KiCad 11's IPC API yet" in r.stderr
-    assert sorted(toolchain._unported()) == ["build_board", "export_footprints", "place_silk", "strip_inner_pads"]
+    r = subprocess.run([sys.executable, str(toolchain.IPC_OPS), "no_such_op", "a", "b"], capture_output=True, text=True)
+    assert r.returncode != 0 and "no such op: no_such_op" in r.stderr
+    assert toolchain._unported() == []
 
 
 def test_the_ipc_ops_take_the_same_ops_as_pcbnews(tmp_path):
@@ -5026,9 +5026,9 @@ def test_the_ipc_api_adds_and_removes_a_via_and_reads_it_back(tmp_path):
     assert json.loads((tmp_path / "f.json").read_text())["outline"] == [-0.05, -0.05, 20.05, 10.05]
 
 
-def test_a_kicad_11_board_goes_to_kicadroutingtools_with_its_poses_as_at(tmp_path):
-    from edaloop.route_classes import _krt_readable
+def test_a_kicad_11_board_goes_to_kicadroutingtools_and_circuitrf_with_its_poses_as_at(tmp_path):
     from edaloop.scripts.kicad_pcb import poses_as_at
+    _krt_readable = toolchain.at_poses
     pose = "(transform\n\t\t\t(translate 10 20)\n\t\t\t(rotate -0)\n\t\t\t(scale 1 1)\n\t\t)"
     new = _posed(tmp_path / "b.kicad_pcb", pose, "20261031")
     (tmp_path / "b.kicad_pro").write_text("{}")
@@ -5039,3 +5039,88 @@ def test_a_kicad_11_board_goes_to_kicadroutingtools_with_its_poses_as_at(tmp_pat
     assert _krt_readable(old, tmp_path / "out" / "a.kicad_pcb") == old
     with pytest.raises(ValueError, match=r"can't be written as \(at"):
         poses_as_at(_POSED.format(version="20261031", pose="(transform (translate 1 2) (rotate 0) (scale -1 1))"))
+
+
+# ---------------------------------------------------------------- #84: placement and silk with no pcbnew
+
+def _fpmodel():
+    import sys
+    sys.path.insert(0, str(Path(checks.__file__).parent))
+    import fpmodel
+    return fpmodel
+
+
+_LIB_FP = '''(footprint "T" (version 20240108) (generator "pcbnew") (layer "F.Cu")
+  (property "Reference" "REF**" (at 0 -1.5 0) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+  (property "Value" "T" (at 0 1.5 0) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))
+  (attr smd)
+  (fp_rect (start -2 -1) (end 2 1) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+  (pad "1" smd roundrect (at -1 0) (size 0.8 1) (layers "F.Cu" "F.Mask") (roundrect_rratio 0.25))
+  (pad "2" smd rect (at 1 0.25 90) (size 0.6 0.4) (layers "F.Cu" "F.Mask"))
+  (zone (layer "F.Cu") (hatch edge 0.5) (keepout (tracks allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+    (polygon (pts (xy 0 -0.5) (xy 0.5 -0.5) (xy 0.5 0.5) (xy 0 0.5)))))
+'''
+
+
+def test_fpmodel_places_pads_and_courtyards_as_kicad_does():
+    fm = _fpmodel()
+    fp = fm.FOOTPRINT("Lib", "T", _LIB_FP)
+    fp.SetPosition(fm.VECTOR2I(fm.FromMM(10), fm.FromMM(5)))
+    fp.SetOrientationDegrees(90)
+    pads = {p.GetNumber(): p for p in fp.Pads()}
+    # The pad transform: x' = fx + x cos t + y sin t, y' = fy - x sin t + y cos t.
+    assert (pads["1"].GetPosition().x, pads["1"].GetPosition().y) == (fm.FromMM(10), fm.FromMM(6))
+    assert (pads["2"].GetPosition().x, pads["2"].GetPosition().y) == (fm.FromMM(10.25), fm.FromMM(4))
+    # A rect pad at 90 in its library, turned 90 with its footprint, lies at 180: 0.6 along x again.
+    b = pads["2"].GetBoundingBox()
+    assert (b.GetWidth(), b.GetHeight()) == (fm.FromMM(0.6), fm.FromMM(0.4))
+    # The courtyard, turned, and shrunk 5 um a side as KiCad's BuildCourtyardCaches does.
+    yard = fp.GetCourtyard(fm.F_CrtYd).BBox()
+    assert (yard.GetLeft(), yard.GetTop(), yard.GetRight(), yard.GetBottom()) == (9005000, 3005000, 10995000, 6995000)
+    fp.Rotate(fm.VECTOR2I(0, 0), fm.EDA_ANGLE(90, fm.DEGREES_T))
+    assert (fp.GetPosition().x, fp.GetPosition().y, fp.GetOrientationDegrees()) == (fm.FromMM(5), fm.FromMM(-10), 180.0)
+
+
+def test_fpmodel_refuses_a_courtyard_that_doesnt_close_and_a_part_on_the_back():
+    fm = _fpmodel()
+    open_lines = _LIB_FP.replace('(fp_rect (start -2 -1) (end 2 1)', '(fp_line (start -2 -1) (end 2 -1)')
+    assert fm.FOOTPRINT("Lib", "T", open_lines).GetCourtyard(fm.F_CrtYd).OutlineCount() == 0
+    with pytest.raises(SystemExit, match="front only"):
+        fm.FOOTPRINT("Lib", "T", _LIB_FP.replace('(layer "F.Cu")\n', '(layer "B.Cu")\n', 1))
+
+
+def test_a_placed_footprint_is_written_where_the_model_put_it(tmp_path):
+    fm = _fpmodel()
+    fp = fm.FOOTPRINT("Lib", "T", _LIB_FP)
+    fp.SetReference("U7")
+    fp.SetValue("thing")
+    fp.SetPosition(fm.VECTOR2I(fm.FromMM(12.5), fm.FromMM(7)))
+    fp.SetOrientationDegrees(-90)
+    ids = iter("u%d" % i for i in range(9))
+    text = fm.board_footprint(fp, {"1": "RF_IN", "2": "GND"}, lambda: next(ids), "/abc", "/", "x.kicad_sch", "PN-1", True)
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text('(kicad_pcb (version 20260206) (generator "edaloop")\n' + text + "\n)\n")
+    read = {p["name"]: p for p in Board(board).all_pads()}
+    for pad in fp.Pads():
+        q = read["U7." + pad.GetNumber()]
+        assert math.isclose(q["x"], pad.GetPosition().x / 1e6, abs_tol=1e-6) and math.isclose(q["y"], pad.GetPosition().y / 1e6, abs_tol=1e-6)
+    assert read["U7.1"]["net"] == "RF_IN" and read["U7.2"]["net"] == "GND"
+    assert '(footprint "Lib:T"' in text and "(version" not in text and '"U7"' in text and '"thing"' in text and "(attr smd dnp)" in text
+    assert '(property "MPN" "PN-1"' in text and '(path "/abc")' in text
+    # Pad and text angles are on the board's axes: the library's plus the footprint's.
+    assert "(at 1 0.25)" in text and "(at 0 -1.5 270)" in text
+    # The footprint's own keepout is moved into the board's frame.
+    assert "(xy 12 7)" in text and "(xy 13 7.5)" in text
+
+
+def test_set_properties_changes_a_reference_and_nothing_else():
+    from edaloop.scripts.kicad_pcb import set_properties
+    board = ('(kicad_pcb (version 20260206)\n  (footprint "Lib:T" (layer "F.Cu") (at 5 5)\n'
+             '    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (unlocked yes) (effects (font (size 1 1) (thickness 0.15))))\n'
+             '    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))))\n')
+    out = set_properties(board, {"R1": {"Reference": {"at": (0, -2.25, 90), "font": (0.8, 0.8, 0.12), "hide": False},
+                                         "Value": {"hide": True}}})
+    assert '(property "Reference" "R1" (at 0 -2.25 90) (layer "F.SilkS")  (effects (font (size 0.8 0.8) (thickness 0.12))))' in out
+    assert '(property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (hide yes) (effects (font (size 1 1) (thickness 0.15))))' in out
+    with pytest.raises(ValueError, match="no footprint with reference R9"):
+        set_properties(board, {"R9": {"Value": {"hide": True}}})

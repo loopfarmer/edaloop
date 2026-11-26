@@ -24,6 +24,11 @@ def run(p: Project, formats: list[str] | None = None, out: Path | None = None) -
             done = export_kicad6.export(str(p.root), str(p.board), str(p.schematic), str(dst), cli=paths["kicad_cli"])
             result["formats"][name] = {"ok": not done["problems"], **done}
         elif name == "eagle":
+            if toolchain.kicad_backend() != "swig":
+                # export_eagle.py reads the whole board through pcbnew, which KiCad 11 doesn't ship (#84).
+                result["formats"][name] = {"ok": False, "problems": ["the EAGLE export reads the board through pcbnew, which KiCad 11 "
+                                                                       "doesn't have: run it with KiCad 10 (kicad_backend: swig)"]}
+                continue
             cmd = [paths["kicad_python"], EAGLE, p.board, p.board.stem, dst, paths["kicad_cli"]]
             if p.schematic:
                 cmd.append(p.schematic)

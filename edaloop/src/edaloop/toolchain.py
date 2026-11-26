@@ -314,8 +314,32 @@ def _board_edits(p) -> Probe:
         return Probe("pcbnew", role, False, "this kicad-cli has no api-server: the IPC API runs headless from KiCad 11",
                      "install KiCad 11, or KiCad 10 for pcbnew")
     v = run([p["ipc_python"], "-c", "import importlib.metadata as m;print(m.version('kicad-python'))"])
+    still = [*_unported(), "the EAGLE export"]
     return Probe("pcbnew", role, True, f"IPC API through kicad-cli api-server, kicad-python {_first_line(v.stdout)}; "
-                 f"{', '.join(_unported())} still need KiCad 10")
+                 f"{', '.join(still)} still need{'s' if len(still) == 1 else ''} KiCad 10")
+
+
+def at_poses(board, folder) -> Path:
+    """The board as a tool that finds a footprint's place only by its (at ...) can read it: KiCadRoutingTools, and
+    circuitRF's KiCad import. Given a KiCad 11 board, which writes each pose as (transform ...), both put every pad in
+    its footprint's own frame, KiCadRoutingTools routing nets it can't join and circuitRF reading lines with no lands on
+    them, and say nothing. Such a board goes to them as a copy in `folder`, named as the original, its poses written
+    back as (at ...) and its project and rules beside it. Any other board, or one that isn't there, is passed as it is."""
+    from .scripts.kicad_pcb import poses_as_at
+    board = Path(board)
+    if not board.is_file():
+        return board
+    text = board.read_text()
+    if "(transform" not in text:
+        return board
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    copy = folder / board.name
+    copy.write_text(poses_as_at(text))
+    for ext in (".kicad_pro", ".kicad_dru", ".kicad_prl"):
+        if board.with_suffix(ext).exists():
+            shutil.copy(board.with_suffix(ext), copy.with_suffix(ext))
+    return copy
 
 
 def has_api_server(cli: str) -> bool:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import sys
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ try:
     from kipy.common_types import PolygonWithHoles
     from kipy.geometry import PolyLine, PolyLineNode, Vector2
     from kipy.proto.board import board_commands_pb2, board_jobs_pb2
+    from kipy.proto.board.board_commands_pb2 import BoardFlipDirection
     from kipy.proto.board.board_types_pb2 import BoardLayer, UnconnectedLayerRemoval, ViaType, ZoneType
     from kipy.proto.common.commands import base_commands_pb2, editor_commands_pb2
     from kipy.proto.common.types import KIID, base_types_pb2, jobs_pb2
@@ -41,10 +43,8 @@ else:
 # A zone fill or a Specctra export on a big board takes minutes; the default 2 s would call a slow request a failure.
 REQUEST_TIMEOUT_MS = 900_000
 
-UNPORTED = {
-    "build_board": "it poses each footprint many times while it solves a row, reading pads and courtyards after each pose",
-    "export_footprints": "it writes footprints to a library with pcbnew's own writer",
-}
+# Ops kicad_ops.py has that this file doesn't yet, each with why: main() refuses them by name. None now (#84).
+UNPORTED = {}
 
 
 @contextmanager
@@ -555,6 +555,250 @@ def place_silk(src, dst):
     print(json.dumps({"placed": len(placed), "hidden": hidden}))
 
 
+def _placer():
+    """kicad_ops' placement, run on fpmodel's footprints: fpmodel stands in for the pcbnew module it imports."""
+    import fpmodel
+    sys.modules.setdefault("pcbnew", fpmodel)
+    if sys.modules["pcbnew"] is not fpmodel:
+        raise SystemExit("a real pcbnew is loaded in this process, so placement can't run on fpmodel")
+    import kicad_ops
+    return fpmodel, kicad_ops
+
+
+def build_board(seed, spec_path, dst):
+    """Parts, nets, solved positions, outline and ground pours on the seed's stackup, as kicad_ops.build_board makes them.
+
+    Placement runs on fpmodel's footprints, read from the libraries with no KiCad; the board is then written as text,
+    so no footprint goes through UpdateItems. KiCad opens it, fills the pours and saves it, then reads every footprint
+    and pad back: one that isn't where placement put it, or on its net, fails the op."""
+    import uuid
+    fpmodel, placer = _placer()
+    spec = json.load(open(spec_path))
+    layout = spec["layout"]
+    fps = {}
+    for ref, part in spec["parts"].items():
+        fp = fpmodel.load(layout["footprints"][ref], spec["lib_dirs"])
+        fp.SetReference(ref)
+        # As schematic.shown_value: KiCad reads a symbol's empty Value as its reference, so the footprint says the same, or parity fails.
+        fp.SetValue(str(part.get("value") or "").strip() or ref)
+        fps[ref] = fp
+    assigned, unlisted = placer._pad_nets(fps, spec)
+    placed, squared, (left, right, top, bottom), (w, h) = placer.solve_placement(fps, spec)
+    seed_text = open(seed).read().rstrip()
+    if not seed_text.endswith(")"):
+        raise SystemExit("%s doesn't end as a board does" % seed)
+    copper = re.findall(r'\(\d+\s+"([^"]+\.Cu)"\s+(?:signal|power|mixed|jumper)', seed_text[:seed_text.index("(setup")])
+    order = sorted(copper, key=lambda n: (n != "F.Cu", n == "B.Cu", int(re.sub(r"\D", "", n) or 0)))
+    parts = []
+    for ref, fp in fps.items():
+        part = spec["parts"][ref]
+        on_sheet = (spec.get("sheet_of") or {}).get(ref)
+        parts.append(fpmodel.board_footprint(
+            fp, assigned[ref], lambda: str(uuid.uuid4()), "/" + spec["uuids"][ref], on_sheet["name"] if on_sheet else "/",
+            on_sheet["file"] if on_sheet else os.path.basename(dst).replace(".kicad_pcb", ".kicad_sch"),
+            str(part.get("mpn", "")), bool(part.get("dnp"))))
+    inset = 0.6
+    pours = [fpmodel.pour_text("GND", layer, inset, inset, w - inset, h - inset, layout.get("pour_clearance_mm", 0.3), str(uuid.uuid4()))
+             for layer in order]
+    body = "\n".join(parts + [fpmodel.outline_text(w, h, str(uuid.uuid4()))] + pours)
+    with open(dst, "w") as f:
+        f.write(seed_text[:-1].rstrip() + "\n" + body + "\n)\n")
+    with board_at(dst) as board:
+        refill(board)
+        save(board, dst, dst)
+        wrong = []
+        for got in board.get_footprints():
+            ref = got.reference_field.text.value
+            fp = fps.get(ref)
+            if fp is None:
+                wrong.append("%s isn't a part" % ref)
+                continue
+            gx, gy = mm(got.position)
+            if math.hypot(gx - fp.x / 1e6, gy - fp.y / 1e6) > 1e-5 or abs((got.orientation.degrees - fp.rot + 180) % 360 - 180) > 1e-6:
+                wrong.append("%s at (%.4f, %.4f) %.2f, not (%.4f, %.4f) %.2f" % (ref, gx, gy, got.orientation.degrees, fp.x / 1e6, fp.y / 1e6, fp.rot))
+            mine = {}
+            for pad in fp.Pads():
+                mine.setdefault(pad.GetNumber(), []).append(pad.GetPosition())
+            for pad in got.definition.pads:
+                px, py = mm(pad.position)
+                near = min((math.hypot(px - q.x / 1e6, py - q.y / 1e6) for q in mine.get(pad.number, [])), default=None)
+                if near is None or near > 1e-5:
+                    wrong.append("%s.%s at (%.4f, %.4f), %s from where placement put it" % (ref, pad.number, px, py,
+                                                                                         "far" if near is None else "%.5f mm" % near))
+                if pad.net.name != assigned[ref].get(pad.number, ""):
+                    wrong.append("%s.%s on %r, not %r" % (ref, pad.number, pad.net.name, assigned[ref].get(pad.number, "")))
+        missing = sorted(set(fps) - {f.reference_field.text.value for f in board.get_footprints()})
+        wrong += ["%s isn't on the board" % r for r in missing]
+        if wrong:
+            raise SystemExit("build_board: KiCad reads the board back differently from what was placed: " + "; ".join(wrong[:8]))
+    print(json.dumps({"parts": len(placed), "unlisted_pads": unlisted, "set_square": squared, "folds": spec.get("folds") or [],
+                      "packed": bool(spec.get("packed")), "taps_beside": spec.get("taps_beside") or {},
+                      "span_mm": [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)], "outline_mm": [w, h],
+                      "positions": {r: [round(f.x / 1e6, 3), round(f.y / 1e6, 3), f.GetOrientationDegrees()] for r, f in fps.items()}}))
+
+
+CLUSTER_MM = 2.0      # pads closer than this belong to one courtyard box, as in kicad_ops
+
+
+def _boxes_touch(a, b):
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+def _clusters(boxes):
+    """Pads in groups, each within CLUSTER_MM of another in its group, as kicad_ops._pad_clusters: indices in pad order."""
+    gap = from_mm(CLUSTER_MM) // 2
+    grown = [(b[0] - gap, b[1] - gap, b[2] + gap, b[3] + gap) for b in boxes]
+    owner = list(range(len(boxes)))
+
+    def find(i):
+        while owner[i] != i:
+            owner[i] = owner[owner[i]]
+            i = owner[i]
+        return i
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            if _boxes_touch(grown[i], grown[j]):
+                owner[find(i)] = find(j)
+    groups = {}
+    for i in range(len(boxes)):
+        groups.setdefault(find(i), []).append(i)
+    return sorted(groups.values())
+
+
+def _merge(boxes):
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def _inside(box, x, y):
+    return box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+
+def export_footprints(src, pretty):
+    """Each footprint a board uses, as a library, at rest, with a courtyard, as kicad_ops.export_footprints writes them.
+
+    The IPC API has no footprint-library writer. KiCad flips the back-side parts onto the front in a scratch session
+    (FlipItems, so no footprint goes through UpdateItems), saves a scratch copy, and each footprint is cut from that
+    copy: unturned, off the board, its nets gone. A footprint with no courtyard gets one round its groups of pads, as
+    kicad_ops does: the groups found on the board as placed, so a part with another part's pads between its own keeps
+    one box for each group."""
+    import tempfile
+
+    import fpmodel
+    from scripts.kicad_pcb import spans
+    os.makedirs(pretty, exist_ok=True)
+    source = open(src).read()
+    root, _ = spans(source)
+    first = {}                      # the first footprint of each name in the file, by uuid, as pcbnew's Footprints() gives them
+    for node in (c for c in root[3] if c[0] == "footprint"):
+        name = re.match(r'\(footprint\s+"((?:[^"\\]|\\.)*)"', source[node[1]:node[2]]).group(1).split(":", 1)[-1]
+        uid = re.search(r'\n\s*\(uuid\s+"([^"]+)"\)', source[node[1]:node[2]])
+        if name not in first and uid:
+            first[name] = uid.group(1)
+    with tempfile.TemporaryDirectory(prefix="edaloop-fp-") as scratch:
+        flipped = os.path.join(scratch, "flipped.kicad_pcb")
+        with board_at(src) as board:
+            fps = board.get_footprints()
+            by_id = {f.id.value: f for f in fps}
+            wanted = [by_id[u] for u in first.values() if u in by_id]
+            # Clusters and the parts between them, on the board as placed.
+            placed = {}
+            for fp in wanted:
+                boxes = [_box(b) for b in board.get_item_bounding_box(list(fp.definition.pads))] if fp.definition.pads else []
+                placed[fp.id.value] = boxes
+            pads_by_side = {}
+            for fp in fps:
+                pads_by_side.setdefault(fp.layer == BoardLayer.BL_B_Cu, []).append((fp.id.value, [p.position for p in fp.definition.pads]))
+            sides = {f.id.value: f.layer == BoardLayer.BL_B_Cu for f in wanted}       # before the flip below
+            back = [f for f in wanted if f.layer == BoardLayer.BL_B_Cu]
+            if back:
+                with commit(board, "export_footprints: flip to the front"):
+                    board.flip_items(back, BoardFlipDirection.BFD_TOP_BOTTOM)
+            board.save_as(flipped, overwrite=True, include_project=False)
+        text = open(flipped).read()
+        version = re.search(r"\(version\s+(\d+)\)", text).group(1)
+        froot, _ = spans(text)
+        nodes = {}
+        for node in (c for c in froot[3] if c[0] == "footprint"):
+            uid = re.search(r'\n\s*\(uuid\s+"([^"]+)"\)', text[node[1]:node[2]])
+            if uid:
+                nodes[uid.group(1)] = node
+    made, added, split = 0, 0, []
+    for name, uid in first.items():
+        node = nodes.get(uid)
+        if node is None:
+            raise SystemExit("export_footprints: KiCad's copy of the board has no footprint %s (%s)" % (name, uid))
+        lib = _at_rest(text, node, name, version)
+        fp = fpmodel.FOOTPRINT("", name, lib)
+        if fp.courtyard.is_empty and fp.pads:
+            boxes = placed.get(uid, [])
+            groups = _clusters(boxes) if boxes else [list(range(len(fp.pads)))]
+            if len(groups) > 1:
+                whole, own = _merge(boxes), [_merge([boxes[i] for i in g]) for g in groups]
+                between = any(_inside(whole, q.x, q.y) and not any(_inside(o, q.x, q.y) for o in own)
+                              for other, pts in pads_by_side.get(sides[uid], []) if other != uid for q in pts)
+                if not between:
+                    groups = [list(range(len(fp.pads)))]
+            rest = [fp.pads[i].GetBoundingBox() for i in range(len(fp.pads))]
+            m = from_mm(0.25)
+            rects = []
+            for g in groups:
+                b = _merge([(rest[i].GetLeft(), rest[i].GetTop(), rest[i].GetRight(), rest[i].GetBottom()) for i in g])
+                rects.append('\t(fp_rect (start %s %s) (end %s %s) (stroke (width 0.05) (type default)) (fill no) (layer "F.CrtYd"))'
+                             % (fpmodel._mm(b[0] - m), fpmodel._mm(b[1] - m), fpmodel._mm(b[2] + m), fpmodel._mm(b[3] + m)))
+            lib = lib.rstrip()[:-1].rstrip() + "\n" + "\n".join(rects) + "\n)\n"
+            added += 1
+            if len(groups) > 1:
+                split.append(name)
+        with open(os.path.join(pretty, name + ".kicad_mod"), "w") as f:
+            f.write(lib)
+        made += 1
+    print(json.dumps({"footprints": made, "courtyards_added": added, "courtyards_split": split}))
+
+
+def _at_rest(text, node, name, version):
+    """One footprint from a board as a library footprint: unturned and off the board, with no nets, path or sheet."""
+    import fpmodel
+    from scripts.kicad_pcb import footprint_pose, to_local
+    fx, fy, rot = footprint_pose(_plain(text, node))
+    body = text[node[1]:node[2]]
+    base = node[1]
+    edits = []
+    head = re.match(r'\(footprint\s+("(?:[^"\\]|\\.)*")', body)
+    edits.append((base + head.start(1), base + head.end(1), fpmodel._quote(name) + ' (version %s) (generator "edaloop")' % version))
+    for c in node[3]:
+        if c[0] in ("at", "transform", "path", "sheetname", "sheetfile", "uuid"):
+            edits.append((c[1], c[2], ""))
+        elif c[0] in ("property", "fp_text"):
+            at = next((k for k in c[3] if k[0] == "at"), None)
+            if at is not None:
+                edits.append((at[1], at[2], fpmodel._turned_at(text, at, -rot)))
+        elif c[0] == "pad":
+            at = next(k for k in c[3] if k[0] == "at")
+            edits.append((at[1], at[2], fpmodel._turned_at(text, at, -rot)))
+            for k in c[3]:
+                if k[0] == "net":
+                    edits.append((k[1], k[2], ""))
+        elif c[0] == "zone":
+            for k in c[3]:
+                if k[0] == "filled_polygon":
+                    edits.append((k[1], k[2], ""))
+            for xy in fpmodel._all(c, "xy"):
+                x, y = (float(v) for v in text[xy[1] + 1:xy[2] - 1].split()[1:3])
+                lx, ly = to_local(fx, fy, rot, x, y)
+                edits.append((xy[1], xy[2], "(xy %s %s)" % (fpmodel._mm(lx * 1e6), fpmodel._mm(ly * 1e6))))
+    out = text
+    for a, b, new in sorted(edits, reverse=True):
+        out = out[:a] + new + out[b:]
+    end = node[2] + sum(len(new) - (b - a) for a, b, new in edits)
+    return out[node[1]:end].replace("\n\t", "\n") + "\n"
+
+
+def _plain(text, node):
+    """A span node as the plain lists footprint_pose reads: its tag and its children's tags and atoms."""
+    from scripts.kicad_pcb import sexp
+    return sexp(text[node[1]:node[2]])[0]
+
+
 def _write_beside(src, dst, text):
     """Write a board's text to `dst` with the source's project beside it, as `save` does."""
     with open(dst, "w") as f:
@@ -643,7 +887,8 @@ def plane_coverage(src, nets_csv, layer_name, out):
 
 OPS = {"export_dsn": export_dsn, "import_ses": import_ses, "add_locked": add_locked, "fill_zones": fill_zones,
        "board_facts": board_facts, "add_vias": add_vias, "remove_vias": remove_vias, "plane_coverage": plane_coverage,
-       "z_coupon": z_coupon, "add_voids": add_voids, "remove_tracks": remove_tracks, "strip_inner_pads": strip_inner_pads, "place_silk": place_silk}
+       "z_coupon": z_coupon, "add_voids": add_voids, "remove_tracks": remove_tracks, "strip_inner_pads": strip_inner_pads, "place_silk": place_silk,
+       "build_board": build_board, "export_footprints": export_footprints}
 
 
 def main(argv):
