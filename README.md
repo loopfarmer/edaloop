@@ -205,7 +205,7 @@ and `ipc` force one. `doctor` says which it found.
 Until kicad-python 0.10 is on PyPI, build it from a checkout of
 [kicad-python](https://gitlab.com/kicad/code/kicad-python) whose `kicad` submodule is at your KiCad's commit, with
 `protoc` 25 or older (`grpcio-tools` 1.62 has one), and install it into edaloop's environment with
-`uv pip install -e <checkout>`.
+`uv pip install -e <checkout>`. `uv sync` removes it again, since edaloop can't declare it yet.
 
 Placement runs on `fpmodel.py`, which reads footprints from their libraries and answers what placement asks of
 them (pads and courtyards at a pose) as `pcbnew` does, with no KiCad. The board is then written as text, KiCad fills
@@ -214,9 +214,13 @@ build. Footprints never go through the API's `UpdateItems`, which on the nightly
 the wrong angle. On every board tried, placement matches `pcbnew`'s to the micrometre, except where `pcbnew`'s own
 nanometre rounding decides whether two courtyards exactly the clearance apart touch.
 
-Not yet on the IPC API: the EAGLE export, which reads the whole board through `pcbnew` and refuses on KiCad 11. KiCad 11
-also writes a footprint's place as `(transform ...)` rather than `(at ...)`. edaloop's readers take both, and a board
-goes to KiCadRoutingTools and to circuitRF, which read only `(at ...)`, as a copy written back that way.
+The EAGLE export reads the board through `boardread.py`, a read-only parse of the file, where there is no `pcbnew`.
+Footprints come first from the libraries installed with the `kicad-cli` edaloop is set up with, so a board built for
+KiCad 11 takes KiCad 11's footprints when KiCad 10 is installed too.
+
+KiCad 11 also writes a footprint's place as `(transform ...)` rather than `(at ...)`. edaloop's readers and boardhand
+take both, and a board goes to KiCadRoutingTools and to circuitRF, which read only `(at ...)`, as a copy written back
+that way.
 
 ### Running in Docker
 
