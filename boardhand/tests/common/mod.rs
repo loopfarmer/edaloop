@@ -252,13 +252,7 @@ pub fn kicad_ipc(snippet: &str, args: &[&Path]) -> Option<String> {
         println!("NOTICE: kipy is absent in {py}, skipping the IPC check");
         return None;
     }
-    let out = Command::new(&py)
-        .arg("-c")
-        .arg(snippet)
-        .args(args)
-        .env("EDALOOP_KICAD_CLI", kicad_cli())
-        .output()
-        .unwrap();
+    let out = Command::new(&py).arg("-c").arg(snippet).args(args).env("EDALOOP_KICAD_CLI", kicad_cli()).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "kicad_ipc failed: {}\n{stdout}", String::from_utf8_lossy(&out.stderr));
     Some(stdout)
