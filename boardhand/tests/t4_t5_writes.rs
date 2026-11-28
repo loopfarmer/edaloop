@@ -356,7 +356,7 @@ fn footprint_zone_moves_with_its_footprint() {
     let dir = work("t5_zone");
     let Some(board) = copy_fixture(small(), &dir) else { return };
     if is_kicad11_board(&board) || !Path::new(kicad_py()).exists() {
-        let ipc = "import os,sys\nfrom kipy import KiCad\nfrom kipy.board_types import Zone\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board()\n for f in b.get_footprints():\n  zs=[i for i in f.definition.items if isinstance(i,Zone)]\n  if zs:\n   bb=b.get_item_bounding_box(zs[0])\n   print(f.reference_field.text.value,f.position.x,f.position.y,bb.pos.x,bb.pos.y,bb.size.x,bb.size.y)\n   break\nfinally:\n k.close()";
+        let ipc = "import os,sys\nfrom kipy import KiCad\nfrom kipy.board_types import Zone\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board()\n for f in b.get_footprints():\n  zs=[i for i in f.definition.items if isinstance(i,Zone)]\n  if zs:\n   bb=b.get_item_bounding_box(zs[0])\n   if abs(bb.pos.x+bb.size.x//2-f.position.x)<5_000_000 and abs(bb.pos.y+bb.size.y//2-f.position.y)<5_000_000:\n    print(f.reference_field.text.value,f.position.x,f.position.y,bb.pos.x,bb.pos.y,bb.size.x,bb.size.y)\n    break\nfinally:\n k.close()";
         let Some(before) = kicad_ipc(ipc, &[&board]) else { return };
         let line = before.lines().rfind(|l| !l.is_empty()).unwrap_or("");
         if line.is_empty() {
