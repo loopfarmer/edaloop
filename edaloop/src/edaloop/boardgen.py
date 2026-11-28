@@ -40,6 +40,21 @@ def standard_libs() -> list[str]:
         if d not in out:
             out.append(d)
     return out
+def _kicad_footprint_var() -> str:
+    """KiCad's standard footprint-library environment variable (e.g. KICAD10_FOOTPRINT_DIR or KICAD11_FOOTPRINT_DIR)."""
+    found = shutil.which(toolchain.paths()["kicad_cli"])
+    if found:
+        root = Path(found).resolve().parent.parent
+        for rel in ("SharedSupport/template/fp-lib-table", "share/kicad/template/fp-lib-table",
+                    "share/kicad-nightly/template/fp-lib-table"):
+            tpl = root / rel
+            if tpl.is_file():
+                m = re.search(r"\$\{(KICAD\d+_FOOTPRINT_DIR)\}", tpl.read_text(errors="replace"))
+                if m:
+                    return m.group(1)
+    return f"KICAD{toolchain.kicad_major()}_FOOTPRINT_DIR"
+
+
 # Stand-ins for the shipped testbenches' own land patterns, so they build with nothing fetched. Searched after any folder the
 # caller names, so a real library of the same name wins. data/footprints/README.md says what each one is and what it assumes.
 BUNDLED_FOOTPRINTS = Path(__file__).with_name("data") / "footprints"
@@ -257,7 +272,8 @@ def project_yaml(bench: dict, name: str, chains: str) -> dict:
                               "min": 15}],
             # The RF layout rules' limits, which placement builds to and the rf_layout check measures. Only what the description sets.
             **({"rf_layout": dict(cfg["rf_layout"])} if cfg.get("rf_layout") else {}),
-            "gate": gate, "waivers": []}
+            **({"hdi": dict(cfg["hdi"])} if cfg.get("hdi") else {}),
+            "gate": [*gate, *(["hdi"] if cfg.get("hdi") and "hdi" not in gate else [])], "waivers": []}
 
 
 def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = False) -> dict:
@@ -279,35 +295,45 @@ def make(bench_path: Path, out: Path, footprint_dirs: list[Path], quick: bool = 
     def say(step: str) -> None:
         # Routing and the checks can take many minutes. Progress goes to stderr, so a --json result on stdout stays clean.
         print(f"  make: {step} ({time.monotonic() - started:.0f} s in)", file=sys.stderr, flush=True)
-    say("build")
-    try:
-        built = build(bench_path, out, footprint_dirs)
-    except BuildError as e:
-        return {"made": False, "stopped_at": "build", "refused": str(e), **({"detail": e.detail} if e.detail else {})}
-    p = Project(out)
-    say("ground")
-    steps = {"build": {k: built[k] for k in ("parts", "span_mm", "outline_mm", "unlisted_pads", "stand_in_footprints")}, "ground": ground.pad_vias(p)}
-    say("route")
-    rf, cfg = p.section("rf"), p.section("route")
-    routed = route_classes.route(p.board, p.root / rf["chains"], p.section("power").get("rails", []), p.root / ".edaloop" / "route_classes",
-                                 list(cfg.get("keep_nets") or ["GND"]), max_rise_c=float(p.section("power").get("max_rise_c", 10)),
-                                 rf_target_ohm=float((rf.get("impedance") or {}).get("target", 50)),
-                                 reference_layers=tuple(cfg.get("reference_layers") or ("In1.Cu",)),
-                                 power_layers=tuple(cfg["power_layers"]) if cfg.get("power_layers") else None,
-                                 layer_costs=cfg.get("layer_costs"))
-    (out / "route.log").write_text(json.dumps(routed, indent=1))
-    steps["route"] = {"final_drc": routed.get("final_drc"), "rf_width": routed["rf_width_loop"][-1], "stopped_at": routed.get("stopped_at")}
-    if routed.get("stopped_at") and routed.get("steps"):
-        # Why it stopped, from the class it stopped at, so that the caller doesn't have to open route.log.
-        last = routed["steps"][-1]
-        steps["route"]["stopped_because"] = {"class": last.get("class"), "drc": last.get("drc"), "unreached": last.get("unreached")}
-    if routed.get("stopped_at"):
-        return {"made": False, "stopped_at": "route", "steps": steps}
-    say("finish")
-    steps["finish"] = ground.finish(p)
-    p = Project(out)
-    steps["checks"] = controller.run_all(p, skip=("em_crosscheck",) if quick else (), progress=lambda check: say(f"check {check}"))
-    steps["review"] = checks.review_pack(p)
+    with toolchain.ipc_session():
+        say("build")
+        try:
+            built = build(bench_path, out, footprint_dirs)
+        except BuildError as e:
+            return {"made": False, "stopped_at": "build", "refused": str(e), **({"detail": e.detail} if e.detail else {})}
+        p = Project(out)
+        say("ground")
+        steps = {"build": {k: built[k] for k in ("parts", "span_mm", "outline_mm", "unlisted_pads", "stand_in_footprints")}, "ground": ground.pad_vias(p)}
+        say("route")
+        rf, cfg = p.section("rf"), p.section("route")
+        routed = route_classes.route(p.board, p.root / rf["chains"], p.section("power").get("rails", []), p.root / ".edaloop" / "route_classes",
+                                     list(cfg.get("keep_nets") or ["GND"]), max_rise_c=float(p.section("power").get("max_rise_c", 10)),
+                                     rf_target_ohm=float((rf.get("impedance") or {}).get("target", 50)),
+                                     reference_layers=tuple(cfg.get("reference_layers") or ("In1.Cu",)),
+                                     power_layers=tuple(cfg["power_layers"]) if cfg.get("power_layers") else None,
+                                     layer_costs=cfg.get("layer_costs"))
+        (out / "route.log").write_text(json.dumps(routed, indent=1))
+        steps["route"] = {"final_drc": routed.get("final_drc"), "rf_width": routed["rf_width_loop"][-1], "stopped_at": routed.get("stopped_at")}
+        if routed.get("stopped_at") and routed.get("steps"):
+            # Why it stopped, from the class it stopped at, so that the caller doesn't have to open route.log.
+            last = routed["steps"][-1]
+            steps["route"]["stopped_because"] = {"class": last.get("class"), "drc": last.get("drc"), "unreached": last.get("unreached")}
+        if routed.get("stopped_at"):
+            return {"made": False, "stopped_at": "route", "steps": steps}
+        loop = routed.get("rf_width_loop") or []
+        final_w = loop[-1].get("width_mm") if loop else None
+        if isinstance(final_w, (int, float)) and not isinstance(final_w, bool):
+            new_um = int(round(float(final_w) * 1000))
+            proj_cfg = yaml.safe_load((out / "edaloop.yaml").read_text())
+            em_cfg = proj_cfg.setdefault("em", {})
+            if em_cfg.get("width_um") != new_um:
+                em_cfg["width_um"] = new_um
+                (out / "edaloop.yaml").write_text(yaml.safe_dump(proj_cfg, sort_keys=False, width=120))
+        say("finish")
+        steps["finish"] = ground.finish(p)
+        p = Project(out)
+        steps["checks"] = controller.run_all(p, skip=("em_crosscheck",) if quick else (), progress=lambda check: say(f"check {check}"))
+        steps["review"] = checks.review_pack(p)
     return {"made": True, "ready_to_release": steps["review"]["ready_to_release"], "next_action": controller.next_action(p), "steps": steps}
 
 
@@ -379,8 +405,9 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
               + ". Give the real library with --footprints before building a board to fabricate", file=sys.stderr, flush=True)
     # KiCad's own libraries are listed through its path variable, not copied. Without them the project names
     # footprints it can't find, and ERC reports every one, though the board was placed from them.
+    fp_var = _kicad_footprint_var()
     for lib in sorted(libs - copied):
-        table.append(f'  (lib (name "{lib}")(type "KiCad")(uri "${{KICAD10_FOOTPRINT_DIR}}/{lib}.pretty")(options "")(descr "KiCad standard library"))')
+        table.append(f'  (lib (name "{lib}")(type "KiCad")(uri "${{{fp_var}}}/{lib}.pretty")(options "")(descr "KiCad standard library"))')
     (out / "fp-lib-table").write_text("(fp_lib_table\n  (version 7)\n" + "\n".join(table) + "\n)\n")
     sheets = drawing.project_sheets(bench, name)
     for filename, text in sheets["files"].items():
@@ -396,7 +423,7 @@ def _write(bench: dict, name: str, bench_path: Path, out: Path, footprint_dirs: 
     seed.write_text(seed_board(bench))
     spec = out / ".build_spec.json"
     spec.write_text(json.dumps({
-        "parts": bench["parts"], "chain": [*bench["chain"]], "ports": bench.get("ports") or [], "nets": bench["nets"], "pins": drawing.pin_map(bench), "open_pins": bench.get("open_pins") or [], "layout": bench["layout"],
+        "parts": bench["parts"], "chain": [*bench["chain"]], "extra_chains": [*(bench.get("extra_chains") or [])], "ports": bench.get("ports") or [], "nets": bench["nets"], "pins": drawing.pin_map(bench), "open_pins": bench.get("open_pins") or [], "layout": bench["layout"],
         "rf_line_width_mm": bench["rf_line_width_mm"], "net_width": bench["layout"].get("net_width") or {},
         "rf_layout": {**rf_rules.DEFAULTS, **((bench.get("project") or {}).get("rf_layout") or {})},
         "outline": bench.get("outline_mm"), "lib_dirs": [str(out), *[str(x) for x in footprint_dirs], *standard_libs()],

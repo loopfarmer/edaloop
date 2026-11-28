@@ -25,6 +25,7 @@ pub fn large() -> &'static str {
 }
 pub const KICAD_CLI_VAR: &str = "BOARDHAND_TEST_KICAD_CLI";
 pub const KICAD_PY_VAR: &str = "BOARDHAND_TEST_KICAD_PY";
+pub const IPC_PY_VAR: &str = "BOARDHAND_TEST_IPC_PY";
 
 fn tool_path(var: &str, default: &str) -> &'static str {
     Box::leak(std::env::var(var).unwrap_or_else(|_| default.to_string()).into_boxed_str())
@@ -38,6 +39,36 @@ pub fn kicad_cli() -> &'static str {
 
 pub fn kicad_py() -> &'static str {
     tool_path(KICAD_PY_VAR, "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3.9")
+}
+
+pub fn ipc_py() -> String {
+    if let Ok(v) = std::env::var(IPC_PY_VAR) {
+        return v;
+    }
+    let venv = Path::new(env!("CARGO_MANIFEST_DIR")).join("../edaloop/.venv/bin/python");
+    if venv.exists() {
+        return venv.to_string_lossy().to_string();
+    }
+    "python3".to_string()
+}
+
+pub fn is_kicad11_board(board: &Path) -> bool {
+    let Ok(bytes) = fs::read(board) else { return false };
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
+    let Some(pos) = head.find("(version ") else { return false };
+    let rest = &head[pos + 9..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u32>().is_ok_and(|v| v >= 20260301)
+}
+
+pub fn has_api_server() -> bool {
+    if !Path::new(kicad_cli()).exists() {
+        return false;
+    }
+    Command::new(kicad_cli())
+        .args(["api-server", "--help"])
+        .output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("IPC API server"))
 }
 
 pub fn work(name: &str) -> PathBuf {
@@ -193,16 +224,60 @@ pub fn script(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Run a Python snippet with KiCad's own pcbnew, if it's installed.
+/// Run a Python snippet with KiCad's own pcbnew, if it's installed and can read the given board version.
 pub fn pcbnew(snippet: &str, args: &[&Path]) -> Option<String> {
     if !Path::new(kicad_py()).exists() {
         println!("NOTICE: KiCad's Python is absent, skipping the pcbnew check");
+        return None;
+    }
+    if args.iter().any(|p| is_kicad11_board(p)) {
+        println!("NOTICE: skipping KiCad 10 pcbnew check on KiCad 11 board format");
         return None;
     }
     let out = Command::new(kicad_py()).arg("-I").arg("-c").arg(snippet).args(args).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "pcbnew failed: {}\n{stdout}", String::from_utf8_lossy(&out.stderr));
     Some(stdout)
+}
+
+/// Run a Python snippet through KiCad 11's headless IPC API (`kipy`), if `api-server` and `kipy` are available.
+pub fn kicad_ipc(snippet: &str, args: &[&Path]) -> Option<String> {
+    if !has_api_server() {
+        println!("NOTICE: kicad-cli api-server is absent, skipping the IPC check");
+        return None;
+    }
+    let py = ipc_py();
+    let probe = Command::new(&py).args(["-c", "import kipy"]).output();
+    if !probe.is_ok_and(|o| o.status.success()) {
+        println!("NOTICE: kipy is absent in {py}, skipping the IPC check");
+        return None;
+    }
+    let out = Command::new(&py).arg("-c").arg(snippet).args(args).env("EDALOOP_KICAD_CLI", kicad_cli()).output().unwrap();
+    for p in args {
+        if let (Some(parent), Some(stem)) = (p.parent(), p.file_stem().and_then(|s| s.to_str())) {
+            for ext in ["kicad_pro.lck", "kicad_pcb.lck"] {
+                let lck = parent.join(format!("~{stem}.{ext}"));
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while lck.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if lck.exists() && p.components().any(|c| c.as_os_str() == "fixtures") {
+                    let _ = fs::remove_file(&lck);
+                }
+            }
+        }
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "kicad_ipc failed: {}\n{stdout}", String::from_utf8_lossy(&out.stderr));
+    Some(stdout)
+}
+
+/// Run the KiCad 11 IPC snippet for KiCad 11 boards (or when KiCad 10 pcbnew is absent), else the SWIG pcbnew snippet.
+pub fn inspect_board_py(pcbnew_snippet: &str, ipc_snippet: &str, args: &[&Path]) -> Option<String> {
+    if args.iter().any(|p| is_kicad11_board(p)) || !Path::new(kicad_py()).exists() {
+        return kicad_ipc(ipc_snippet, args);
+    }
+    pcbnew(pcbnew_snippet, args)
 }
 
 /// KiCad itself loads this board and writes a DRC report for it. Returns the report.

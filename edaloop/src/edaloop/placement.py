@@ -43,6 +43,7 @@ DEFAULTS = {
     "track_pitch_mm": 0.4,          # track plus clearance, for a tile's supply
     "max_utilisation": 1.0,         # RUDY demand over supply before a tile is reported
     "ground_nets": ["GND"],         # nets the pours connect; never routed as tracks
+    "search_cap": None,             # optional max heap pops per A* search (None = uncapped)
     "cost_weights": {"rf_excess_mm": 1.0, "escape": 5.0, "rf_crossing": 0.2, "limiter_crossing": 5.0, "overflow": 2.0},
 }
 
@@ -163,7 +164,7 @@ class _Grid:
                 return False
         return True
 
-    def path(self, start, goals) -> list | None:
+    def path(self, start, goals, search_cap: int | None = None) -> list | None:
         """Octile A* from a start cell to any goal cell, then pulled straight between corners that can see each other."""
         goals = set(goals)
         if not goals:
@@ -178,7 +179,11 @@ class _Grid:
         steps = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
                  (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2))]
         end = None
+        pops = 0
         while heap:
+            pops += 1
+            if search_cap and pops > search_cap:
+                return None
             _, d, c = heapq.heappop(heap)
             if d > dist.get(c, math.inf):
                 continue
@@ -236,7 +241,7 @@ def _net_paths(board, net, rows, width, cfg, layer_pads, laid=()) -> dict:
         for pa, pz, _, _ in ends:
             goal_mask = (_rect_distance(X, Y, pz) < 1e-9) & grid.free
             goals = {tuple(int(v) for v in g) for g in zip(*np.nonzero(goal_mask))} or {grid.cell(pz.x, pz.y)}
-            pts = grid.path(grid.cell(pa.x, pa.y), goals | tree)
+            pts = grid.path(grid.cell(pa.x, pa.y), goals | tree, search_cap=cfg.get("search_cap"))
             if not pts:
                 lines = None
                 break

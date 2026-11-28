@@ -5192,3 +5192,442 @@ def test_footprints_come_first_from_the_kicad_edaloop_is_set_up_with(monkeypatch
     assert libs[1:] == boardgen.STANDARD_LIBS
     _toolchain_with(monkeypatch, tmp_path, kicad_cli=str(tmp_path / "absent-kicad-cli"))
     assert boardgen.standard_libs() == boardgen.STANDARD_LIBS
+
+
+# ----------------------------------------------------------------------------------------------- P0 fixes
+
+def test_toolchain_config_env_override_and_auto_ipc(monkeypatch, tmp_path):
+    cfg = tmp_path / "custom_tc.yaml"
+    cli = tmp_path / "kicad-cli"
+    cli.write_text("#!/bin/sh\necho 'KiCad 11.0.0'\n")
+    cfg.write_text(f"kicad_cli: {cli}\nkicad_backend: auto\nipc_python: python3\n")
+    monkeypatch.setenv("EDALOOP_TOOLCHAIN_CONFIG", str(cfg))
+    assert toolchain.config_path() == cfg
+    assert toolchain.paths()["kicad_cli"] == str(cli)
+    monkeypatch.setattr(toolchain, "has_api_server", lambda c: c == str(cli))
+    monkeypatch.setattr(toolchain, "_imports", lambda py, mod: mod in ("pcbnew", "kipy"))
+    assert toolchain.kicad_backend() == "ipc"
+    monkeypatch.setattr(toolchain, "_imports", lambda py, mod: mod == "pcbnew")
+    assert toolchain.kicad_backend() == "swig"
+
+
+def test_doctor_board_edits_no_longer_warns_about_eagle(monkeypatch, tmp_path):
+    _toolchain_with(monkeypatch, tmp_path, kicad_backend="ipc")
+    monkeypatch.setattr(toolchain, "_imports", lambda py, mod: mod == "kipy")
+    monkeypatch.setattr(toolchain, "has_api_server", lambda c: True)
+    probe = toolchain._board_edits(toolchain.paths())
+    assert probe.ok and "EAGLE" not in probe.detail
+
+
+def test_kicad_footprint_var_reads_template_and_falls_back(monkeypatch, tmp_path):
+    from edaloop import boardgen
+    app = tmp_path / "KiCad11.app" / "Contents"
+    (app / "MacOS").mkdir(parents=True)
+    (app / "SharedSupport" / "template").mkdir(parents=True)
+    (app / "SharedSupport" / "template" / "fp-lib-table").write_text('(lib (uri "${KICAD11_FOOTPRINT_DIR}/R.pretty"))')
+    cli = app / "MacOS" / "kicad-cli"
+    cli.write_text("#!/bin/sh\necho 11.0.0\n")
+    cli.chmod(0o755)
+    _toolchain_with(monkeypatch, tmp_path, kicad_cli=str(cli))
+    assert boardgen._kicad_footprint_var() == "KICAD11_FOOTPRINT_DIR"
+    _toolchain_with(monkeypatch, tmp_path, kicad_cli=str(tmp_path / "missing"))
+    assert boardgen._kicad_footprint_var() == "KICAD10_FOOTPRINT_DIR"
+
+
+def test_boardgen_make_syncs_em_width_um_and_build_spec_keeps_extra_chains(monkeypatch, tmp_path):
+    import subprocess
+
+    import yaml
+
+    from edaloop import boardgen, checks, controller, ground, route_classes
+    out = tmp_path / "proj"
+    bench = tmp_path / "bench.yaml"
+    bench.write_text(yaml.safe_dump({
+        "name": "demo",
+        "band_mhz": [400, 900],
+        "rf_line_width_mm": 0.52,
+        "stackup": {"copper_um": [35, 35], "dielectric_mm": [1.5], "epsilon_r": 4.4},
+        "parts": {
+            "J1": {"value": "SMA", "mpn": "SMA"},
+            "R1": {"value": "0R", "mpn": "R"},
+            "J2": {"value": "SMA", "mpn": "SMA"},
+        },
+        "nets": {"RF1": ["J1.1", "R1.1"], "RF2": ["R1.2", "J2.1"], "GND": ["J1.2", "J2.2"]},
+        "chain": [["RF1", "J1.1", "R1.1"]],
+        "extra_chains": [["RF2", "R1.2", "J2.1"]],
+        "layout": {"footprints": {"J1": "edaloop:SMA", "R1": "Resistor_SMD:R_0402_1005Metric", "J2": "edaloop:SMA"},
+                   "axis": "x"},
+        "project": {"rails": []},
+        "spice": {"models": {}, "bench": {"name": "dc", "stimulus": [], "analysis": [], "measure": []}},
+    }))
+    captured_spec = {}
+
+    monkeypatch.setattr(boardgen, "unresolved_footprints", lambda *a, **k: [])
+    monkeypatch.setattr(boardgen, "stand_ins", lambda *a, **k: [])
+    monkeypatch.setattr(boardgen.drawing, "project_sheets", lambda b, n: {"files": {f"{n}.kicad_sch": "(kicad_sch)"}, "library": "(kicad_symbol_lib)", "uuids": {k: k for k in b["parts"]}, "placed": {}, "sheets": []})
+    monkeypatch.setattr(boardgen.drawing, "pin_map", lambda b: {r: {} for r in b["parts"]})
+    monkeypatch.setattr(boardgen.drawing, "check_netlist", lambda *a, **k: [])
+
+    def fake_kicad_op(op, *args, **kw):
+        if op == "build_board":
+            captured_spec.update(json.loads(Path(args[1]).read_text()))
+            Path(args[2]).write_text("(kicad_pcb)")
+        return subprocess.CompletedProcess([], 0, '{"parts": 3, "unlisted_pads": 0, "set_square": [], "span_mm": [0,0,10,10], "outline_mm": [10,10]}', "")
+
+    def fake_cli(cmd, **kw):
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_text("<export/>")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(boardgen.toolchain, "missing_for_make", lambda: [])
+    monkeypatch.setattr(boardgen.toolchain, "kicad_op", fake_kicad_op)
+    monkeypatch.setattr(boardgen.toolchain, "run", fake_cli)
+    monkeypatch.setattr(ground, "pad_vias", lambda p: {"vias": 2})
+    monkeypatch.setattr(ground, "finish", lambda p: {"vias": 4})
+    monkeypatch.setattr(route_classes, "route", lambda *a, **k: {"final_drc": 0, "rf_width_loop": [{"width_mm": 0.474, "z0_ohm": 50.1}], "stopped_at": None})
+    monkeypatch.setattr(controller, "run_all", lambda *a, **k: [])
+    monkeypatch.setattr(controller, "next_action", lambda p: {"action": "release"})
+    monkeypatch.setattr(checks, "review_pack", lambda p: {"ready_to_release": True})
+
+    res = boardgen.make(bench, out, [], quick=True)
+    assert res["made"] is True
+    assert captured_spec["extra_chains"] == [["RF2", "R1.2", "J2.1"]]
+    proj_yaml = yaml.safe_load((out / "edaloop.yaml").read_text())
+    assert proj_yaml["em"]["width_um"] == 474
+
+
+def test_ground_maker_patterns_matches_value_and_finish_uses_rf_layout_pitch(tmp_path, monkeypatch):
+    import yaml
+
+    from edaloop import ground
+    pads = [_pad("U1", "1", "A", 0, 5), _pad("U1", "6", "GND", 2, 5), _pad("U1", "3", "GND", 0, 7), _pad("U1", "4", "B", 2, 7)]
+    bench = {"parts": {"U1": {"value": "RLM-63-2W+"}}}
+    got = ground.maker_patterns(bench, {"pads": pads}, {})
+    assert got["counts"]["U1.6"] == 2
+    assert (1.0, 5.0) in [at for _, at in got["under"]]
+
+    # ground.finish forwards rf_layout.fence_pitch_mm rather than ignoring it.
+    (tmp_path / "edaloop.yaml").write_text("name: p\nboard: p.kicad_pcb\nrf: {chains: c.yaml}\nrf_layout: {fence_pitch_mm: 2.2}\n")
+    (tmp_path / "c.yaml").write_text("chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n")
+    (tmp_path / "p.kicad_pcb").write_text("(kicad_pcb (version 20241229)\n (layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal))\n (net 0 \"\") (net 1 \"RF\") (net 2 \"GND\")\n (segment (start 0 0) (end 10 0) (width 0.3) (layer \"F.Cu\") (net \"RF\"))\n)")
+    (tmp_path / "board_description.yaml").write_text(yaml.safe_dump({"name": "p", "band_mhz": [400, 900], "rf_line_width_mm": 0.3, "chain": [["RF", "J1.1", "J2.1"]], "layout": {}}))
+    p = Project(tmp_path)
+    seen = {}
+
+    def fake_op(*args, **kwargs):
+        if args[0] == "fill_zones":
+            shutil.copy(args[1], args[2])
+        return {"changed": 0, "hidden": []}
+
+    monkeypatch.setattr(ground, "_facts", lambda b, w: {"pads": [], "courtyards": [], "keepouts": [], "outline": [0, -5, 10, 5]})
+    monkeypatch.setattr(ground, "fill_fence", lambda field, board, facts, nets, pitch, placed, **kw: seen.setdefault("pitch", pitch) or 0)
+    monkeypatch.setattr(ground, "_write_vias", lambda *a, **k: None)
+    monkeypatch.setattr(ground, "_prune", lambda *a, **k: {"removed": 0, "errors": 0, "unconnected": 0})
+    monkeypatch.setattr(ground, "_op", fake_op)
+    ground.finish(p, as_is=True)
+    assert seen["pitch"] == pytest.approx(2.2)
+
+
+def test_em_crosscheck_spread_uses_agreeing_when_outlier_diagnosed(monkeypatch, tmp_path):
+    (tmp_path / "c.yaml").write_text("chains:\n  - {net: RF, entry: J1.1, exit: J2.1}\n")
+    p = make(tmp_path, "rf: {chains: c.yaml}\nem:\n  width_um: 500\n  length_um: 10000\n  solvers:\n    - {solver: emerge, quality: Accurate}\n    - {solver: palace, quality: Standard}\n    - {solver: openems, cells_per_wavelength: 40}\n")
+    monkeypatch.setattr(checks.toolchain, "em_solvers_missing", lambda s: [])
+    monkeypatch.setattr(checks, "_em_workspace", lambda *a: tmp_path)
+    vals = {"emerge_Accurate": (49.8, 3.25, 0.1), "palace_Standard": (50.1, 3.26, 0.1), "openems_40": (54.0, 3.25, 0.1)}
+    monkeypatch.setattr(checks, "_em_run", lambda p, cfg, ws, label, layout, s, **kw: (tmp_path / f"{label}.s2p", 0.1))
+    monkeypatch.setattr(checks, "_zc", lambda s2p, *a: vals[s2p.stem.split(".")[0]])
+    monkeypatch.setattr(checks, "_em_reference", lambda *a: {"z0_ohm": 50.0})
+    ev = checks.run_check(p, "em_crosscheck")
+    assert ev.metrics["diagnosis"]["verdict"] == "outlier"
+    assert ev.metrics["spread_pct"] < 1.0
+    assert ev.metrics["all_spread_pct"] > 5.0
+
+
+def test_kicad_ipc_courtyard_box_reads_back_courtyard():
+    pytest.importorskip("kipy")
+    from kipy.proto.board.board_types_pb2 import BoardLayer
+
+    from edaloop import kicad_ipc_ops as ipc
+
+    class Box:
+        def __init__(self, x, y, w, h):
+            self.pos = type("V", (), {"x": x, "y": y})()
+            self.size = type("V", (), {"x": w, "y": h})()
+
+    def shape(lyr):
+        stroke = type("S", (), {"width": 100_000})()
+        attrs = type("A", (), {"stroke": stroke})()
+        return type("Sh", (), {"layer": lyr, "attributes": attrs})()
+
+    fp = type("FP", (), {
+        "layer": BoardLayer.BL_B_Cu,
+        "definition": type("D", (), {"shapes": [shape(BoardLayer.BL_B_CrtYd)], "pads": []})(),
+    })()
+    board = type("B", (), {"get_item_bounding_box": lambda self, s: Box(1_000_000, 2_000_000, 4_000_000, 6_000_000)})()
+    assert ipc._courtyard_box(board, fp) == (1_050_000, 2_050_000, 4_950_000, 7_950_000)
+
+
+# ----------------------------------------------------------------------------------------------- P1 fixes
+
+def test_ipc_session_noop_on_swig_and_reentrant(monkeypatch):
+    _toolchain_with(monkeypatch, Path("/tmp"), kicad_backend="swig")
+    with toolchain.ipc_session() as sock:
+        assert sock is None
+    monkeypatch.setenv("EDALOOP_IPC_SOCKET", "ipc:///tmp/already.sock")
+    monkeypatch.setattr(toolchain, "kicad_backend", lambda: "ipc")
+    with toolchain.ipc_session() as sock:
+        assert sock is None
+
+
+def test_ipc_session_live_multi_op_leaves_no_process(tmp_path):
+    import subprocess
+    import sys
+
+    cli = _kicad_11_cli()
+    if not cli:
+        pytest.skip("KiCad 11 IPC not installed")
+    cfg = tmp_path / "tc.yaml"
+    cfg.write_text(f"kicad_cli: {cli}\nkicad_backend: ipc\nipc_python: {sys.executable}\n")
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text(
+        PCB.rstrip().removesuffix(")")
+        + ' (gr_rect (start 0 0) (end 20 10) (stroke (width 0.1) (type solid)) (fill no) (layer "Edge.Cuts")))\n'
+    )
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    env = {**os.environ, "EDALOOP_TOOLCHAIN_CONFIG": str(cfg)}
+    code = (
+        "from edaloop import toolchain\n"
+        "with toolchain.ipc_session() as u:\n"
+        "  assert u and u.startswith('ipc://')\n"
+        f"  r1 = toolchain.kicad_op('board_facts', {str(board)!r}, {str(tmp_path / 'f1.json')!r})\n"
+        f"  r2 = toolchain.kicad_op('fill_zones', {str(board)!r}, {str(tmp_path / 'out.kicad_pcb')!r})\n"
+        "  assert r1.returncode == 0 and r2.returncode == 0\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_global_coupon_cache_reuses_identical_coupon_across_projects(monkeypatch, tmp_path):
+    import subprocess
+
+    cache_root = tmp_path / "coupon_cache"
+    monkeypatch.setenv("EDALOOP_COUPON_CACHE", str(cache_root))
+    (tmp_path / "p1").mkdir()
+    (tmp_path / "p2").mkdir()
+    p1 = make(tmp_path / "p1")
+    p2 = make(tmp_path / "p2")
+    ws1 = tmp_path / "ws1"
+    ws2 = tmp_path / "ws2"
+    for ws in (ws1, ws2):
+        (ws / "em").mkdir(parents=True)
+        (ws / "results").mkdir(parents=True)
+    calls = []
+
+    def fake_crf(cmd, cwd=None, **kw):
+        calls.append(Path(cwd))
+        (Path(cwd) / "results" / "emerge_Accurate.1.s2p").write_text("# Hz S RI R 50\n3e9 0.9 0 0.1 0 0.1 0 0.9 0\n")
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(checks.toolchain, "run", fake_crf)
+    cfg = {"length_um": 10000, "width_um": 500, "gap_um": 300, "side_um": 3000,
+           "signal_layer": "F.Cu", "ground_layer": "In1.Cu", "fmin_ghz": 1, "fmax_ghz": 5}
+    solver = {"solver": "emerge", "quality": "Accurate"}
+    cdir = checks._coupon_cache_dir(cfg, Board(p1.board))
+    s2p1, secs1 = checks._em_run(p1, cfg, ws1, "emerge_Accurate", "cells/COUPON/layout/COUPON.clay", solver, cache_dir=cdir)
+    assert len(calls) == 1 and secs1 is not None and s2p1.exists()
+    s2p2, secs2 = checks._em_run(p2, cfg, ws2, "emerge_Accurate", "cells/COUPON/layout/COUPON.clay", solver, cache_dir=cdir)
+    assert len(calls) == 1 and secs2 is None and s2p2.read_text() == s2p1.read_text()
+
+
+def test_placement_search_cap_bounds_grid_search(tmp_path):
+    from edaloop.placement import critique
+    from edaloop.scripts.kicad_pcb import Board as Geo
+
+    (tmp_path / "b.kicad_pcb").write_text(
+        '(kicad_pcb (version 20241229)\n'
+        + _fp("J1", 0, 0, [("1", 0, 0, 0.5, 0.5, "RF")])
+        + _fp("J2", 12, 0, [("1", 0, 0, 0.5, 0.5, "RF")])
+        + ")\n"
+    )
+    chains = [("RF", ("J1", "1"), ("J2", "1"))]
+    assert critique(Geo(tmp_path / "b.kicad_pcb"), chains, cfg={"search_cap": 2}).metrics["rf_hops_blocked"] == 1
+    assert critique(Geo(tmp_path / "b.kicad_pcb"), chains, cfg={"search_cap": 50000}).metrics["rf_hops_blocked"] == 0
+
+
+def test_spice_ngspice47_ground_aliases_klu_and_templates(tmp_path):
+    from edaloop import spice as sp
+
+    parts = [
+        sp.Part("R1", "1k", "1k", {"1": "IN", "2": "AGND"}),
+        sp.Part("R2", "1k", "1k", {"1": "IN", "2": "GND_RF"}),
+    ]
+    models = {p.ref: sp.resolve(p, {}, {}) for p in parts}
+    deck = sp.build_deck("t", parts, models, sp.bench_template("sequencer", stimulus=["V1 IN 0 PWL(0 0 1u 5)"]))
+    assert ".option noacct klu" in deck
+    assert ".save nointernals v(rail1) v(rail2)" in deck
+    assert "RR1 IN 0 1k" in deck and "RR2 IN 0 1k" in deck
+
+    noise_deck = sp.build_deck(
+        "n", [], {},
+        sp.bench_template("noise", table={"name": "E1", "out": "out", "ctrl": "mid", "points": [(-1, -2), (0, 0), (1, 2)]}),
+        spice_cfg={"klu": True},
+    )
+    assert "klu" not in noise_deck.lower()
+    assert "TABLE {V(mid)}" in noise_deck
+
+    pss_deck = sp.build_deck("pss", [], {}, sp.bench_template("pss", node="out"))
+    assert "pss 1Meg 1u out" in pss_deck and ".save v(out)" in pss_deck
+
+
+@pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice not installed")
+def test_ngspice47_live_klu_sequencer_and_table_noise(tmp_path):
+    from edaloop import spice as sp
+
+    parts = [
+        sp.Part("R1", "1k", "1k", {"1": "IN", "2": "RAIL1"}),
+        sp.Part("C1", "1n", "1n", {"1": "RAIL1", "2": "PGND"}),
+    ]
+    models = {p.ref: sp.resolve(p, {}, {}) for p in parts}
+    seq = sp.bench_template(
+        "sequencer",
+        rails=["RAIL1"],
+        tstep="100n",
+        tstop="10u",
+        stimulus=["V1 IN 0 PWL(0 0 1u 5 10u 5)"],
+        measure=[".meas tran v_final find v(RAIL1) at=9u"],
+    )
+    r_seq = sp.run_deck(sp.build_deck("seq", parts, models, seq), tmp_path, "seq")
+    assert r_seq["values"]["v_final"] == pytest.approx(5.0, abs=0.05)
+
+    noise_bench = sp.bench_template(
+        "noise",
+        output="out",
+        source="V1",
+        sweep="dec 5 1Meg 100Meg",
+        table={"name": "E1", "out": "out", "ctrl": "mid", "points": [(-1, -2), (0, 0), (1, 2)]},
+        stimulus=["V1 in 0 DC 0 AC 1", "Rsrc in mid 50", "Rload out 0 50"],
+    )
+    r_noise = sp.run_deck(sp.build_deck("noise", [], {}, noise_bench), tmp_path, "noise")
+    assert r_noise["values"]["onoise_rms"] > 0.0
+
+
+# ----------------------------------------------------------------------------------------------- P2 HDI parity
+
+_HDI_BOARD = """(kicad_pcb (version 20261031) (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (4 "In1.Cu" power)
+    (6 "In2.Cu" signal)
+    (2 "B.Cu" signal)
+  )
+  (setup
+    (stackup
+      (layer "F.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 1" (type "prepreg") (thickness 0.08) (material "FR4"))
+      (layer "In1.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 2" (type "core") (thickness 0.25) (material "FR4"))
+      (layer "In2.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 3" (type "prepreg") (thickness 0.08) (material "FR4"))
+      (layer "B.Cu" (type "copper") (thickness 0.035))
+    )
+  )
+  (net 0 "") (net 1 "GND") (net 2 "LVDS_A_P") (net 3 "LVDS_A_N") (net 4 "LVDS_B_P") (net 5 "LVDS_B_N") (net 6 "VDD")
+  (via micro (at 5 5) (size 0.25) (drill 0.1) (layers "F.Cu" "In1.Cu") (net 2))
+  (via micro (at 5 5) (size 0.25) (drill 0.1) (layers "In1.Cu" "In2.Cu") (net 2))
+  (via micro (at 8 5) (size 0.25) (drill 0.1) (layers "F.Cu" "In2.Cu") (net 3))
+  (via blind (at 12 5) (size 0.4) (drill 0.2) (layers "In1.Cu" "In2.Cu") (net 1))
+  (segment (start 0 0) (end 10 0) (width 0.15) (layer "F.Cu") (net 2))
+  (segment (start 0 1) (end 12 1) (width 0.15) (layer "F.Cu") (net 3))
+  (segment (start 0 4) (end 20 4) (width 0.15) (layer "F.Cu") (net 4))
+  (segment (start 0 5) (end 20 5) (width 0.15) (layer "F.Cu") (net 5))
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (priority 1)
+    (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20))))
+  (zone (net 6) (net_name "VDD") (layer "In1.Cu") (priority 1)
+    (polygon (pts (xy 5 5) (xy 15 5) (xy 15 15) (xy 5 15))))
+)"""
+
+
+def test_hdi_pcbfile_and_boardread_parse_micro_blind_and_zone_priority(tmp_path):
+    from edaloop import boardread
+
+    pcb = tmp_path / "hdi.kicad_pcb"
+    pcb.write_text(_HDI_BOARD)
+    b = Board(pcb)
+    assert b.copper_layers() == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    vias = [t for t in b.tracks if t.kind == "via"]
+    assert [(v.via_type, v.layers) for v in vias[:4]] == [
+        ("micro", ("F.Cu", "In1.Cu")),
+        ("micro", ("In1.Cu", "In2.Cu")),
+        ("micro", ("F.Cu", "In2.Cu")),
+        ("blind", ("In1.Cu", "In2.Cu")),
+    ]
+    assert b.zones()[0]["priority"] == 1
+    br = boardread.BOARD(str(pcb))
+    br_vias = [t for t in br.GetTracks() if t.GetClass() == "PCB_VIA"]
+    assert br_vias[0].GetViaType() == boardread.VIATYPE_MICROVIA
+    assert br_vias[3].GetViaType() == boardread.VIATYPE_BLIND_BURIED
+    assert br.Zones()[0].GetAssignedPriority() == 1
+
+
+def test_hdi_audits_detect_via_span_aspect_stacking_skew_and_zone_priority(tmp_path):
+    from edaloop import hdi
+
+    pcb = tmp_path / "hdi.kicad_pcb"
+    pcb.write_text(_HDI_BOARD)
+    b = Board(pcb)
+    cfg = {
+        "max_microvia_aspect": 1.0,
+        "max_stacked_microvias": 1,
+        "max_via_diff": 0,
+        "max_group_skew_mm": 2.0,
+        "diff_pairs": [
+            {"name": "LVDS_A", "pos": "LVDS_A_P", "neg": "LVDS_A_N", "max_skew_mm": 0.5, "group": "LVDS"},
+            {"name": "LVDS_B", "pos": "LVDS_B_P", "neg": "LVDS_B_N", "max_skew_mm": 0.5, "group": "LVDS"},
+        ],
+    }
+    metrics, findings = hdi.audit(b, cfg)
+    ids = {fid for fid, _, _ in findings}
+    assert "hdi:via:micro_span" in ids
+    assert "hdi:via:micro_aspect" in ids      # (0.08 + 0.25) / 0.1 = 3.3 > 1.0
+    assert "hdi:via:stacked_depth" in ids     # depth 2 at (5, 5) > 1
+    assert "hdi:diff_pair:LVDS_A:skew" in ids
+    assert "hdi:diff_pair:LVDS_A:via_mismatch" in ids
+    assert "hdi:diff_pair:group:LVDS" in ids
+    assert any(fid.startswith("hdi:zone_priority:") for fid in ids)
+
+    # Distinguishing zone priorities resolves zone_priority collision cleanly.
+    fixed_zones = _HDI_BOARD.replace('(net 6) (net_name "VDD") (layer "In1.Cu") (priority 1)',
+                                     '(net 6) (net_name "VDD") (layer "In1.Cu") (priority 2)')
+    pcb.write_text(fixed_zones)
+    z_metrics, z_find = hdi.audit_zone_priorities(Board(pcb))
+    assert z_metrics["collision_count"] == 0 and z_find == []
+
+    # Auto-discovery without explicit diff_pairs finds LVDS_A and LVDS_B.
+    d_metrics, _ = hdi.audit_diff_pairs(Board(pcb))
+    assert set(d_metrics["pairs"]) == {"LVDS_A", "LVDS_B"}
+
+
+def test_hdi_coupled_pair_plan_and_skew_tuning_and_check_staleness(tmp_path):
+    from edaloop import hdi
+
+    plan = hdi.plan_coupled_pair(
+        "ETH_P", "ETH_N",
+        (0.0, 1.0), (0.0, 0.0),
+        (10.0, 1.0), (10.0, 0.0),
+        width_mm=0.15, gap_mm=0.15, layer="F.Cu", via_layers=("F.Cu", "In1.Cu"),
+    )
+    assert len(plan["vias"]) == 4 and all(v["type"] == "micro" for v in plan["vias"])
+    assert math.isclose(plan["pos_length_mm"], plan["neg_length_mm"], abs_tol=0.05)
+
+    tuned = hdi.tune_pair_skew({"net": "ETH_P", "start": [0.0, 0.0], "end": [10.0, 0.0], "width": 0.15, "layer": "F.Cu"}, delta_mm=1.6)
+    assert tuned["added_mm"] == pytest.approx(1.6, abs=1e-4)
+    assert len(tuned["segments"]) >= 5
+
+    # @check("hdi") ledger integration & hdi_config staleness.
+    (tmp_path / "b.kicad_pcb").write_text(_HDI_BOARD)
+    (tmp_path / "edaloop.yaml").write_text("name: h\nboard: b.kicad_pcb\ngate: [hdi]\nhdi: {max_microvia_aspect: 5.0, max_stacked_microvias: 4}\n")
+    p = Project(tmp_path)
+    ev = checks.run_check(p, "hdi")
+    assert checks.current_inputs(p, ev)
+    (tmp_path / "edaloop.yaml").write_text("name: h\nboard: b.kicad_pcb\ngate: [hdi]\nhdi: {max_microvia_aspect: 1.0, max_stacked_microvias: 4}\n")
+    assert not checks.current_inputs(Project(tmp_path), ev)

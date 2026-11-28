@@ -38,6 +38,8 @@ PAD_SHAPE_CIRCLE, PAD_SHAPE_RECTANGLE, PAD_SHAPE_OVAL, PAD_SHAPE_TRAPEZOID, PAD_
     PAD_SHAPE_CHAMFERED_RECT, PAD_SHAPE_CUSTOM = range(7)
 SHAPE_T_SEGMENT, SHAPE_T_RECTANGLE, SHAPE_T_ARC, SHAPE_T_CIRCLE, SHAPE_T_POLY, SHAPE_T_BEZIER = range(6)
 ZONE_CONNECTION_INHERITED, ZONE_CONNECTION_NONE, ZONE_CONNECTION_THERMAL, ZONE_CONNECTION_FULL, ZONE_CONNECTION_THT_THERMAL = range(5)
+VIATYPE_THROUGH, VIATYPE_BLIND_BURIED, VIATYPE_MICROVIA = range(3)
+VIATYPE_BLIND = VIATYPE_BURIED = VIATYPE_BLIND_BURIED
 ERROR_INSIDE, ERROR_OUTSIDE = range(2)
 DEFAULT_CLEARANCE_NM = 200000          # KiCad's Default net class, where a board has no project to say otherwise
 
@@ -411,6 +413,26 @@ class _Footprint:
 class _Track:
     def __init__(self, board, node):
         self.board, self.node, self.tag = board, node, str(node[0])
+        if self.tag == "via":
+            vtype = str(node[1]) if len(node) > 1 and isinstance(node[1], str) else str(_val(node, "type", "through"))
+            self.via_type = {"micro": VIATYPE_MICROVIA, "blind": VIATYPE_BLIND_BURIED}.get(vtype, VIATYPE_THROUGH)
+            lnode = kid(node, "layers")
+            self.layer_pair = _layers(lnode[1:3]) if lnode and len(lnode) >= 3 else [_LAYER.get("F.Cu", 0), _LAYER.get("B.Cu", 31)]
+        else:
+            self.via_type = VIATYPE_THROUGH
+            self.layer_pair = []
+
+    def GetViaType(self):
+        return self.via_type
+
+    def TopLayer(self):
+        return self.layer_pair[0] if self.layer_pair else -1
+
+    def BottomLayer(self):
+        return self.layer_pair[-1] if self.layer_pair else -1
+
+    def LayerPair(self):
+        return tuple(self.layer_pair[:2]) if len(self.layer_pair) >= 2 else (-1, -1)
 
     def GetClass(self):
         return {"segment": "PCB_TRACK", "arc": "PCB_ARC", "via": "PCB_VIA"}[self.tag]
@@ -504,6 +526,9 @@ class _Zone:
 
     def GetMinThickness(self):
         return FromMM(float(_val(self.node, "min_thickness", 0.25)))
+
+    def GetAssignedPriority(self):
+        return int(float(_val(self.node, "priority", 0) or 0))
 
 
 class _NetClass:

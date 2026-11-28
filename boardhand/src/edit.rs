@@ -638,6 +638,7 @@ pub fn footprint_move(args: &Value, hook: Hook<'_>) -> Reply {
             .revs(Some(&rev), Some(&rev));
     }
     let mut splices = vec![];
+    let has_transform = t.find(fp.node, "at").is_none() && t.find(fp.node, "transform").is_some();
     if let Some(at_node) = t.find(fp.node, "at") {
         let (s, e) = t.span(at_node);
         let rot_text = if rotation.is_some() {
@@ -696,8 +697,9 @@ pub fn footprint_move(args: &Value, hook: Hook<'_>) -> Reply {
                     }
                 }
             }
-            // Zones inside a footprint are stored in board coordinates.
-            "zone" => zone_splices(t, c, fp.at, to, delta, &mut splices),
+            // Zones inside legacy `(at ...)` footprints are stored in board coordinates;
+            // KiCad 11 `(transform ...)` footprints keep child zones in footprint-local coords.
+            "zone" if !has_transform => zone_splices(t, c, fp.at, to, delta, &mut splices),
             _ => {}
         }
     }

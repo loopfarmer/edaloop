@@ -28,6 +28,7 @@ _SPICE_SUFFIX = {"p": "p", "n": "n", "u": "u", "µ": "u", "m": "m", "k": "k", "K
 _MEAS = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*=\s*([-+0-9.eE]+)", re.I | re.M)
 _FAILED = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*=?\s*failed", re.I | re.M)
 ROUND_TRIP_ZERO_OHM = 1e-3      # a 0R link stays a real element so that its nets stay distinct
+DEFAULT_GROUND_ALIASES = frozenset({"GND", "GROUND", "0", "AGND", "PGND", "DGND", "GND_RF", "RF_GND", "SGND"})
 
 
 class BenchError(Exception):
@@ -86,8 +87,93 @@ def load_registry(extra: Path | None = None) -> dict:
     return registry
 
 
-def _node(net: str) -> str:
-    return "0" if net.upper() in ("GND", "GROUND", "0") else re.sub(r"[^A-Za-z0-9_]", "_", net)
+def _node(net: str, ground_nets: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None) -> str:
+    aliases = DEFAULT_GROUND_ALIASES if ground_nets is None else {str(g).upper() for g in ground_nets}
+    return "0" if net.upper() in aliases else re.sub(r"[^A-Za-z0-9_]", "_", net)
+
+
+def _format_options(raw) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, dict):
+        out = []
+        for k, v in raw.items():
+            if v is True:
+                out.append(str(k))
+            elif v not in (False, None):
+                out.append(f"{k}={v}")
+        return out
+    return [str(x) for x in raw]
+
+
+def _has_noise(lines: list[str]) -> bool:
+    return any(re.match(r"^\s*\.?noise\b", ln, re.I) for ln in lines)
+
+
+def bench_template(kind: str, **params) -> dict:
+    """Build a ready-to-run bench dict tailored to ngspice-47 features (`noise`, `pss`, or `sequencer`)."""
+    name = str(params.get("name") or kind)
+    if kind == "noise":
+        out_node = str(params.get("output", "out"))
+        src = str(params.get("source", "Vin"))
+        sweep = str(params.get("sweep", "dec 10 1Meg 100Meg"))
+        inline = list(params.get("inline_models") or [])
+        table = params.get("table")
+        if table:
+            pts = " ".join(f"({x:g},{y:g})" for x, y in table["points"])
+            inline.append(f"{table.get('name', 'Etable')} {table['out']} 0 TABLE {{V({table['ctrl']})}} = {pts}")
+        return {
+            "name": name,
+            "klu": False,
+            "inline_models": inline,
+            "stimulus": list(params.get("stimulus") or []),
+            "analysis": [],
+            "measure": [
+                ".control",
+                f"noise v({out_node}) {src} {sweep}",
+                "setplot noise2",
+                "let onoise_rms = onoise_total",
+                "print onoise_rms",
+                "quit",
+                ".endc",
+            ],
+        }
+    if kind == "pss":
+        node = str(params.get("node", "out"))
+        f0 = str(params.get("freq", "1Meg"))
+        tstab = str(params.get("tstab", "1u"))
+        points = int(params.get("points", 64))
+        harmonics = int(params.get("harmonics", 10))
+        sc_iter = int(params.get("sc_iter", 50))
+        tstep = str(params.get("tstep", "10u"))
+        return {
+            "name": name,
+            "save": [f"v({node})"],
+            "stimulus": list(params.get("stimulus") or []),
+            "analysis": [],
+            "measure": [
+                ".control",
+                f"pss {f0} {tstab} {node} {points} {harmonics} {tstep} {sc_iter} uic",
+                f"let vpp = vecmax(v({node})) - vecmin(v({node}))",
+                "print vpp",
+                "quit",
+                ".endc",
+            ],
+        }
+    if kind == "sequencer":
+        tstep = str(params.get("tstep", "10u"))
+        tstop = str(params.get("tstop", "10m"))
+        rails = [str(r) for r in (params.get("rails") or ["rail1", "rail2"])]
+        save = ["nointernals", *(f"v({r})" for r in rails)]
+        return {
+            "name": name,
+            "klu": True,
+            "save": save,
+            "stimulus": list(params.get("stimulus") or []),
+            "analysis": [f".tran {tstep} {tstop}"],
+            "measure": list(params.get("measure") or []),
+        }
+    raise BenchError(f"unknown bench template kind {kind!r}")
 
 
 def resolve(part: Part, overrides: dict, registry: dict) -> dict:
@@ -115,16 +201,35 @@ def resolve(part: Part, overrides: dict, registry: dict) -> dict:
     return {"kind": "missing", "provenance": "none", "note": ""}
 
 
-def build_deck(title: str, parts: list[Part], models: dict[str, dict], bench: dict) -> str:
-    lines = [f"* {title}", ".option noacct"]
+def build_deck(title: str, parts: list[Part], models: dict[str, dict], bench: dict, *, spice_cfg: dict | None = None) -> str:
+    ground_nets = bench.get("ground_nets") if bench.get("ground_nets") is not None else (spice_cfg or {}).get("ground_nets")
+    analysis_lines = [str(x) for x in bench.get("analysis", [])]
+    measure_lines = [str(x) for x in bench.get("measure", [])]
+    is_noise = _has_noise(analysis_lines + measure_lines)
+    opts = ["noacct"]
+    for tok in _format_options((spice_cfg or {}).get("options")) + _format_options(bench.get("options")):
+        if is_noise and tok.lower() == "klu":
+            continue
+        if tok not in opts:
+            opts.append(tok)
+    want_klu = bench["klu"] if "klu" in bench else bool((spice_cfg or {}).get("klu", False))
+    if want_klu and not is_noise and "klu" not in [o.lower() for o in opts]:
+        opts.append("klu")
+    lines = [f"* {title}", ".option " + " ".join(opts)]
+    save = bench.get("save") if bench.get("save") is not None else (spice_cfg or {}).get("save")
+    if save:
+        save_str = " ".join(str(x) for x in save) if isinstance(save, (list, tuple)) else str(save)
+        lines.append(f".save {save_str}")
     includes = sorted({m["file"] for m in models.values() if m["kind"] == "subckt"})
     lines += [f'.include "{f}"' for f in includes]
+    for raw in [*(spice_cfg or {}).get("inline_models", []), *bench.get("inline_models", []), *bench.get("subckts", [])]:
+        lines.append(str(raw))
     for part in parts:
         model = models[part.ref]
         if model["kind"] == "open":
             lines.append(f"* {part.ref} excluded: {model['note']}")
         elif model["kind"] == "value":
-            nodes = [_node(part.pins[k]) for k in sorted(part.pins)]
+            nodes = [_node(part.pins[k], ground_nets) for k in sorted(part.pins)]
             if len(nodes) != 2:
                 raise BenchError(f"{part.ref}: a value model needs 2 connected pins, found {len(nodes)}")
             value = model["value"]
@@ -136,14 +241,14 @@ def build_deck(title: str, parts: list[Part], models: dict[str, dict], bench: di
             missing = [p for p in order if str(p) not in part.pins]
             if missing:
                 raise BenchError(f"{part.ref}: pins {missing} of its model are not in the design")
-            nodes = " ".join(_node(part.pins[str(p)]) for p in order)
+            nodes = " ".join(_node(part.pins[str(p)], ground_nets) for p in order)
             if model.get("device"):
                 lines.append(f"{model['device']}{part.ref} {nodes} {model['model']}")
             else:
                 lines.append(f"X{part.ref} {nodes} {model['subckt']}")
     lines += [str(x) for x in bench.get("stimulus", [])]
-    lines += [str(x) for x in bench.get("analysis", [])]
-    lines += [str(x) for x in bench.get("measure", [])]
+    lines += analysis_lines
+    lines += measure_lines
     lines.append(".end")
     return "\n".join(lines) + "\n"
 

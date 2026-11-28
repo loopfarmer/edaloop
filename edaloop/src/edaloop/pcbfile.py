@@ -82,6 +82,8 @@ class Track:
     width: float
     drill: float
     locked: bool
+    via_type: str = "through"    # through | blind | micro
+    layers: tuple = ()
 
 
 class Board:
@@ -98,9 +100,15 @@ class Board:
             if node[0] == "via":
                 at = tuple(float(v) for v in _child(node, "at")[1:3])
                 layers = _child(node, "layers")
+                vtype = "through"
+                if len(node) > 1 and isinstance(node[1], str) and node[1] in ("micro", "blind", "through"):
+                    vtype = node[1]
+                elif _val(node, "type") in ("micro", "blind", "through"):
+                    vtype = str(_val(node, "type"))
+                layer_pair = tuple(str(x) for x in layers[1:]) if layers else ()
                 self.tracks.append(Track("via", net, layers[1] if layers else "", at, at,
                                          float(_val(node, "size", 0)), float(_val(node, "drill", 0)),
-                                         _val(node, "locked") == "yes"))
+                                         _val(node, "locked") == "yes", vtype, layer_pair))
             else:
                 self.tracks.append(Track(node[0], net, _val(node, "layer", ""),
                                          tuple(float(v) for v in _child(node, "start")[1:3]),
@@ -207,6 +215,65 @@ class Board:
         total = sum(float(_val(x, "thickness")) for x in (stackup or [])
                     if isinstance(x, list) and x[0] == "layer" and _val(x, "thickness"))
         return total or 1.6
+
+    def copper_layers(self) -> list[str]:
+        """Ordered copper layer names from the board's `(layers ...)` declaration."""
+        table = _child(self.tree, "layers")
+        if not table:
+            return []
+        return [str(row[1]) for row in table[1:] if isinstance(row, list) and len(row) > 1 and str(row[1]).endswith(".Cu")]
+
+    def dielectric_gaps_mm(self) -> dict[tuple[str, str], float]:
+        """Dielectric thickness (mm) between adjacent copper layers from the board stackup."""
+        setup = _child(self.tree, "setup")
+        stackup = _child(setup, "stackup") if setup else None
+        if not stackup:
+            return {}
+        gaps: dict[tuple[str, str], float] = {}
+        prev_cu, acc = None, 0.0
+        for item in stackup:
+            if not (isinstance(item, list) and len(item) > 1 and item[0] == "layer"):
+                continue
+            typ = str(_val(item, "type", "")).lower()
+            thick = float(_val(item, "thickness", 0.0) or 0.0)
+            if typ == "copper":
+                name = str(item[1])
+                if prev_cu is not None:
+                    gaps[(prev_cu, name)] = acc
+                    gaps[(name, prev_cu)] = acc
+                prev_cu, acc = name, 0.0
+            elif prev_cu is not None and ("prepreg" in typ or "core" in typ or "dielectric" in typ):
+                acc += thick
+        return gaps
+
+    def zones(self) -> list[dict]:
+        """Top-level zones and keepouts with net, layer list, priority, outline points (mm), and fill count."""
+        numbered = {x[1]: x[2] for x in self.tree if isinstance(x, list) and x[0] == "net" and len(x) > 2}
+        out = []
+        for node in self.tree:
+            if not (isinstance(node, list) and node and node[0] == "zone"):
+                continue
+            net = _val(node, "net_name") or numbered.get(_val(node, "net", ""), _val(node, "net", "")) or ""
+            lyrs_node = _child(node, "layers")
+            if lyrs_node:
+                lyrs = [str(x) for x in lyrs_node[1:]]
+            else:
+                one = _val(node, "layer")
+                lyrs = [str(one)] if one else []
+            poly = _child(node, "polygon")
+            pts_node = _child(poly, "pts") if poly else None
+            outline = [(float(p[1]), float(p[2])) for p in (pts_node or [])[1:] if isinstance(p, list) and p[0] == "xy"]
+            filled = sum(1 for c in node if isinstance(c, list) and c and c[0] == "filled_polygon")
+            out.append({
+                "net": str(net),
+                "layers": lyrs,
+                "priority": int(float(_val(node, "priority", 0) or 0)),
+                "is_keepout": _child(node, "keepout") is not None,
+                "name": str(_val(node, "name", "") or ""),
+                "outline": outline,
+                "filled_polygons": filled,
+            })
+        return out
 
     def zones_on_net(self, net: str) -> int:
         numbered = {x[1]: x[2] for x in self.tree if isinstance(x, list) and x[0] == "net" and len(x) > 2}

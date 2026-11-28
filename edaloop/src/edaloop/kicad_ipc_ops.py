@@ -25,6 +25,7 @@ from scripts.kicad_pcb import set_properties, to_local
 
 try:
     from kipy import KiCad
+    from kipy.board import Board
     from kipy.board_types import Net, RuleAreaSettings, Track, Via, Zone
     from kipy.common_types import PolygonWithHoles
     from kipy.geometry import PolyLine, PolyLineNode, Vector2
@@ -32,7 +33,7 @@ try:
     from kipy.proto.board.board_commands_pb2 import BoardFlipDirection
     from kipy.proto.board.board_types_pb2 import BoardLayer, UnconnectedLayerRemoval, ViaType, ZoneType
     from kipy.proto.common.commands import base_commands_pb2, editor_commands_pb2
-    from kipy.proto.common.types import KIID, base_types_pb2, jobs_pb2
+    from kipy.proto.common.types import KIID, DocumentType, base_types_pb2, jobs_pb2
     from kipy.util import pack_any
     from kipy.util.units import from_mm, to_mm
 except ImportError as missing:      # refused in main(), with how to install it
@@ -49,7 +50,20 @@ UNPORTED = {}
 
 @contextmanager
 def board_at(src):
-    """A headless KiCad with `src` open, and the board. The server is stopped however the op ends."""
+    """A headless KiCad with `src` open, and the board. Reuses $EDALOOP_IPC_SOCKET when set, else manages its own server."""
+    sock = os.environ.get("EDALOOP_IPC_SOCKET")
+    if sock:
+        kicad = KiCad(socket_path=sock, timeout_ms=REQUEST_TIMEOUT_MS)
+        doc = kicad.open_document(os.path.abspath(src), DocumentType.DOCTYPE_PCB)
+        try:
+            yield Board(kicad._client, doc)
+        finally:
+            try:
+                kicad.close_document(doc)
+            except Exception:  # noqa: BLE001 - closing must not mask a prior error or skip kicad.close()
+                pass
+            kicad.close()
+        return
     kicad = KiCad(headless=True, kicad_cli_path=os.environ.get("EDALOOP_KICAD_CLI") or None,
                   file_path=os.path.abspath(src), timeout_ms=REQUEST_TIMEOUT_MS)
     try:
@@ -253,12 +267,24 @@ def z_coupon(src, net_name, width, dst):
 
 def add_vias(src, spec, dst):
     items = json.load(open(spec))
+    vtype_map = {
+        "through": ViaType.VT_THROUGH,
+        "blind": ViaType.VT_BLIND_BURIED,
+        "blind_buried": ViaType.VT_BLIND_BURIED,
+        "micro": ViaType.VT_MICRO,
+        "microvia": ViaType.VT_MICRO,
+    }
     with board_at(src) as board:
         nets = nets_by_name(board)
         vias = []
         for item in items:
             v = Via()
-            v.type = ViaType.VT_THROUGH
+            kind = str(item.get("type", "through")).lower()
+            v.type = vtype_map.get(kind, ViaType.VT_THROUGH)
+            span = item.get("layers")
+            if span and len(span) >= 2:
+                v.padstack.drill.start_layer = layer(span[0])
+                v.padstack.drill.end_layer = layer(span[1])
             v.position = xy(item["x"], item["y"])
             v.diameter = from_mm(item["size"])
             v.drill_diameter = from_mm(item["drill"])
@@ -453,16 +479,28 @@ def _keepouts(zones, ref, fp=None):
     return out
 
 
-def _front_courtyard(board, fp):
-    """A footprint's F.CrtYd outline as a box in nm (left, top, right, bottom), as pcbnew's _courtyard(fp, 0).BBox()
-    gives it: (0, 0, 0, 0) when there's none, which is also what a flipped footprint, its courtyard on B.CrtYd, gets."""
-    shapes = [s for s in fp.definition.shapes if s.layer == BoardLayer.BL_F_CrtYd]
+def _courtyard_box(board, fp):
+    """A footprint's courtyard outline as a box in nm (left, top, right, bottom). Reads B.CrtYd for flipped footprints
+    (falling back to the other courtyard layer or the footprint's pads, or (0, 0, 0, 0) when there are neither)."""
+    back = fp.layer == BoardLayer.BL_B_Cu
+    primary = BoardLayer.BL_B_CrtYd if back else BoardLayer.BL_F_CrtYd
+    fallback = BoardLayer.BL_F_CrtYd if back else BoardLayer.BL_B_CrtYd
+    shapes = [s for s in fp.definition.shapes if s.layer == primary]
     if not shapes:
+        shapes = [s for s in fp.definition.shapes if s.layer == fallback]
+    if shapes:
+        # KiCad's box round a shape takes in half its line width each side; pcbnew's courtyard is the line itself.
+        boxes = [(board.get_item_bounding_box(s), s.attributes.stroke.width // 2) for s in shapes]
+        return (min(b.pos.x + w for b, w in boxes), min(b.pos.y + w for b, w in boxes),
+                max(b.pos.x + b.size.x - w for b, w in boxes), max(b.pos.y + b.size.y - w for b, w in boxes))
+    pads = list(fp.definition.pads)
+    if not pads:
         return 0, 0, 0, 0
-    # KiCad's box round a shape takes in half its line width each side; pcbnew's courtyard is the line itself.
-    boxes = [(board.get_item_bounding_box(s), s.attributes.stroke.width // 2) for s in shapes]
-    return (min(b.pos.x + w for b, w in boxes), min(b.pos.y + w for b, w in boxes),
-            max(b.pos.x + b.size.x - w for b, w in boxes), max(b.pos.y + b.size.y - w for b, w in boxes))
+    boxes = [_box(b) for b in board.get_item_bounding_box(pads)]
+    return min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)
+
+
+_front_courtyard = _courtyard_box
 
 
 def _box(b):
@@ -488,22 +526,28 @@ def place_silk(src, dst):
         ex1, ey1, ex2, ey2 = (from_mm(v) for v in edge_box(board))
         fps = sorted(board.get_footprints(), key=lambda f: f.reference_field.text.value)
         pads = [p for fp in fps for p in fp.definition.pads]
-        obstacles = [_box(b) for b in board.get_item_bounding_box(pads)] if pads else []
-        silk = [s for fp in fps for s in fp.definition.shapes if s.layer == BoardLayer.BL_F_SilkS]
-        obstacles += [_box(b) for b in board.get_item_bounding_box(silk)] if silk else []
+        base_obstacles = [_box(b) for b in board.get_item_bounding_box(pads)] if pads else []
+        silk_f = [s for fp in fps for s in fp.definition.shapes if s.layer == BoardLayer.BL_F_SilkS]
+        silk_b = [s for fp in fps for s in fp.definition.shapes if s.layer == BoardLayer.BL_B_SilkS]
+        obstacles_side = {
+            False: base_obstacles + ([_box(b) for b in board.get_item_bounding_box(silk_f)] if silk_f else []),
+            True: base_obstacles + ([_box(b) for b in board.get_item_bounding_box(silk_b)] if silk_b else []),
+        }
 
         def hits(box, others):
             x1, y1, x2, y2 = box
             return any(x1 - clear < o[2] and x2 + clear > o[0] and y1 - clear < o[3] and y2 + clear > o[1] for o in others)
+        placed_side = {False: [], True: []}
         placed, hidden, wanted = [], [], {}
         for fp in fps:
             ref = fp.reference_field.text.value
+            back = fp.layer == BoardLayer.BL_B_Cu
             text = fp.reference_field.text
             attrs = text.attributes
             attrs.size = Vector2.from_xy(from_mm(size), from_mm(size))
             attrs.stroke_width = from_mm(thickness)
             attrs.keep_upright = True
-            yx1, yy1, yx2, yy2 = _front_courtyard(board, fp)
+            yx1, yy1, yx2, yy2 = _courtyard_box(board, fp)
             cx, cy = (yx1 + yx2) // 2, (yy1 + yy2) // 2
             at, choice = text.position, None
             for angle in (0, 90):
@@ -515,7 +559,8 @@ def place_silk(src, dst):
                         dx, dy = int(x) - at.x, int(y) - at.y
                         box = (b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy)
                         inside = box[0] > ex1 + margin and box[2] < ex2 - margin and box[1] > ey1 + margin and box[3] < ey2 - margin
-                        if inside and not hits(box, obstacles) and not hits(box, placed):
+                        if inside and not hits(box, obstacles_side[back]) and not hits(box, placed_side[back]):
+                            placed_side[back].append(box)
                             placed.append(box)
                             choice = (int(x), int(y), angle)
                             break
@@ -823,7 +868,7 @@ def board_facts(src, out):
         for fp in board.get_footprints():
             ref = fp.reference_field.text.value
             back = fp.layer == BoardLayer.BL_B_Cu
-            x1, y1, x2, y2 = (to_mm(v) for v in _front_courtyard(board, fp))
+            x1, y1, x2, y2 = (to_mm(v) for v in _courtyard_box(board, fp))
             yards.append({"ref": ref, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "rot": fp.orientation.degrees,
                           "back": back, "value": fp.value_field.text.value})
             for pad in fp.definition.pads:
@@ -839,7 +884,16 @@ def board_facts(src, out):
                              "front": BoardLayer.BL_F_Cu in on or drill > 0, "clearance": _local_clearance(pad, fp)})
             keepouts += _keepouts([i for i in fp.definition.items if isinstance(i, Zone)], ref, fp)
         outline = list(edge_box(board))
-    json.dump({"pads": pads, "courtyards": yards, "keepouts": keepouts, "outline": outline}, open(out, "w"))
+        vtype_names = {ViaType.VT_THROUGH: "through", ViaType.VT_BLIND_BURIED: "blind", ViaType.VT_MICRO: "micro"}
+        vias = [{"x": round(to_mm(v.position.x), 4), "y": round(to_mm(v.position.y), 4),
+                 "size": round(to_mm(v.diameter), 4), "drill": round(to_mm(v.drill_diameter), 4),
+                 "net": v.net.name, "type": vtype_names.get(v.type, "through"),
+                 "layers": [layer_name(v.padstack.drill.start_layer), layer_name(v.padstack.drill.end_layer)]}
+                for v in board.get_vias()]
+        zones = [{"net": z.net.name if z.net else "", "layers": [layer_name(lyr) for lyr in z.layers],
+                  "priority": int(z.priority), "is_rule_area": bool(z.is_rule_area()), "name": z.name}
+                 for z in board.get_zones()]
+    json.dump({"pads": pads, "courtyards": yards, "keepouts": keepouts, "outline": outline, "vias": vias, "zones": zones}, open(out, "w"))
     print(json.dumps({"pads": len(pads)}))
 
 

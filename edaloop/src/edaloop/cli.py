@@ -94,6 +94,9 @@ def main(argv=None):
     fi = sub.add_parser("finish", help="adopt the by-class route, add the RF fence and stitching, and refill. It stops if the board "
                                        "changed since the route read it, so that nothing done to it after the route is lost")
     fi.add_argument("--as-is", action="store_true", help="finish the board as it is, without copying the by-class route over it")
+    ha = sub.add_parser("hdi-audit", help="audit a .kicad_pcb for HDI vias, diff-pair skew, and zone priority collisions")
+    ha.add_argument("board", type=Path)
+    ha.add_argument("--config", type=Path, help="optional YAML/JSON HDI configuration")
     args = ap.parse_args(argv)
 
     try:
@@ -180,6 +183,22 @@ def main(argv=None):
             result = mechanical.build(p, args.output, render=not args.no_render)
             _out(result, True, str)
             return 0 if not result.get("problems") else 1
+        if args.cmd == "hdi-audit":
+            import yaml
+
+            from . import hdi
+            from .pcbfile import Board
+            cfg = yaml.safe_load(args.config.read_text()) if args.config else {}
+            metrics, findings = hdi.audit(Board(args.board), cfg)
+            payload = {"board": str(args.board), "metrics": metrics,
+                       "findings": [{"id": i, "message": m, "severity": s} for i, m, s in findings]}
+            _out(payload, args.json, lambda d: (
+                f"vias: {d['metrics']['vias']}\ndiff_pairs: {d['metrics']['diff_pairs']['pair_count']} pairs "
+                f"(max skew {d['metrics']['diff_pairs']['max_skew_mm']} mm)\n"
+                f"zone_collisions: {d['metrics']['zones']['collision_count']}"
+                + "".join(f"\n  {f['severity']}: {f['message']}" for f in d["findings"][:25])
+            ))
+            return 1 if any(f["severity"] == "error" for f in payload["findings"]) else 0
         if args.cmd == "build":
             from . import boardgen
             result = boardgen.build(args.bench, args.output, args.footprints)
@@ -252,7 +271,8 @@ def main(argv=None):
         elif args.cmd == "review":
             _out(checks.review_pack(p), True, str)
         elif args.cmd == "release":
-            data = checks.release(p)
+            with toolchain.ipc_session():
+                data = checks.release(p)
             _out(data, True, str)
             return 0 if data["released"] else 1
         elif args.cmd == "report":

@@ -13,6 +13,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +26,12 @@ import yaml
 HOME = Path.home()
 CACHE = HOME / ".cache" / "edaloop"
 _CONFIG = HOME / ".config" / "edaloop" / "toolchain.yaml"
+
+
+def config_path() -> Path:
+    """Toolchain YAML path: $EDALOOP_TOOLCHAIN_CONFIG when set, else ~/.config/edaloop/toolchain.yaml."""
+    env = os.environ.get("EDALOOP_TOOLCHAIN_CONFIG")
+    return Path(env).expanduser() if env else _CONFIG
 
 DEFAULTS = {
     "kicad_cli": "/opt/homebrew/bin/kicad-cli",
@@ -54,8 +65,9 @@ DEFAULTS = {
 
 def paths() -> dict[str, str]:
     merged = dict(DEFAULTS)
-    if _CONFIG.exists():
-        merged.update({k: str(v) for k, v in (yaml.safe_load(_CONFIG.read_text()) or {}).items()})
+    cfg = config_path()
+    if cfg.exists():
+        merged.update({k: str(v) for k, v in (yaml.safe_load(cfg.read_text()) or {}).items()})
     return merged
 
 
@@ -109,6 +121,24 @@ def _imports(python: str, module: str) -> bool:
         return False
 
 
+def kicad_major(cli: str | None = None) -> int:
+    """Major version of `kicad-cli` (e.g. 10 for 10.0.x / 10.99.x, 11 for 11.x), falling back to 10."""
+    exe = cli or paths()["kicad_cli"]
+    if not shutil.which(exe):
+        return 10
+    try:
+        r = run([exe, "--version"], timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return 10
+    if r.returncode != 0:
+        return 10
+    for token in (r.stdout + "\n" + r.stderr).split():
+        head = token.split(".", 1)[0]
+        if head.isdigit():
+            return int(head)
+    return 10
+
+
 def kicad_backend() -> str:
     """"swig" or "ipc": which way this install's board edits reach KiCad. See `kicad_backend` in DEFAULTS."""
     p = paths()
@@ -116,7 +146,9 @@ def kicad_backend() -> str:
     if want in BACKENDS:
         return want
     if want != "auto":
-        raise ValueError(f"kicad_backend is {want!r} in {_CONFIG}; it takes auto, swig or ipc")
+        raise ValueError(f"kicad_backend is {want!r} in {config_path()}; it takes auto, swig or ipc")
+    if has_api_server(p["kicad_cli"]) and _imports(p["ipc_python"], "kipy"):
+        return "ipc"
     return "swig" if _imports(p["kicad_python"], "pcbnew") else "ipc"
 
 
@@ -126,7 +158,90 @@ def kicad_op(*args, timeout=600) -> subprocess.CompletedProcess:
     p = paths()
     if kicad_backend() == "swig":
         return run([p["kicad_python"], SWIG_OPS, *args], timeout=timeout)
-    return run([p["ipc_python"], IPC_OPS, *args], env={"EDALOOP_KICAD_CLI": p["kicad_cli"]}, timeout=timeout)
+    env = {"EDALOOP_KICAD_CLI": p["kicad_cli"]}
+    if os.environ.get("EDALOOP_IPC_SOCKET"):
+        env["EDALOOP_IPC_SOCKET"] = os.environ["EDALOOP_IPC_SOCKET"]
+    return run([p["ipc_python"], IPC_OPS, *args], env=env, timeout=timeout)
+
+
+_IPC_READY_PREFIX = "KiCad API server listening at "
+
+
+@contextmanager
+def ipc_session(timeout_s: float = 30.0):
+    """Share one headless `kicad-cli api-server` across multiple `kicad_op` calls when using the KiCad 11 IPC backend.
+
+    Re-entrant: nested sessions reuse the outer `$EDALOOP_IPC_SOCKET`. No-op under SWIG or when `api-server`/`kipy` aren't usable.
+    """
+    if os.environ.get("EDALOOP_IPC_SOCKET") or kicad_backend() != "ipc":
+        yield None
+        return
+    p = paths()
+    if not _imports(p["ipc_python"], "kipy") or not has_api_server(p["kicad_cli"]):
+        yield None
+        return
+    sock_dir = Path(tempfile.gettempdir()) / "kicad" / "edaloop-ipc"
+    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = sock_dir / f"edaloop-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
+    if sock_path.exists():
+        sock_path.unlink()
+    sock_url = f"ipc://{sock_path}"
+    proc = subprocess.Popen(
+        [p["kicad_cli"], "api-server", "--socket", str(sock_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+    )
+    ready = threading.Event()
+    logs: list[str] = []
+
+    def _drain():
+        if proc.stdout is None:
+            return
+        for line in proc.stdout:
+            text = line.rstrip("\n")
+            logs.append(text)
+            if _IPC_READY_PREFIX in text:
+                ready.set()
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    prev_sock = os.environ.get("EDALOOP_IPC_SOCKET")
+    try:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(f"kicad-cli api-server exited ({proc.returncode}): {' | '.join(logs[-5:])}")
+            if sock_path.exists():
+                probe = run(
+                    [p["ipc_python"], "-c", f"from kipy import KiCad; k=KiCad(socket_path={sock_url!r}, timeout_ms=500); k.ping(); k.close()"],
+                    timeout=5,
+                )
+                if probe.returncode == 0:
+                    break
+            time.sleep(0.05)
+        else:
+            raise TimeoutError(f"Timed out waiting for kicad-cli api-server socket at {sock_path}")
+        os.environ["EDALOOP_IPC_SOCKET"] = sock_url
+        yield sock_url
+    finally:
+        if prev_sock is None:
+            os.environ.pop("EDALOOP_IPC_SOCKET", None)
+        else:
+            os.environ["EDALOOP_IPC_SOCKET"] = prev_sock
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        try:
+            sock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def missing_for_make() -> list[dict]:
@@ -314,9 +429,11 @@ def _board_edits(p) -> Probe:
         return Probe("pcbnew", role, False, "this kicad-cli has no api-server: the IPC API runs headless from KiCad 11",
                      "install KiCad 11, or KiCad 10 for pcbnew")
     v = run([p["ipc_python"], "-c", "import importlib.metadata as m;print(m.version('kicad-python'))"])
-    still = [*_unported(), "the EAGLE export"]
-    return Probe("pcbnew", role, True, f"IPC API through kicad-cli api-server, kicad-python {_first_line(v.stdout)}; "
-                 f"{', '.join(still)} still need{'s' if len(still) == 1 else ''} KiCad 10")
+    still = _unported()
+    detail = f"IPC API through kicad-cli api-server, kicad-python {_first_line(v.stdout)}"
+    if still:
+        detail += f"; {', '.join(still)} still need{'s' if len(still) == 1 else ''} KiCad 10"
+    return Probe("pcbnew", role, True, detail)
 
 
 def at_poses(board, folder) -> Path:

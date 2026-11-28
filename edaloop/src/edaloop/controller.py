@@ -25,6 +25,7 @@ REMEDY = {
     "rules": "Change via or track sizes on the board, or pick the fabricator profile that was actually agreed.",
     "em_crosscheck": "Follow metrics.diagnosis: fix the named outlier solver and rerun, or change the cross-section if the verdict is design_off_target.",
     "cascade": "Change the stage table only with a datasheet or measurement behind it.",
+    "hdi": "Fix microvia layer spans/stack depth or aspect ratio in layout/stackup, tune differential-pair skew (hdi.tune_pair_skew), or assign distinct zone priorities on overlapping copper pours.",
     "requirements": "Clear the stale or missed checks listed. A requirement changes only when a person changes it.",
 }
 
@@ -83,8 +84,9 @@ def _needs_person(p: Project, name: str, ev: Evidence, live: list) -> dict | Non
             if value is not None and not ((low is None or value >= low) and (high is None or value <= high)):
                 waivers.append({"match": f"requirements:{req['id']}", "message": requirement_message(req, value),
                                 "by": "YOUR NAME", "reason": "YOUR REASON"})
+    spread = ev.metrics.get("all_spread_pct", ev.metrics["spread_pct"])
     return {"action": "ask_person", "check": name,
-            "question": f"{outliers} disagrees with {', '.join(diagnosis['agreeing'])} by {ev.metrics['spread_pct']}%, past the {limit}% limit. "
+            "question": f"{outliers} disagrees with {', '.join(diagnosis['agreeing'])} by {spread}%, past the {limit}% limit. "
                         f"The 2D reference reads {reference['z0_ohm']} ohm, which backs the others. Waive it, or hold the release?",
             "findings": live, "diagnosis": diagnosis, "if_waived": {"add_to_edaloop_yaml": {"waivers": waivers}},
             "see": "docs/openems-coupon-bias.md", "do_not": "An agent mustn't add this waiver itself."}

@@ -107,11 +107,14 @@ def _at_pad(fp, rot, number, x, y):
 
 
 def _courtyard(fp, gap):
-    """A part's courtyard, grown by half the gap. A courtyard KiCad can't close, such as lines that don't meet, reads as empty: a
-    part with no size, which sat at the board's origin in the parts' span and touched nothing. Such a part takes its own box,
-    pads and drawing, instead."""
+    """A part's courtyard, grown by half the gap. Uses B.CrtYd for flipped parts, falling back to the opposite courtyard
+    or the footprint's bounding box when KiCad can't close the courtyard."""
     fp.BuildCourtyardCaches()
-    s = pcbnew.SHAPE_POLY_SET(fp.GetCourtyard(pcbnew.F_CrtYd))
+    layer = pcbnew.B_CrtYd if fp.IsFlipped() else pcbnew.F_CrtYd
+    s = pcbnew.SHAPE_POLY_SET(fp.GetCourtyard(layer))
+    if s.OutlineCount() == 0:
+        other = pcbnew.F_CrtYd if fp.IsFlipped() else pcbnew.B_CrtYd
+        s = pcbnew.SHAPE_POLY_SET(fp.GetCourtyard(other))
     if s.OutlineCount() == 0:
         b = fp.GetBoundingBox(False)
         s = pcbnew.SHAPE_POLY_SET()
@@ -1727,9 +1730,32 @@ def board_facts(src, out):
             chain = outline.Outline(i)
             pts = [[pcbnew.ToMM(chain.CPoint(j).x), pcbnew.ToMM(chain.CPoint(j).y)] for j in range(chain.PointCount())]
             keepouts.append({"ref": ref, "name": zone.GetZoneName(), "pts": pts})
+    vtype_names = {pcbnew.VIATYPE_THROUGH: "through", pcbnew.VIATYPE_MICROVIA: "micro"}
+    for attr in ("VIATYPE_BLIND", "VIATYPE_BURIED", "VIATYPE_BLIND_BURIED"):
+        if hasattr(pcbnew, attr):
+            vtype_names[getattr(pcbnew, attr)] = "blind"
+    vias = []
+    for t in board.GetTracks():
+        if t.GetClass() != "PCB_VIA":
+            continue
+        v = pcbnew.Cast_to_PCB_VIA(t) if hasattr(pcbnew, "Cast_to_PCB_VIA") else t
+        top, bot = v.TopLayer(), v.BottomLayer()
+        vias.append({
+            "x": round(pcbnew.ToMM(v.GetPosition().x), 4),
+            "y": round(pcbnew.ToMM(v.GetPosition().y), 4),
+            "size": round(pcbnew.ToMM(v.GetWidth(top)), 4),
+            "drill": round(pcbnew.ToMM(v.GetDrillValue()), 4),
+            "net": v.GetNetname(),
+            "type": vtype_names.get(v.GetViaType(), "through"),
+            "layers": [board.GetLayerName(top), board.GetLayerName(bot)],
+        })
+    zone_rows = [{"net": z.GetNetname(), "layers": [board.GetLayerName(lyr) for lyr in z.GetLayerSet().Seq()],
+                  "priority": int(z.GetAssignedPriority()), "is_rule_area": bool(z.GetIsRuleArea()), "name": z.GetZoneName()}
+                 for z in board.Zones()]
     box = board.GetBoardEdgesBoundingBox()
     json.dump({"pads": pads, "courtyards": yards, "keepouts": keepouts,
-               "outline": [pcbnew.ToMM(box.GetLeft()), pcbnew.ToMM(box.GetTop()), pcbnew.ToMM(box.GetRight()), pcbnew.ToMM(box.GetBottom())]},
+               "outline": [pcbnew.ToMM(box.GetLeft()), pcbnew.ToMM(box.GetTop()), pcbnew.ToMM(box.GetRight()), pcbnew.ToMM(box.GetBottom())],
+               "vias": vias, "zones": zone_rows},
               open(out, "w"))
     print(json.dumps({"pads": len(pads)}))
 
@@ -1818,13 +1844,24 @@ def add_vias(src, spec, dst):
     board = pcbnew.LoadBoard(src)
     nets = board.GetNetsByName()
     items = json.load(open(spec))
+    blind_val = getattr(pcbnew, "VIATYPE_BLIND", getattr(pcbnew, "VIATYPE_BLIND_BURIED", pcbnew.VIATYPE_THROUGH))
+    buried_val = getattr(pcbnew, "VIATYPE_BURIED", blind_val)
+    vtype_map = {
+        "through": pcbnew.VIATYPE_THROUGH,
+        "blind": blind_val,
+        "buried": buried_val,
+        "blind_buried": blind_val,
+        "micro": pcbnew.VIATYPE_MICROVIA,
+        "microvia": pcbnew.VIATYPE_MICROVIA,
+    }
     for item in items:
         via = pcbnew.PCB_VIA(board)
         via.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(item["x"]), pcbnew.FromMM(item["y"])))
         via.SetWidth(pcbnew.FromMM(item["size"]))
         via.SetDrill(pcbnew.FromMM(item["drill"]))
-        via.SetViaType(pcbnew.VIATYPE_THROUGH)
-        via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        via.SetViaType(vtype_map.get(str(item.get("type", "through")).lower(), pcbnew.VIATYPE_THROUGH))
+        span = item.get("layers") or ["F.Cu", "B.Cu"]
+        via.SetLayerPair(board.GetLayerID(span[0]), board.GetLayerID(span[1]))
         via.SetNet(nets[item["net"]])
         via.SetLocked(bool(item.get("locked")))
         board.Add(via)
