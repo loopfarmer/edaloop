@@ -773,6 +773,15 @@ def route(project_board: Path, chains_file: Path, rails: list[dict], work: Path,
     """Run RF, then power, then signal, on copies in `work`. The input board isn't changed.
 
     `layer_costs` makes a layer dearer without forbidding it. A pad still gets its short stub on the top layer, and the run goes inside."""
+    with toolchain.ipc_session():
+        return _route_impl(project_board, chains_file, rails, work, keep_nets, max_rise_c=max_rise_c,
+                           rf_target_ohm=rf_target_ohm, reference_layers=reference_layers,
+                           power_layers=power_layers, layer_costs=layer_costs)
+
+
+def _route_impl(project_board: Path, chains_file: Path, rails: list[dict], work: Path, keep_nets: list[str],
+                max_rise_c: float = 10.0, rf_target_ohm: float = 50.0, reference_layers: tuple = ("In1.Cu",),
+                power_layers: tuple | None = None, layer_costs: dict | None = None) -> dict:
     work.mkdir(parents=True, exist_ok=True)
     # The board this route starts from, so that `finish` can tell whether it was changed after the route was made.
     (work / SOURCE).write_text(json.dumps({"board": project_board.name, "board_sha256": file_sha256(project_board)}))

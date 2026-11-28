@@ -19,6 +19,7 @@ edaloop-mcp = "edaloop.mcp_server:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.16"]
+ipc = ["kicad-python>=0.9.1"]
 
 [build-system]
 requires = ["hatchling"]

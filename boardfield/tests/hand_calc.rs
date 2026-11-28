@@ -82,6 +82,18 @@ fn no_current_no_rise() {
     assert!(o["hotspot"]["rise_c"].as_f64().unwrap().abs() < 1e-6, "rise {} C with no current", o["hotspot"]["rise_c"]);
 }
 
+#[test]
+fn non_power_of_two_thermal_ratio_converges_and_conserves_energy() {
+    for thermal_dx in [0.15, 0.25] {
+        let mut problem = strip(1.0, 10.0, 1.0);
+        problem["settings"] = json!({"dx_mm": 0.05, "thermal_dx_mm": thermal_dx, "levels": 4});
+        let o = run(&problem);
+        assert_eq!(o["converged"], true, "thermal_dx={thermal_dx}");
+        let err = o["energy_error_pct"].as_f64().unwrap().abs();
+        assert!(err < 1.0, "thermal_dx={thermal_dx} energy balance {err}");
+    }
+}
+
 /// The GPU solver must agree with the CPU one. It skips, with a notice, where there is no GPU, as on CI.
 #[test]
 fn gpu_agrees_with_cpu() {

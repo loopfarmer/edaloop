@@ -213,7 +213,8 @@ def maker_patterns(bench: dict, facts: dict, cfg: dict, rf_layout: dict | None =
             for number, pad in pads.items():
                 if pad["net"] == "GND" and f"{ref}.{number}" not in per_pad:
                     counts[f"{ref}.{number}"] = connector
-        rule = rf_rules.land_pattern((parts.get(ref) or {}).get("mpn"))
+        part_info = parts.get(ref) or {}
+        rule = rf_rules.land_pattern(part_info.get("mpn") or part_info.get("value"))
         if not rule:
             continue
         for number, grid in rule.get("paddle", {}).items():
@@ -351,13 +352,14 @@ def tap_voids(pads: list[dict], chain: list, grow_mm: float, line_width_mm: floa
     return out
 
 
-def fill_fence(field: Field, board: Board, facts: dict, nets: set, pitch: float, placed: list, rounds: int = 6) -> int:
+def fill_fence(field: Field, board: Board, facts: dict, nets: set, pitch: float, placed: list, rounds: int = 6,
+               cfg: dict | None = None) -> int:
     """Close the fence: put a ground via in each gap and hole wherever one is legal, nearest the fence line first, until nothing changes.
 
     Sites are searched 0.02 mm apart along the line, since a legal site between two trunks can be 0.03 mm wide, and out from the trace's edge
     in 0.06 mm steps. One new via can close two gaps, so it runs again. KiCad's DRC still has the last word on each via, in `_prune`.
     """
-    cfg = rf_rules.DEFAULTS
+    cfg = {**rf_rules.DEFAULTS, **(cfg or {})}
     added = 0
     for _ in range(rounds):
         extra = [(x, y, RADIUS) for x, y in placed]
@@ -422,6 +424,11 @@ def finish(p, as_is: bool = False) -> dict:
 
     The route is copied over the board. If the board was changed since the route read it, finish stops rather than
     throw that away. `as_is` finishes the board as it is instead, for a board routed or edited after `route --by-class`."""
+    with toolchain.ipc_session():
+        return _finish_impl(p, as_is=as_is)
+
+
+def _finish_impl(p, as_is: bool = False) -> dict:
     bench, cfg = _load(p)
     work = p.root / ".edaloop"
     routed = work / "route_classes" / "3_signal.kicad_pcb"
@@ -448,8 +455,9 @@ def finish(p, as_is: bool = False) -> dict:
         return any(c["x1"] - RADIUS < x < c["x2"] + RADIUS and c["y1"] - RADIUS < y < c["y2"] + RADIUS for c in yards)
 
     placed = []
+    rf_layout = {**rf_rules.DEFAULTS, **p.section("rf_layout")}
     high_ghz = bench["band_mhz"][1] / 1000 if bench.get("band_mhz") else None
-    pitch = float(cfg.get("fence_pitch_mm") or rf_rules.fence_pitch(high_ghz, float((bench.get("project") or {}).get("eps_eff", 3.25))))
+    pitch = float(cfg.get("fence_pitch_mm") or rf_layout.get("fence_pitch_mm") or rf_rules.fence_pitch(high_ghz, float((bench.get("project") or {}).get("eps_eff", 3.25))))
     gap = float(bench["layout"].get("pour_clearance_mm", 0.3))
     rf, planed = rf_nets(p, bench)
     for t in board.tracks:
@@ -475,7 +483,7 @@ def finish(p, as_is: bool = False) -> dict:
                         field.vias.append((x, y))
                         break
     fence = len(placed)
-    filled_in = fill_fence(field, board, facts, rf, pitch, placed)
+    filled_in = fill_fence(field, board, facts, rf, pitch, placed, cfg=rf_layout)
     grid = float(cfg.get("stitch_pitch_mm", 4.0))
     x1, y1, x2, y2 = facts["outline"]
     y = y1 + 1.2

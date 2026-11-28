@@ -8,6 +8,7 @@ from __future__ import annotations
 import collections
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -783,7 +784,7 @@ def em_fast(p: Project) -> Outcome:
     ws = _em_workspace(p, cfg, board)
     label = "fast_" + _solver_label(fast)
     layout = "cells/COUPON/layout/COUPON.clay"
-    s2p, seconds = _em_run(p, cfg, ws, label, layout, fast)
+    s2p, seconds = _em_run(p, cfg, ws, label, layout, fast, cache_dir=_coupon_cache_dir(cfg, board))
     zc, eff, il = _zc(s2p, float(cfg["length_um"]) / 1000, float(cfg.get("at_ghz", 3.0)) * 1e9)
     target, tol = float(cfg.get("target_ohm", 50)), float(cfg.get("tol_pct", 10))
     findings = []
@@ -1022,18 +1023,32 @@ def _em_workspace(p: Project, cfg: dict, board: Board) -> Path:
     return ws
 
 
-def _em_run(p: Project, cfg: dict, ws: Path, label: str, layout: str, s: dict) -> tuple[Path, float | None]:
-    """One solver setup. A finished result is reused, since it depends only on the setup."""
+def _coupon_cache_dir(cfg: dict, board: Board) -> Path:
+    """Global coupon result cache keyed by coupon geometry and board stackup, shared across projects."""
+    base = Path(os.environ["EDALOOP_COUPON_CACHE"]).expanduser() if os.environ.get("EDALOOP_COUPON_CACHE") else (toolchain.CACHE / "coupons")
+    geometry = {k: cfg.get(k) for k in _GEOMETRY_KEYS}
+    return base / _digest([geometry, board.stackup_digest()])[:16]
+
+
+def _em_run(p: Project, cfg: dict, ws: Path, label: str, layout: str, s: dict, cache_dir: Path | None = None) -> tuple[Path, float | None]:
+    """One solver setup. A finished result (local or cached globally for identical coupons) is reused."""
     tp = toolchain.paths()
+    cem_cfg = _em_setup(label, layout, s, cfg.get("fmin_ghz", 1), cfg.get("fmax_ghz", 5))
     cem = ws / "em" / f"{label}.cem"
     if not cem.exists():
-        cem.write_text(json.dumps(_em_setup(label, layout, s, cfg.get("fmin_ghz", 1), cfg.get("fmax_ghz", 5)), indent=1))
+        cem.write_text(json.dumps(cem_cfg, indent=1))
 
     def result():
         return next(iter(sorted((ws / "results").glob(f"{label}.*.s2p"))), None) if (ws / "results").exists() else None
     s2p = result()
     if s2p is not None:
         return s2p, None
+    cached = cache_dir / f"{label}.{_digest(cem_cfg)[:12]}.s2p" if cache_dir is not None else None
+    if cached is not None and cached.is_file():
+        (ws / "results").mkdir(parents=True, exist_ok=True)
+        dst = ws / "results" / f"{label}.cached.s2p"
+        shutil.copy2(cached, dst)
+        return dst, None
     t0 = time.time()
     r = toolchain.run([tp["circuitrf"], "em", cem], cwd=ws, env=toolchain.circuitrf_env(), timeout=int(cfg.get("timeout_s", 7200)))
     (p.work / f"em_{label}.log").write_text(r.stdout + r.stderr)
@@ -1045,13 +1060,18 @@ def _em_run(p: Project, cfg: dict, ws: Path, label: str, layout: str, s: dict) -
         # Said first, since the tail of the log is mid-solve and doesn't say why it stopped. Code 137 is SIGKILL, most often the kernel out of memory.
         why = "the solver was killed by the system (code 137), most likely out of memory. " if r.returncode == 137 or "exited with code 137" in text else ""
         raise RuntimeError(f"{label}: solver produced no result: {why}{text.strip()[-800:]}")
+    if cached is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = cache_dir / f".{label}.{os.getpid()}.tmp"
+        shutil.copy2(s2p, tmp)
+        os.replace(tmp, cached)
     return s2p, round(time.time() - t0, 1)
 
 
 REFERENCE_AGREES_PCT = 2.0
 
 
-@check("em_crosscheck", "simulate", version=2, tools=("circuitrf",))
+@check("em_crosscheck", "simulate", version=3, tools=("circuitrf",))
 def em_crosscheck(p: Project) -> Outcome:
     """Independent field solvers on a coupon of the board's own line, with disagreement diagnosed. One solver's number is not evidence."""
     cfg = p.section("em")
@@ -1080,22 +1100,25 @@ def em_crosscheck(p: Project) -> Outcome:
     inputs = {"em_config": _config(p, "em_config"), "stackup": board.stackup_digest(), **_chain_files(p)}
     ws = _em_workspace(p, cfg, board)
     layout = "cells/COUPON/layout/COUPON.clay"
+    cache_dir = _coupon_cache_dir(cfg, board)
     length_mm = float(cfg["length_um"]) / 1000
     f_hz = float(cfg.get("at_ghz", 3.0)) * 1e9
     results, tools = {}, {}
     for s in solvers:
         label = _solver_label(s)
-        s2p, seconds = _em_run(p, cfg, ws, label, layout, s)
+        s2p, seconds = _em_run(p, cfg, ws, label, layout, s, cache_dir=cache_dir)
         zc, eff, il = _zc(s2p, length_mm, f_hz)
         results[label] = {"solver": s["solver"], "zc_ohm": round(zc, 2), "eps_eff": round(eff, 3),
                           "il_db": round(il, 3), "seconds": seconds}
         tools[label] = s["solver"]
     zs = [v["zc_ohm"] for v in results.values()]
-    spread = 100 * (max(zs) - min(zs)) / np.mean(zs)
+    all_spread = 100 * (max(zs) - min(zs)) / np.mean(zs)
     max_spread = float(cfg.get("max_spread_pct", 2.0))
     target = float(cfg.get("target_ohm", 50))
     tol = float(cfg.get("tol_pct", 10))
     d = diagnose(results, target, tol, max_spread)
+    agree_zs = [results[k]["zc_ohm"] for k in d["agreeing"]] if len(d["agreeing"]) >= 2 else zs
+    spread = 100 * (max(agree_zs) - min(agree_zs)) / np.mean(agree_zs)
     if d["verdict"] == "outlier":
         for a in d["actions"]:
             findings.append(Finding(f"em_crosscheck:{a['solver']}:outlier",
@@ -1117,7 +1140,8 @@ def em_crosscheck(p: Project) -> Outcome:
     for finding in findings:
         if finding.id.endswith(":outlier"):
             finding.message = finding.message.rstrip(".") + f". The 2D reference reads {reference['z0_ohm']} ohm, which backs {', '.join(backed) or 'neither side'}."
-    metrics = {"solvers": results, "spread_pct": round(float(spread), 2), "zc_ohm": d["zc_trusted_ohm"],
+    metrics = {"solvers": results, "spread_pct": round(float(spread), 2), "all_spread_pct": round(float(all_spread), 2),
+               "zc_ohm": d["zc_trusted_ohm"],
                "eps_eff": round(float(np.mean([results[k]["eps_eff"] for k in (d["agreeing"] or results)])), 3),
                "at_ghz": f_hz / 1e9, "diagnosis": d, "reference": {**reference, "backs": backed}}
     return Outcome(inputs, metrics, findings, tools)
@@ -1259,7 +1283,7 @@ def spice_benches(p: Project) -> Outcome:
     if not findings:
         for bench in cfg["benches"]:
             name = bench["name"]
-            deck = spice.build_deck(f"{p.name} {name}", parts, models, bench)
+            deck = spice.build_deck(f"{p.name} {name}", parts, models, bench, spice_cfg=cfg)
             run = spice.run_deck(deck, p.work / "spice", name)
             metrics[name] = run["values"]
             artifacts.append(str(Path(run["log"]).relative_to(p.root)))
@@ -1269,6 +1293,17 @@ def spice_benches(p: Project) -> Outcome:
     # Worked out from the models already resolved, so the netlist isn't exported twice. _spice_digest repeats it.
     return Outcome({**_files(p, *files), "spice_config": _spice_models_digest(cfg, models.values())},
                    metrics, findings, {}, artifacts)
+
+
+@check("hdi", "verify", needs_board=True, version=1)
+def hdi_audit(p: Project) -> Outcome:
+    """Audit HDI microvia/buried-via rules, differential-pair length/skew, and zone priority collisions."""
+    from . import hdi
+    board = Board(p.board)
+    cfg = p.section("hdi")
+    metrics, raw = hdi.audit(board, cfg)
+    findings = [Finding(fid, msg, sev) for fid, msg, sev in raw]
+    return Outcome({**_files(p, p.board), "hdi_config": _config(p, "hdi_config")}, metrics, findings)
 
 
 # ---------------------------------------------------------------- evaluate
@@ -1331,6 +1366,7 @@ CONFIG_DIGESTS = {
     "stages": lambda p: _digest(p.section("cascade")),
     "rule_profile": lambda p: _digest(_rule_profile(p)[1]),
     "spice_config": _spice_digest,
+    "hdi_config": lambda p: _digest(p.section("hdi")),
     "requirements": _requirements_digest,
 }
 

@@ -135,7 +135,8 @@ fn t8_session_preserving_protected_items_applies_and_kicad_loads_it() {
     assert!(text.ends_with("(embedded_fonts no)\n)\n"));
     assert!(kicad_loads(&out).is_some() || !Path::new(kicad_cli()).exists());
     let py = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nv=[t for t in b.GetTracks() if t.GetClass()=='PCB_VIA']\nprint(len(b.GetTracks()),len(v),sorted((t.GetPosition().x,t.GetPosition().y,t.GetNetname(),t.GetDrill()) for t in v))";
-    if let Some(o) = pcbnew(py, &[&out]) {
+    let ipc = "import os,sys\nfrom kipy import KiCad\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board();vs=list(b.get_vias());print(len(list(b.get_tracks()))+len(vs),len(vs),sorted((v.position.x,v.position.y,v.net.name,v.drill_diameter) for v in vs))\nfinally:\n k.close()";
+    if let Some(o) = inspect_board_py(py, ipc, &[&out]) {
         println!("t8 pcbnew: {o}");
         assert!(o.contains("5 2 [(10000000, 22000000, 'GND', 300000), (20000000, 20000000, 'GND', 300000)]"), "{o}");
     }

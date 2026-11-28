@@ -453,16 +453,20 @@ fn level_dxs(dx: f64, levels: usize, bbox: [f64; 4]) -> Vec<f64> {
     out
 }
 
-/// Prolong a coarse solution to a finer grid, cell for cell. SOR removes the rough edges this leaves.
-fn prolong(coarse: &[f32], from: (usize, usize, usize), to: (usize, usize, usize), ratio: usize) -> Vec<f32> {
+/// Prolong a coarse solution to a finer grid, cell for cell. Uses coordinate-proportional indexing so any
+/// grid ratio (not only powers of two) maps cleanly without out-of-bounds access.
+fn prolong(coarse: &[f32], from: (usize, usize, usize), to: (usize, usize, usize), _ratio: usize) -> Vec<f32> {
     let (cx, cy, nz) = from;
     let (fx, fy, _) = to;
     let mut out = vec![0f32; fx * fy * nz];
+    if cx == 0 || cy == 0 || fx == 0 || fy == 0 {
+        return out;
+    }
     for k in 0..nz {
         for j in 0..fy {
-            let cj = (j / ratio).min(cy - 1);
+            let cj = ((j * cy) / fy).min(cy - 1);
             for i in 0..fx {
-                let ci = (i / ratio).min(cx - 1);
+                let ci = ((i * cx) / fx).min(cx - 1);
                 out[k * fx * fy + j * fx + i] = coarse[k * cx * cy + cj * cx + ci];
             }
         }
@@ -884,14 +888,19 @@ fn thermal_stencil(p: &Problem, m: &Mask, q: &[f64]) -> Stencil {
     s
 }
 
-fn coarsen_heat(q: &[f64], fine: (usize, usize, usize), coarse: (usize, usize)) -> Vec<f64> {
+fn restrict_heat(q: &[f64], fine: (usize, usize, usize), fine_dx: f64, coarse: (usize, usize), coarse_dx: f64) -> Vec<f64> {
     let (fx, fy, nz) = fine;
     let (cx, cy) = coarse;
     let mut out = vec![0.0; cx * cy * nz];
+    if cx == 0 || cy == 0 {
+        return out;
+    }
+    let scale = fine_dx / coarse_dx;
     for k in 0..nz {
         for j in 0..fy {
+            let cj = (((j as f64 + 0.5) * scale).floor().max(0.0) as usize).min(cy - 1);
             for i in 0..fx {
-                let (ci, cj) = ((i / 2).min(cx - 1), (j / 2).min(cy - 1));
+                let ci = (((i as f64 + 0.5) * scale).floor().max(0.0) as usize).min(cx - 1);
                 out[k * cx * cy + cj * cx + ci] += q[k * fx * fy + j * fx + i];
             }
         }
@@ -907,25 +916,16 @@ fn solve_thermal(
     assemble_s: &mut f64,
     raster_s: &mut f64,
 ) -> Result<(Vec<f32>, Vec<LevelInfo>, Stencil, Mask), String> {
-    // Heat restricted from the current grid, level by level, so that every level sees the same watts.
-    let mut heats: Vec<Vec<f64>> = vec![q_fine.to_vec()];
+    // Heat restricted from the finest current grid directly to each thermal level, conserving total watts
+    // for arbitrary thermal_dx_mm / dx_mm ratios (including non-powers-of-two).
     let e = Mask::new(p.bbox, p.layers.len(), p.settings.dx_mm);
-    let mut shape = (e.nx, e.ny, e.nz);
-    let mut d = p.settings.dx_mm;
-    while d < *dxs.last().unwrap() - 1e-9 {
-        d *= 2.0;
-        let c = Mask::new(p.bbox, p.layers.len(), d);
-        let next = coarsen_heat(heats.last().unwrap(), shape, (c.nx, c.ny));
-        heats = vec![next];
-        shape = (c.nx, c.ny, c.nz);
-    }
-    for &dx in dxs.iter().rev().skip(1) {
-        let c = Mask::new(p.bbox, p.layers.len(), dx);
-        let next = coarsen_heat(heats.last().unwrap(), shape, (c.nx, c.ny));
-        heats.push(next);
-        shape = (c.nx, c.ny, c.nz);
-    }
-    heats.reverse();
+    let heats: Vec<Vec<f64>> = dxs
+        .iter()
+        .map(|&dx| {
+            let c = Mask::new(p.bbox, p.layers.len(), dx);
+            restrict_heat(q_fine, (e.nx, e.ny, e.nz), p.settings.dx_mm, (c.nx, c.ny), dx)
+        })
+        .collect();
     let mut x: Vec<f32> = Vec::new();
     let mut last = None;
     let mut levels = Vec::new();

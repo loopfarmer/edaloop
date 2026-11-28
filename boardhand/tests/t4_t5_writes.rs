@@ -78,13 +78,14 @@ fn t4_add_then_delete_large() {
 fn t4_kicad_loads_a_board_with_added_items() {
     let dir = work("t4_kicad");
     let Some(board) = copy_fixture(small(), &dir) else { return };
-    // Track and via counts as pcbnew reads them, before the edit and after.
+    // Track and via counts as KiCad reads them, before the edit and after.
     let py = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nprint(len([t for t in b.GetTracks() if t.GetClass()=='PCB_VIA']), len(b.GetTracks()))";
+    let ipc = "import os,sys\nfrom kipy import KiCad\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board();v=len(list(b.get_vias()));print(v,v+len(list(b.get_tracks())))\nfinally:\n k.close()";
     let counts = |out: &str| -> (usize, usize) {
         let n: Vec<usize> = out.split_whitespace().filter_map(|x| x.parse().ok()).collect();
         (n[0], n[1])
     };
-    let before = pcbnew(py, &[&board]).map(|o| counts(&o));
+    let before = inspect_board_py(py, ipc, &[&board]).map(|o| counts(&o));
     let mut m = Mcp::start(&dir, &[]);
     m.initialize();
     m.load(json!("board_edit"));
@@ -94,9 +95,9 @@ fn t4_kicad_loads_a_board_with_added_items() {
     assert_eq!(v["outcome"], "complete", "{v}");
     assert_eq!(v["result"]["item"]["layers"], json!(["F.Cu", "B.Cu"]));
     assert!(kicad_loads(&board).is_some());
-    if let (Some(out), Some((vias, tracks))) = (pcbnew(py, &[&board]), before) {
+    if let (Some(out), Some((vias, tracks))) = (inspect_board_py(py, ipc, &[&board]), before) {
         // Any board: KiCad sees exactly the one via and the one track added, as well as what was there.
-        assert_eq!(counts(&out), (vias + 1, tracks + 2), "pcbnew read {out}, before the edit {vias} vias in {tracks} tracks");
+        assert_eq!(counts(&out), (vias + 1, tracks + 2), "KiCad read {out}, before the edit {vias} vias in {tracks} tracks");
         // The original fixture's own counts, which another board can't be held to.
         if std::env::var("BOARDHAND_FIXTURE_SMALL_IS_ORIGINAL").is_ok() {
             assert!(out.contains("122 142"), "{out}");
@@ -312,12 +313,14 @@ fn footprint_move_agrees_with_kicad() {
     let dir = work("t5_move");
     let Some(board) = copy_fixture(small(), &dir) else { return };
     let py_before = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nf=b.FindFootprintByReference('J1')\nprint(f.GetPosition().x,f.GetPosition().y,f.GetOrientationDegrees())\nfor p in f.Pads(): print(p.GetNumber(),p.GetPosition().x,p.GetPosition().y,p.GetOrientationDegrees())\nfor z in f.Zones(): print('zone',z.Outline().BBox().GetX(),z.Outline().BBox().GetY())";
-    let Some(_) = pcbnew(py_before, &[&board]) else { return };
+    let ipc_before = "import os,sys\nfrom kipy import KiCad\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board();f=next((x for x in b.get_footprints() if x.reference_field.text.value=='J1'),None)\n if f is None: raise SystemExit('no J1')\n print(f.position.x,f.position.y,f.orientation.degrees)\nfinally:\n k.close()";
+    let Some(_) = inspect_board_py(py_before, ipc_before, &[&board]) else { return };
     // KiCad's own move, on a second copy, is the reference.
     let reference = dir.join("ref.kicad_pcb");
     fs::copy(&board, &reference).unwrap();
     let py_move = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nf=b.FindFootprintByReference('J1')\nf.SetOrientationDegrees(45)\nf.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(20),pcbnew.FromMM(30)))\nfor p in f.Pads(): print(p.GetNumber(),p.GetPosition().x,p.GetPosition().y,round(p.GetOrientationDegrees(),3))\nprint(f.GetPosition().x,f.GetPosition().y,f.GetOrientationDegrees())";
-    let want = pcbnew(py_move, &[&reference]).unwrap();
+    let ipc_move = "import os,sys\nfrom kipy import KiCad\nfrom kipy.geometry import Angle,Vector2\nfrom kipy.proto.common.commands import editor_commands_pb2\nfrom kipy.util import pack_any\nfrom kipy.util.units import from_mm\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board();f=next(x for x in b.get_footprints() if x.reference_field.text.value=='J1')\n c=b.begin_commit();f.orientation=Angle.from_degrees(45);f.position=Vector2.from_xy(from_mm(20),from_mm(30))\n cmd=editor_commands_pb2.UpdateItems();cmd.header.document.CopyFrom(b.document);cmd.items.append(pack_any(f.proto))\n b.client.send(cmd,editor_commands_pb2.UpdateItemsResponse);b.push_commit(c,'move')\n f=next(x for x in b.get_footprints() if x.reference_field.text.value=='J1')\n for p in sorted(f.definition.pads,key=lambda x:x.number): print(p.number,p.position.x,p.position.y,round(p.padstack.angle.degrees,3))\n print(f.position.x,f.position.y,f.orientation.degrees)\nfinally:\n k.close()";
+    let want = inspect_board_py(py_move, ipc_move, &[&reference]).unwrap();
 
     let mut m = Mcp::start(&dir, &[]);
     m.initialize();
@@ -331,7 +334,8 @@ fn footprint_move_agrees_with_kicad() {
     assert_eq!(r["result"]["footprint"]["position"]["y"].as_f64(), Some(30.0));
     assert!(r["result"]["uuid"].is_string());
     let py_read = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nf=b.FindFootprintByReference('J1')\nfor p in f.Pads(): print(p.GetNumber(),p.GetPosition().x,p.GetPosition().y,round(p.GetOrientationDegrees(),3))\nprint(f.GetPosition().x,f.GetPosition().y,f.GetOrientationDegrees())";
-    let got = pcbnew(py_read, &[&board]).unwrap();
+    let ipc_read = "import os,sys\nfrom kipy import KiCad\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board();f=next(x for x in b.get_footprints() if x.reference_field.text.value=='J1')\n for p in sorted(f.definition.pads,key=lambda x:x.number): print(p.number,p.position.x,p.position.y,round(p.padstack.angle.degrees,3))\n print(f.position.x,f.position.y,f.orientation.degrees)\nfinally:\n k.close()";
+    let got = inspect_board_py(py_read, ipc_read, &[&board]).unwrap();
     println!("t5 move: kicad's own {want}\nours {got}");
     // Compare within a nanometre or two: KiCad rounds its rotated pad positions.
     let parse = |s: &str| -> Vec<Vec<f64>> {
@@ -351,13 +355,38 @@ fn footprint_move_agrees_with_kicad() {
 fn footprint_zone_moves_with_its_footprint() {
     let dir = work("t5_zone");
     let Some(board) = copy_fixture(small(), &dir) else { return };
-    if !Path::new(kicad_py()).exists() {
-        println!("NOTICE: KiCad's Python is absent, skipping");
+    if is_kicad11_board(&board) || !Path::new(kicad_py()).exists() {
+        let ipc = "import os,sys\nfrom kipy import KiCad\nfrom kipy.board_types import Zone\nk=KiCad(headless=True,kicad_cli_path=os.environ.get('EDALOOP_KICAD_CLI'),file_path=os.path.abspath(sys.argv[1]),timeout_ms=30000)\ntry:\n b=k.get_board()\n for f in b.get_footprints():\n  zs=[i for i in f.definition.items if isinstance(i,Zone)]\n  if zs:\n   bb=b.get_item_bounding_box(zs[0])\n   print(f.reference_field.text.value,f.position.x,f.position.y,bb.pos.x,bb.pos.y,bb.size.x,bb.size.y)\n   break\nfinally:\n k.close()";
+        let Some(before) = kicad_ipc(ipc, &[&board]) else { return };
+        let line = before.lines().rfind(|l| !l.is_empty()).unwrap_or("");
+        if line.is_empty() {
+            println!("NOTICE: fixture has no footprint-owned zones, skipping");
+            return;
+        }
+        let v: Vec<&str> = line.split_whitespace().collect();
+        let refdes = v[0].to_string();
+        let n = |i: usize| v[i].parse::<i64>().unwrap();
+        let (fx, fy, bx, by, bw, bh) = (n(1), n(2), n(3), n(4), n(5), n(6));
+        let mut m = Mcp::start(&dir, &[]);
+        m.initialize();
+        m.load(json!("board_edit"));
+        let (tx, ty) = (fx as f64 / 1e6 + 1.0, fy as f64 / 1e6 + 2.0);
+        let r = m.call("footprint_move", json!({"board": board, "expected_revision": sha(&board), "reference": refdes, "position": {"x": tx, "y": ty}}));
+        assert_eq!(r["outcome"], "complete", "{r}");
+        let after = kicad_ipc(ipc, &[&board]).unwrap();
+        let line = after.lines().rfind(|l| !l.is_empty()).unwrap_or("");
+        let w: Vec<&str> = line.split_whitespace().collect();
+        let k = |i: usize| w[i].parse::<i64>().unwrap();
+        assert_eq!((k(3), k(4), k(5), k(6)), (bx + 1_000_000, by + 2_000_000, bw, bh), "{before} -> {after}");
         return;
     }
     let py = "import pcbnew,sys\nb=pcbnew.LoadBoard(sys.argv[1])\nfor f in b.GetFootprints():\n  zs=list(f.Zones())\n  if zs:\n    z=zs[0]; bb=z.Outline().BBox()\n    print(f.GetReference(),f.GetPosition().x,f.GetPosition().y,bb.GetX(),bb.GetY(),bb.GetWidth(),bb.GetHeight())\n    break";
-    let before = pcbnew(py, &[&board]).unwrap();
+    let Some(before) = pcbnew(py, &[&board]) else { return };
     let line = before.lines().rfind(|l| !l.is_empty()).unwrap_or("");
+    if line.is_empty() {
+        println!("NOTICE: fixture has no footprint-owned zones, skipping");
+        return;
+    }
     let v: Vec<&str> = line.split_whitespace().collect();
     let refdes = v[0].to_string();
     let n = |i: usize| v[i].parse::<i64>().unwrap();
