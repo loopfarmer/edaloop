@@ -371,7 +371,10 @@ fn footprint_zone_moves_with_its_footprint() {
         m.initialize();
         m.load(json!("board_edit"));
         let (tx, ty) = (fx as f64 / 1e6 + 1.0, fy as f64 / 1e6 + 2.0);
-        let r = m.call("footprint_move", json!({"board": board, "expected_revision": sha(&board), "reference": refdes, "position": {"x": tx, "y": ty}}));
+        let r = m.call(
+            "footprint_move",
+            json!({"board": board, "expected_revision": sha(&board), "reference": refdes, "position": {"x": tx, "y": ty}}),
+        );
         assert_eq!(r["outcome"], "complete", "{r}");
         let after = kicad_ipc(ipc, &[&board]).unwrap();
         let line = after.lines().rfind(|l| !l.is_empty()).unwrap_or("");
