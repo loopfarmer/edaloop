@@ -132,7 +132,7 @@ def bench_template(kind: str, **params) -> dict:
                 ".control",
                 f"noise v({out_node}) {src} {sweep}",
                 "setplot noise2",
-                "let onoise_rms = onoise_total[0]",
+                "let onoise_rms = onoise_total",
                 "print onoise_rms",
                 "quit",
                 ".endc",

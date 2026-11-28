@@ -5344,6 +5344,7 @@ def test_em_crosscheck_spread_uses_agreeing_when_outlier_diagnosed(monkeypatch, 
 
 
 def test_kicad_ipc_courtyard_box_reads_back_courtyard():
+    pytest.importorskip("kipy")
     from kipy.proto.board.board_types_pb2 import BoardLayer
 
     from edaloop import kicad_ipc_ops as ipc

@@ -253,6 +253,20 @@ pub fn kicad_ipc(snippet: &str, args: &[&Path]) -> Option<String> {
         return None;
     }
     let out = Command::new(&py).arg("-c").arg(snippet).args(args).env("EDALOOP_KICAD_CLI", kicad_cli()).output().unwrap();
+    for p in args {
+        if let (Some(parent), Some(stem)) = (p.parent(), p.file_stem().and_then(|s| s.to_str())) {
+            for ext in ["kicad_pro.lck", "kicad_pcb.lck"] {
+                let lck = parent.join(format!("~{stem}.{ext}"));
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while lck.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if lck.exists() && p.components().any(|c| c.as_os_str() == "fixtures") {
+                    let _ = fs::remove_file(&lck);
+                }
+            }
+        }
+    }
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "kicad_ipc failed: {}\n{stdout}", String::from_utf8_lossy(&out.stderr));
     Some(stdout)
